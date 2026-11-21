@@ -63,3 +63,23 @@ shows an error such as "Safari can't open the page". The user can then sign in o
 verified, open FitMix on your iPhone to sign in." It also needs Universal Links (an
 `apple-app-site-association` file on the domain plus the Associated Domains entitlement), so the
 same HTTPS link opens FitMix when tapped on an iPhone.
+
+## Troubleshooting with the debug log
+
+Debug builds log each step under subsystem `app.fitmix`, category `AuthFlow`. In Xcode's console,
+filter on `[AuthFlow]`. Release builds contain none of this. The log shows only scheme and host,
+HTTP status, and Supabase's error code. It never shows the full URL, code, verifier, tokens,
+email or password.
+
+| Xcode `[AuthFlow]` line | Supabase Auth log entry |
+| --- | --- |
+| `client project=https://<ref>.supabase.co …` | Confirms which project the app talks to |
+| `signup started redirect_to=fitmix://confirm-email`, then `signup result=…` | `POST /signup` |
+| `resend started …`, then `resend result=…` | `POST /resend` |
+| *(no app line: this happens in the browser)* | `GET /verify` |
+| `callback received origin=fitmix://confirm-email …` | Proves `/verify` redirected to the app |
+| `confirm exchange result=…` | `POST /token` (`grant_type=pkce`) |
+
+If `/verify` succeeds but no `callback received` line appears, and the browser opens the Site URL
+with `?code=…`, Supabase rejected the redirect. Allow-list entries are case-sensitive: the entry
+must be exactly `fitmix://confirm-email`.
