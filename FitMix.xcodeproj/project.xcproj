@@ -18,6 +18,13 @@
         "up-to-next-major-version": "2.55.7",
       },
     },
+    {
+      "kind": "remote",
+      "repository": "https://github.com/Shopify/checkout-kit",
+      "version": {
+        "up-to-next-major-version": "4.2.0",
+      },
+    },
   ],
   "files": [
     { "kind": "folder", "path": "FitMix", "target-membership": [ "FitMix" ] },
@@ -44,6 +51,16 @@
         {
           "package": "supabase-swift",
           "product-name": "Supabase",
+          "build-phase": { "build-phase": "frameworks" },
+        },
+        {
+          "package": "checkout-kit",
+          "product-name": "ShopifyCheckoutKit",
+          "build-phase": { "build-phase": "frameworks" },
+        },
+        {
+          "package": "checkout-kit",
+          "product-name": "EmbeddedCheckoutProtocol",
           "build-phase": { "build-phase": "frameworks" },
         },
       ],

@@ -11,7 +11,10 @@ import SwiftUI
     /// The cart. Saved per account when signed in; in memory only when signed out.
     @State private var cart = CartStore()
 
-    init() { FMFonts.register() }
+    init() {
+        FMFonts.register()
+        CheckoutLog.configure()
+    }
 
     var body: some Scene {
         WindowGroup {

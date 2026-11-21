@@ -2,8 +2,9 @@ import SwiftUI
 import SafariServices
 
 /// Review of the current look's purchasable pieces, including confirmed swaps.
-/// Each piece can be added to the cart in its chosen size. There's no checkout yet, so buying still
-/// happens on the retailer's page.
+/// Each piece can be added to the cart in its chosen size. A piece whose listing is a Shopify product
+/// opens `VariantPickerSheet` to choose the store's exact variant, and can then be checked out in
+/// FitMix from the cart. Other retailers still sell on their own page.
 struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
     @Environment(CartStore.self) private var cart
@@ -13,6 +14,16 @@ struct ShoppingReviewView: View {
     @State private var sizes: [UUID: String] = [:]
     @State private var retailer: URL?
     @State private var cartFailure: String?
+    /// The Shopify listing whose variant picker is open.
+    @State private var picking: VariantPick?
+    @State private var showCart = false
+
+    struct VariantPick: Identifiable {
+        var product: CatalogProduct
+        var link: ShopifyProductLink
+        var autoPick: DebugCheckoutScript.Pick?
+        var id: String { product.id }
+    }
 
     var body: some View {
         NavigationStack {
@@ -33,7 +44,10 @@ struct ShoppingReviewView: View {
             .navigationTitle("Shop This Look")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .navigationDestination(isPresented: $showCart) { CartView(showsDone: false) }
         }
+        .sheet(item: $picking) { VariantPickerSheet(product: $0.product, link: $0.link, autoPick: $0.autoPick) }
+        .task { await runDebugScript() }
         .preferredColorScheme(.light)
         .sheet(item: $retailer) { SafariView(url: $0).ignoresSafeArea() }
         .alert("Couldn't add to cart", isPresented: Binding(get: { cartFailure != nil }, set: { if !$0 { cartFailure = nil } })) {
@@ -137,7 +151,9 @@ struct ShoppingReviewView: View {
                 Spacer(minLength: 0)
             }
             HStack {
-                if product.sizes.isEmpty {
+                if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
+                    Text("Sizes and colours from \(link.host)").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
+                } else if product.sizes.isEmpty {
                     Text("Sizes unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
                 } else {
                     Menu {
@@ -189,6 +205,27 @@ extension ShoppingReviewView {
     /// none (most live retailer matches) is added without a size.
     @ViewBuilder
     fileprivate func addButton(product: CatalogProduct, size: String?) -> some View {
+        if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
+            Button {
+                picking = VariantPick(product: product, link: link)
+            } label: {
+                Label(cart.containsProduct(product.id) ? "Add Another" : "Choose Size & Add",
+                      systemImage: cart.containsProduct(product.id) ? "checkmark" : "bag.badge.plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 36)
+                    .background(AuthPalette.container, in: Capsule())
+            }
+            .foregroundStyle(cart.containsProduct(product.id) ? Color.fmGreen : AuthPalette.onSurface)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
+        } else {
+            plainAddButton(product: product, size: size)
+        }
+    }
+
+    @ViewBuilder
+    fileprivate func plainAddButton(product: CatalogProduct, size: String?) -> some View {
         let needsSize = !product.sizes.isEmpty && size == nil
         if !needsSize && cart.contains(productID: product.id, size: size) {
             Label("In Cart", systemImage: "checkmark")
@@ -212,6 +249,26 @@ extension ShoppingReviewView {
             .frame(minHeight: 44)
             .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
         }
+    }
+}
+
+extension ShoppingReviewView {
+    /// Debug: `FM_DEBUG_CHECKOUT_PICKS` adds each scripted piece through its variant picker, then opens the cart.
+    fileprivate func runDebugScript() async {
+        guard let script = DebugCheckoutScript.current, let look = studio.look else { return }
+        try? await Task.sleep(for: .seconds(1))
+        for category in script.order {
+            guard let pick = script.picks[category],
+                  let product = look.pieces.first(where: { $0.detected.category == category })?.product,
+                  let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) else {
+                CheckoutLog.record("debug-no-listing", store: "-", note: "category=\(category.rawValue)")
+                continue
+            }
+            picking = VariantPick(product: product, link: link, autoPick: pick)
+            for _ in 0..<80 where picking != nil { try? await Task.sleep(for: .milliseconds(250)) }
+            try? await Task.sleep(for: .milliseconds(700))
+        }
+        showCart = true
     }
 }
 

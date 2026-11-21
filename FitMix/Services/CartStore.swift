@@ -20,8 +20,9 @@ enum CartStoreError: LocalizedError, Equatable {
 /// memory only. Those items move into the account's cart when the user signs in. Signing out
 /// clears the cart from memory; the saved file comes back when that account signs in again.
 ///
-/// There's no checkout yet. When there is, the server prices the order; `subtotal` here is only
-/// the sum of the prices the listings showed when they were added.
+/// Lines are grouped by retailer, and each Shopify store gets its own checkout inside FitMix
+/// (`RetailerCheckout`). The store prices the order; `subtotal` here is only the sum of the prices
+/// the listings showed when they were added. A completed checkout removes only what that store sold.
 @Observable
 final class CartStore {
     static let maxQuantity = 10
@@ -49,7 +50,38 @@ final class CartStore {
         items.contains { $0.isSameLine(productID: productID, size: size) }
     }
 
+    /// True when any line of this product is in the cart, whatever its variant.
+    func containsProduct(_ productID: String) -> Bool { items.contains { $0.productID == productID } }
+
     func localImage(for item: CartItem) -> UIImage? { localImages[item.productID] }
+
+    // MARK: Retailers
+
+    struct RetailerGroup: Identifiable {
+        var id: String
+        var name: String
+        var items: [CartItem]
+        /// Every line is an exact Shopify variant, so this store can be checked out in FitMix.
+        var canCheckOutInApp: Bool { items.allSatisfy { $0.shopify != nil } }
+        var count: Int { items.reduce(0) { $0 + $1.quantity } }
+    }
+
+    /// Lines grouped by store, in the order each store was first added.
+    var groups: [RetailerGroup] {
+        var order: [String] = []
+        var byKey: [String: [CartItem]] = [:]
+        for item in items {
+            if byKey[item.retailerKey] == nil { order.append(item.retailerKey) }
+            byKey[item.retailerKey, default: []].append(item)
+        }
+        return order.map { key in
+            let lines = byKey[key] ?? []
+            return RetailerGroup(id: key, name: lines.first?.shopify?.storeName ?? lines.first?.retailer ?? key, items: lines)
+        }
+    }
+
+    /// Receipts of checkouts completed in this session, newest first.
+    private(set) var receipts: [CheckoutReceipt] = []
 
     // MARK: Account switching
 
@@ -79,6 +111,43 @@ final class CartStore {
         try update { Self.merge(item, into: &$0) }
     }
 
+    /// Adds one exact store variant of `product`, resolved from the store's product data.
+    func add(_ product: CatalogProduct, resolved: ShopifyProduct, variant: ShopifyProduct.Variant, quantity: Int = 1) throws {
+        if case .local(let image)? = product.image { localImages[product.id] = image }
+        let choices = resolved.options.indices.map { index in
+            ShopifyLine.Choice(name: resolved.options[index].name, value: variant.values.indices.contains(index) ? variant.values[index] : "")
+        }
+        let line = ShopifyLine(storeDomain: resolved.link.host, storeName: product.retailer ?? resolved.vendor ?? resolved.link.host,
+                               productHandle: resolved.link.handle, variantID: variant.id, variantTitle: variant.title,
+                               options: choices, colourFixedByListing: resolved.colourIsFixedByListing)
+        var item = CartItem(product: product, size: choices.first { ["size", "taille"].contains($0.name.lowercased()) }?.value)
+        item.shopify = line
+        item.quantity = min(max(quantity, 1), Self.maxQuantity)
+        if item.imageURL == nil { item.imageURL = resolved.imageURL }
+        // The store's current variant price, in the listing's currency when the listing gave one.
+        if let price = variant.price, item.currencyCode != nil { item.priceAmount = price }
+        try update { Self.merge(item, into: &$0) }
+    }
+
+    /// A store's checkout finished. Removes what that order contains (by variant and quantity) from
+    /// that store's lines only; other stores' lines are never touched. Returns the receipt.
+    @discardableResult
+    func completeCheckout(store: String, purchased: [Int64: Int], order: CheckoutReceipt) throws -> CheckoutReceipt {
+        receipts.insert(order, at: 0)
+        try update { items in
+            var remaining = purchased
+            items = items.compactMap { item in
+                guard item.retailerKey == store, let variant = item.shopify?.variantID, let bought = remaining[variant], bought > 0 else { return item }
+                let taken = min(bought, item.quantity)
+                remaining[variant] = bought - taken
+                var item = item
+                item.quantity -= taken
+                return item.quantity > 0 ? item : nil
+            }
+        }
+        return order
+    }
+
     func setQuantity(_ quantity: Int, for id: UUID) throws {
         guard items.contains(where: { $0.id == id }) else { throw CartStoreError.notFound }
         let clamped = min(max(quantity, 1), Self.maxQuantity)
@@ -102,7 +171,7 @@ final class CartStore {
     }
 
     private static func merge(_ item: CartItem, into items: inout [CartItem]) {
-        if let index = items.firstIndex(where: { $0.isSameLine(productID: item.productID, size: item.size) }) {
+        if let index = items.firstIndex(where: { $0.isSameLine(as: item) }) {
             items[index].quantity = min(items[index].quantity + item.quantity, maxQuantity)
         } else {
             items.append(item)

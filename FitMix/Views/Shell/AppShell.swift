@@ -138,6 +138,20 @@ struct AppShell: View {
                             }
                         }
                     }
+                    // Checkout proof of concept: select each scripted garment in turn (a new selection cancels
+                    // a search still running), wait for its match, then open Shop This Look.
+                    if let script = DebugCheckoutScript.current {
+                        Task {
+                            for category in script.order {
+                                guard let piece = studio.look?.pieces.first(where: { $0.detected.category == category }) else { continue }
+                                if studio.matchStates[piece.id] == nil { studio.select(piece.id) }
+                                for _ in 0..<60 where studio.matchStates[piece.id] == .searching || studio.matchStates[piece.id] == nil {
+                                    try? await Task.sleep(for: .milliseconds(250))
+                                }
+                            }
+                            router.showShopLook = true
+                        }
+                    }
                 }
             #endif
             case "closet": router.tab = .closet
