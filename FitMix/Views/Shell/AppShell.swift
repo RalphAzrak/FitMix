@@ -139,7 +139,7 @@ struct AppShell: View {
                         }
                     }
                     // Checkout proof of concept: select each scripted garment in turn (a new selection cancels
-                    // a search still running), wait for its match, then open the bag.
+                    // a search still running), wait for its match, then open Shop This Look.
                     if let script = DebugCheckoutScript.current {
                         Task {
                             for category in script.order {
@@ -149,7 +149,7 @@ struct AppShell: View {
                                     try? await Task.sleep(for: .milliseconds(250))
                                 }
                             }
-                            router.showCart = true
+                            router.showShopLook = true
                         }
                     }
                 }
