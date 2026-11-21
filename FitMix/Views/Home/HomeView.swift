@@ -10,6 +10,7 @@ struct HomeView: View {
     @State private var showPhotoSource = false
     @State private var photoCandidate: PhotoCandidate?
     @State private var placeholder: PlaceholderScreen?
+    @Environment(StudioStore.self) private var studio
     @State private var confirmDelete = false
     @State private var authPreview: AuthView.Mode?
     /// Set when sign-in or sign-up finishes and avatar setup still needs doing; opens setup once Account closes.
@@ -38,7 +39,18 @@ struct HomeView: View {
         .fullScreenCover(isPresented: $showSetup) {
             SetupFlowView(startAt: store.profile.currentStep)
         }
-        .fullScreenCover(item: $placeholder) { PlaceholderView(screen: $0) }
+        .fullScreenCover(item: $placeholder) { screen in
+            switch screen {
+            case .studio:
+                StudioView(openCamera: { placeholder = .scanFits })
+            case .scanFits:
+                // The Camera hands its confirmed scan to Studio here.
+                PlaceholderView(screen: screen) { scan in
+                    studio.open(scan)
+                    placeholder = .studio
+                }
+            }
+        }
         .fullScreenCover(item: $authPreview, onDismiss: {
             if setupAfterAuth {
                 setupAfterAuth = false
@@ -77,6 +89,8 @@ struct HomeView: View {
             case "metrics": showMetricsEditor = true
             case "auth": authPreview = .signIn
             case "auth-create": authPreview = .createAccount
+            case "studio": placeholder = .studio
+            case "camera": placeholder = .scanFits
             default: break
             }
         }
@@ -99,7 +113,7 @@ struct HomeView: View {
         }
     }
 
-    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | bottom.
+    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | studio | camera | bottom.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -574,16 +588,16 @@ enum PlaceholderScreen: String, Identifiable {
     case scanFits, studio
     var id: String { rawValue }
 
-    var title: String { self == .scanFits ? "Scan Fits" : "Studio" }
-    var icon: String { self == .scanFits ? "camera.viewfinder" : "paintpalette" }
-    var detail: String {
-        self == .scanFits ? "Scanning clothing with the camera isn't built yet. It comes after the avatar milestone."
-                          : "Trying outfits on your avatar isn't built yet. It comes after the avatar milestone."
-    }
+    var title: String { "Scan Fits" }
+    var icon: String { "camera.viewfinder" }
+    var detail: String { "Scanning clothing with the camera isn't built yet. It comes after the avatar milestone." }
 }
 
+/// Stands in for the Camera until the scanner lands. `finishScan` is the hand-off the real
+/// Camera calls with its confirmed result.
 struct PlaceholderView: View {
     var screen: PlaceholderScreen
+    var finishScan: (OutfitScan) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -597,6 +611,17 @@ struct PlaceholderView: View {
                 .foregroundStyle(Color.fmSecondary)
                 .multilineTextAlignment(.center)
             Spacer()
+            #if DEBUG
+            if SampleScans.enabled {
+                VStack(spacing: 8) {
+                    Eyebrow(text: "Debug · sample Camera output")
+                    Button("Finish with Sample Scan A") { finishScan(SampleScans.scanA()) }
+                        .buttonStyle(FMOutlineButtonStyle())
+                    Button("Finish with Sample Scan B") { finishScan(SampleScans.scanB()) }
+                        .buttonStyle(FMOutlineButtonStyle())
+                }
+            }
+            #endif
             Button("Back to My Avatar") { dismiss() }.buttonStyle(FMFilledButtonStyle(color: .fmCharcoal))
         }
         .padding(24)
