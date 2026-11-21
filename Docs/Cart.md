@@ -1,8 +1,8 @@
 # Cart
 
-Shop This Look → **Add to Cart** on each piece → **Cart** (the bag button on Home, or **View Cart** at the
-bottom of Shop This Look). There's no checkout yet: the Checkout button is disabled and says so, and each item
-keeps **View at retailer**.
+Shop This Look (the bag button) → **Add to Cart** on each piece → **View Cart** at the bottom of Shop This
+Look. Shopify listings open a variant picker instead, and the cart checks each Shopify store out inside FitMix:
+see [Checkout.md](Checkout.md). Other retailers keep **View at retailer**.
 
 | Piece | Where |
 | --- | --- |
@@ -20,7 +20,7 @@ keeps **View at retailer**.
 - **Lines.** The same product in the same size is one line; adding it again raises the quantity (1 to 10).
 - **Prices.** Each line stores the listed price at the time it was added. The subtotal adds those up, says
   "for N of M pieces" when some have no price, and shows "Prices in several currencies" instead of adding
-  different currencies. Checkout must ask the server for current prices. It must never charge these stored values.
+  different currencies. These are never charged: each store's own checkout prices the order.
 - **Fixtures.** Test-fixture listings are labeled **Test fixture** in the cart.
 
 ## Storage

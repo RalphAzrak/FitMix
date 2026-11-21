@@ -1,6 +1,15 @@
 {
-  "originHash" : "ccc727310637079b7355ccf59e7d153c26677020c1a43e177b78cc9df7963c0f",
+  "originHash" : "6f1cb74958f6a7f51e1ff3c66bab70b6bb0ce694cc40c958b95c2feeb9fadf7b",
   "pins" : [
+    {
+      "identity" : "checkout-kit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Shopify/checkout-kit",
+      "state" : {
+        "revision" : "b407efb334fbb2ff0520342de0e514f9f9bbce2e",
+        "version" : "4.2.0"
+      }
+    },
     {
       "identity" : "supabase-swift",
       "kind" : "remoteSourceControl",
