@@ -1,8 +1,13 @@
 # FitMix backend
 
-A small server between the iPhone app and OpenAI. The app sends the user's full-body photo, optional selfie,
-height and weight; the server adds the drawing instruction and calls OpenAI's Image Edits API, then returns the
-finished portrait. The OpenAI key lives only here, in an environment variable. It is never in the app or in Git.
+A small server between the iPhone app and the services it uses. Provider keys live only here, in environment
+variables. They are never in the app or in Git.
+
+- **Avatars:** the app sends the user's full-body photo, optional selfie, height and weight. The server adds the
+  drawing instruction, calls OpenAI's Image Edits API, and returns the finished portrait.
+- **Retailer match:** the app sends the crop of one garment the user tapped in the live camera, with its
+  category. The server searches eBay's catalog and returns real listings in that category. See
+  [Retailer search setup](#retailer-search-setup).
 
 ## Run it on your Mac
 
@@ -36,18 +41,57 @@ using the app. `GET /health` says whether the server is ready.
 The instruction sent with the photos is in `app/prompt.py`. Model, quality and limits are set in `.env`
 (see `.env.example`).
 
+`POST /v1/garment-match` (multipart form)
+
+| Field | |
+|---|---|
+| `crop` | Required. JPEG, PNG or WebP of the selected garment only, up to 2 MB. The full outfit frame is never sent. |
+| `category` | Required. `jacket`, `tshirt`, `pants` or `shoes`. Only this category is searched. |
+| `color` | Optional, e.g. `navy`. Measured on the phone. |
+| `brand_hints` | Optional, comma-separated words read on the garment on the phone (at most three are used). |
+
+Returns `{"status": "matched" | "no_match", "category", "provider", "fixture", "results": [...]}`. Each result has
+`id`, `title`, `retailer`, `seller`, `image_url`, `url`, `price` (`{"value", "currency"}` exactly as listed, or
+`null`) and `match` (always `"similar"`; image search is no evidence of the exact product). Errors use the same
+`{"error": {"code", "message"}}` shape. `not_configured` and `provider_auth` aren't worth retrying. The other
+codes (`provider_busy`, `provider_timeout`, `provider_unreachable`, `provider_error`, `provider_rejected`) are.
+
+## Retailer search setup
+
+The provider is the **eBay Browse API** (`item_summary/search_by_image`), eBay's official, authorized API for
+finding listings by image. It returns each listing's image, title, price, currency and link.
+
+1. Create a free account at [developer.eBay.com](https://developer.ebay.com/) and create a **Production** keyset.
+   eBay asks every production keyset to handle *Marketplace Account Deletion* notifications, or to apply for
+   an exemption. FitMix stores no eBay user data, so the exemption applies.
+2. In `Backend/.env`, set `EBAY_CLIENT_ID` (the keyset's App ID) and `EBAY_CLIENT_SECRET` (its Cert ID).
+   Optionally set `EBAY_MARKETPLACE_ID` (default `EBAY_US`; prices come back in that site's currency).
+3. Restart `./run.sh`. `GET /health` should say `"match_ready": true, "match_provider": "ebay"`.
+
+Cost: the API is free. eBay applies a daily call limit per keyset, shown on the developer portal. Each FitMix
+search makes two calls (men's and women's category), plus a token request about every two hours.
+
+To try the app without keys: `FITMIX_MATCH_PROVIDER=fixture ./run.sh` returns one listing marked as a fixture
+("Test fixture … (not a real listing)", no link) without contacting eBay.
+
+The eBay category IDs searched for each garment are in `app/retail.py` (`EBAY_CATEGORY_IDS`). Any listing whose
+eBay category doesn't name that garment is dropped. If eBay renumbers a category, searches for it show
+"No match found" rather than listings from another category.
+
 ## What happens to the photos
 
 The server keeps each photo in memory only while its request runs. It writes nothing to disk and logs only the
-number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the photos
-and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy.
+number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the avatar
+photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For retailer
+search, eBay receives only the garment crop; its API terms govern what eBay does with it.
 
 ## Tests
 
     .venv/bin/pip install -r requirements-dev.txt
     .venv/bin/python -m pytest
 
-The tests replace OpenAI with a stand-in, so they need no key and send nothing.
+The tests replace OpenAI and eBay with stand-ins (eBay answers are shaped like its documented `ItemSummary`
+schema, not real listings), so they need no keys and send nothing.
 
 ## Before putting this on the internet
 
@@ -56,4 +100,4 @@ It is built to run on your own Mac for now. Before hosting it publicly:
 - Serve it over HTTPS and set the app's production address in `FitMix/Services/BackendConfig.swift`.
 - Replace the shared secret with a check of the signed-in user's Supabase session, so only FitMix accounts can
   request avatars. A secret shipped inside an app can be extracted.
-- Keep the per-device hourly limit, and set a spending limit on the OpenAI key.
+- Keep the per-device hourly limits, and set a spending limit on the OpenAI key.

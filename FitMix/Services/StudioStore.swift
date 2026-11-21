@@ -1,5 +1,15 @@
 import SwiftUI
 
+/// Where the retailer search for one garment stands.
+enum RetailerMatchState: Equatable {
+    case searching
+    case found(CatalogProduct)
+    /// The provider answered, but nothing credible in this category.
+    case noMatch
+    /// The search failed. `retryable` when trying again may work (network, busy provider).
+    case failed(String, retryable: Bool)
+}
+
 /// Owns the Studio session: the scan awaiting Outfit Review, the current scan (kept as the
 /// reference), the working look built from the garments the user chose, and the try-on preview.
 /// Lives for the app session, so leaving Studio and coming back keeps the look.
@@ -19,6 +29,18 @@ final class StudioStore {
     private(set) var lastSwap: (pieceID: UUID, category: GarmentCategory)?
     /// Counts looks opened this session, for "Look 01", "Look 02"…
     private(set) var lookNumber = 0
+    /// True for a look opened from a live camera selection: Studio shows the outfit frame first.
+    private(set) var isLiveLook = false
+
+    /// Retailer search per piece of a live look. Pieces without an entry haven't been searched.
+    private(set) var matchStates: [UUID: RetailerMatchState] = [:]
+    /// Crops used as search input only, never shown. Cut from the same frame as the scan image,
+    /// with the colour measured on the garment there.
+    @ObservationIgnored private var searchCrops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    /// Identifies the one search whose result may still be applied.
+    @ObservationIgnored private var activeSearch: (pieceID: UUID, token: UUID)?
+    @ObservationIgnored var searcher: RetailerSearching = RetailerSearchers.current
 
     /// The user's own full-body photo. Every render starts from this, never from a previous render.
     private(set) var tryOnSource: UIImage?
@@ -70,6 +92,10 @@ final class StudioStore {
     /// Try Full Look: replaces the previous look entirely with the chosen garments from `scan`.
     /// Its selection, swaps, and render are cleared.
     func open(_ scan: OutfitScan, selected: Set<UUID>? = nil, tryOnSource: UIImage?) {
+        cancelSearch()
+        matchStates = [:]
+        searchCrops = [:]
+        isLiveLook = false
         self.scan = scan
         hero = HeroFrame(scan: scan)
         let look = WorkingLook(scan: scan, selected: selected)
@@ -83,6 +109,94 @@ final class StudioStore {
         }
         self.tryOnSource = tryOnSource
         refreshPreview()
+    }
+
+    /// Camera → Studio: the user tapped one garment in the live feed. Opens a look on that frame
+    /// (shown whole, as the reference), with every garment detected in the same frame, the tapped
+    /// one selected, and starts a retailer search for it alone.
+    func openLive(_ selection: LiveGarmentSelection, tryOnSource: UIImage?) {
+        let frame = UIImage(cgImage: selection.frame, scale: 1, orientation: .up)
+        var crops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
+        var selectedID: UUID?
+        let garments = selection.garments.map { garment in
+            // No cutout or crop on the garment: cards show the retailer's photo, not the camera's.
+            let detected = DetectedGarment(category: garment.category, bounds: garment.bounds)
+            crops[detected.id] = (garment.crop, garment.color)
+            if garment.category == selection.selected { selectedID = detected.id }
+            return detected
+        }
+        let scan = OutfitScan(capturedAt: selection.capturedAt, image: frame, subjectBounds: nil, garments: garments)
+        #if DEBUG
+        if selection.isSample { SampleScans.register(scan) }
+        #endif
+        open(scan, tryOnSource: tryOnSource)
+        isLiveLook = true
+        searchCrops = crops
+        if let selectedID {
+            selectedPieceID = selectedID
+            findMatch(for: selectedID)
+        }
+    }
+
+    /// Searches retailers for one piece of a live look. Any search still running for another
+    /// piece is cancelled, and its result is dropped even if it arrives later.
+    func findMatch(for pieceID: UUID) {
+        guard isLiveLook, let crop = searchCrops[pieceID], let scanID = scan?.id,
+              let piece = look?.pieces.first(where: { $0.id == pieceID }) else { return }
+        cancelSearch()
+        let token = UUID()
+        activeSearch = (pieceID, token)
+        matchStates[pieceID] = .searching
+        let category = piece.detected.category
+        let searcher = self.searcher
+        searchTask = Task { [weak self] in
+            let state: RetailerMatchState
+            if let request = await GarmentSearchInput.make(category: category, crop: crop.image, measuredColor: crop.color) {
+                do {
+                    switch try await searcher.search(request) {
+                    case .noMatch: state = .noMatch
+                    case .matches(let listings):
+                        // Only listings in the selected category reach the card.
+                        if let best = listings.first { state = .found(Self.product(from: best, category: category)) } else { state = .noMatch }
+                    }
+                } catch is CancellationError {
+                    return
+                } catch let error as RetailerSearchError {
+                    state = .failed(error.localizedDescription, retryable: error.isRetryable)
+                } catch {
+                    state = .failed(error.localizedDescription, retryable: true)
+                }
+            } else {
+                state = .failed("This garment's image couldn't be prepared for search.", retryable: false)
+            }
+            guard let self, !Task.isCancelled, self.activeSearch?.token == token, self.scan?.id == scanID else { return }
+            self.apply(state, to: pieceID)
+        }
+    }
+
+    private func apply(_ state: RetailerMatchState, to pieceID: UUID) {
+        matchStates[pieceID] = state
+        activeSearch = nil
+        searchTask = nil
+        guard var look, let index = look.pieces.firstIndex(where: { $0.id == pieceID }) else { return }
+        if case .found(let product) = state { look.pieces[index].retailerMatch = product } else { look.pieces[index].retailerMatch = nil }
+        self.look = look
+    }
+
+    private func cancelSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        // A search cut short goes back to "not searched", rather than spinning forever.
+        if let active = activeSearch, matchStates[active.pieceID] == .searching { matchStates[active.pieceID] = nil }
+        activeSearch = nil
+    }
+
+    private static func product(from listing: RetailerListing, category: GarmentCategory) -> CatalogProduct {
+        CatalogProduct(id: listing.id, name: listing.title, retailer: listing.seller.map { "\(listing.retailer) · \($0)" } ?? listing.retailer,
+                       category: category, match: listing.exact ? .exact : .similar,
+                       image: listing.imageURL.map(ProductImage.remote),
+                       price: listing.price.flatMap { amount in listing.currency.map { Price(amount: amount, currencyCode: $0) } },
+                       retailerURL: listing.listingURL, isFixture: listing.isFixture)
     }
 
     /// The user added their photo from Studio. Renders the current look on it.
@@ -107,6 +221,12 @@ final class StudioStore {
 
     func select(_ id: UUID) {
         selectedPieceID = id
+        // In a live look, selecting a garment searches for it (once; a failure can be retried).
+        guard isLiveLook else { return }
+        switch matchStates[id] {
+        case nil: findMatch(for: id)
+        case .searching, .found, .noMatch, .failed: break
+        }
     }
 
     /// Confirms a swap on one piece (nil goes back to what was scanned), then re-renders the
