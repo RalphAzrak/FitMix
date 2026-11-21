@@ -171,8 +171,8 @@ struct StudioView: View {
     }
 
     private var liveTwinMessage: String {
-        let base = "Live Twin would show this look on your 3D avatar. Dressing the avatar isn't connected yet. Your Try-On uses your photo instead, and Street Look shows the scanned outfit."
-        return avatar.hasPersonalizedAvatar ? base : base + " You also need to create your avatar in My Avatar first."
+        let base = "Live Twin would show this look on your avatar. Dressing the avatar isn't connected yet. Your Try-On uses your photo instead, and Street Look shows the scanned outfit."
+        return avatar.profile.avatar != nil ? base : base + " You also need to create your avatar in My Avatar first."
     }
 
     // MARK: Garments
