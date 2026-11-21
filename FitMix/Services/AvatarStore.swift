@@ -53,6 +53,8 @@ enum HomeState: Equatable {
 final class AvatarStore {
     private(set) var profile = AvatarProfile()
     private(set) var bodyPhoto: UIImage?
+    /// Small copy of the full-body photo for lists and cards, so scrolling never resizes the full picture.
+    private(set) var bodyThumbnail: UIImage?
     private(set) var faceThumbnail: UIImage?
     private(set) var progressLabel = ""
     /// Changes whenever the avatar on screen needs rebuilding.
@@ -62,6 +64,7 @@ final class AvatarStore {
 
     let files: AvatarFiles
     @ObservationIgnored private var generationTask: Task<Void, Never>?
+    @ObservationIgnored private var photoSaveTask: Task<Void, Never>?
 
     init(files: AvatarFiles = .standard) {
         self.files = files
@@ -69,8 +72,13 @@ final class AvatarStore {
            let saved = try? JSONDecoder().decode(AvatarProfile.self, from: data) {
             profile = saved
         }
-        bodyPhoto = UIImage(contentsOfFile: files.bodyPhoto.path)
-        faceThumbnail = UIImage(contentsOfFile: files.faceThumbnail.path)
+        // Pictures are decoded in the background so the first screen appears straight away.
+        Task { [weak self, files] in
+            let images = await AvatarStore.readImages(files)
+            guard let self else { return }
+            if bodyPhoto == nil { bodyPhoto = images.body; bodyThumbnail = images.bodyThumbnail }
+            if faceThumbnail == nil { faceThumbnail = images.face }
+        }
         // The app was closed mid-generation: pick it back up.
         if profile.setupCompleted, profile.generation == .generating { generate() }
     }
@@ -130,18 +138,50 @@ final class AvatarStore {
         } catch { storageErrorMessage = AvatarError.saveFailed.localizedDescription }
     }
 
+    /// Saves an already-upright photo (see `UIImage.normalizedInBackground`). The screen updates at once;
+    /// the file is compressed and written in the background, and the avatar is regenerated after that.
     func saveBodyPhoto(_ image: UIImage, analysis: BodyPhotoAnalysis?) {
-        let normalized = image.normalized()
-        guard let data = normalized.jpegData(compressionQuality: 0.9) else { return }
-        do {
-            try prepareDirectory()
-            try write(data, to: files.bodyPhoto)
-            bodyPhoto = normalized
-            profile.hasBodyPhoto = true
-            profile.photoAnalysis = analysis
+        bodyPhoto = image
+        bodyThumbnail = nil
+        profile.hasBodyPhoto = true
+        profile.photoAnalysis = analysis
+        if profile.setupCompleted {
+            generationTask?.cancel()
+            profile.generation = .generating
+            progressLabel = "Saving your photo…"
+        }
+        do { try prepareDirectory() } catch { storageErrorMessage = AvatarError.saveFailed.localizedDescription; return }
+        photoSaveTask?.cancel()
+        photoSaveTask = Task { [files] in
+            let saved = await AvatarStore.writePhoto(image, to: files.bodyPhoto)
+            guard !Task.isCancelled else { return }
+            if bodyPhoto === image { bodyThumbnail = saved.thumbnail }
+            guard saved.ok else {
+                storageErrorMessage = AvatarError.saveFailed.localizedDescription
+                if profile.setupCompleted { profile.generation = .failed(AvatarError.saveFailed.localizedDescription) }
+                return
+            }
             persist()
             if profile.setupCompleted { generate() }
-        } catch { storageErrorMessage = AvatarError.saveFailed.localizedDescription }
+        }
+    }
+
+    @concurrent
+    private nonisolated static func writePhoto(_ image: UIImage, to url: URL) async -> (ok: Bool, thumbnail: UIImage?) {
+        let thumbnail = image.normalized(maxDimension: 360)
+        guard let data = image.jpegData(compressionQuality: 0.9) else { return (false, thumbnail) }
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            return (true, thumbnail)
+        } catch {
+            return (false, thumbnail)
+        }
+    }
+
+    @concurrent
+    private nonisolated static func readImages(_ files: AvatarFiles) async -> (body: UIImage?, bodyThumbnail: UIImage?, face: UIImage?) {
+        let body = UIImage(contentsOfFile: files.bodyPhoto.path)
+        return (body, body?.normalized(maxDimension: 360), UIImage(contentsOfFile: files.faceThumbnail.path)?.preparingForDisplay())
     }
 
     func setMeasurements(heightCm: Double, weightKg: Double) {
@@ -169,6 +209,8 @@ final class AvatarStore {
     func deleteEverything() {
         generationTask?.cancel()
         generationTask = nil
+        photoSaveTask?.cancel()
+        photoSaveTask = nil
         try? FileManager.default.removeItem(at: files.directory)
         profile = AvatarProfile()
         bodyPhoto = nil
@@ -221,7 +263,7 @@ final class AvatarStore {
         }
     }
 
-    static func loadFaceMesh(from files: AvatarFiles) -> FaceMeshData? {
+    nonisolated static func loadFaceMesh(from files: AvatarFiles) -> FaceMeshData? {
         guard let data = try? Data(contentsOf: files.faceMesh) else { return nil }
         return try? PropertyListDecoder().decode(FaceMeshData.self, from: data)
     }

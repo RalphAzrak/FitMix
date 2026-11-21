@@ -11,6 +11,8 @@ struct HomeView: View {
     @State private var photoCandidate: PhotoCandidate?
     @State private var placeholder: PlaceholderScreen?
     @State private var confirmDelete = false
+    @State private var scrollPosition = ScrollPosition(edge: .top)
+    @State private var benchmarkSpin = false
 
     var body: some View {
         @Bindable var store = store
@@ -19,7 +21,7 @@ struct HomeView: View {
                 header
                 StatusCard(state: store.homeState, stepsDone: store.profile.stepsDone, progress: store.progressLabel)
                 setupButton
-                AvatarPreviewCard(retry: store.generate)
+                AvatarPreviewCard(spin: benchmarkSpin)
                 SourceReferenceCard(changePhoto: { showPhotoSource = true })
                 BodyMetricsCard(edit: { showMetricsEditor = true })
                 actions
@@ -29,7 +31,9 @@ struct HomeView: View {
             .padding(.top, 12)
             .padding(.bottom, 28)
         }
+        .scrollPosition($scrollPosition)
         .defaultScrollAnchor(Self.debugScreen == "bottom" ? .bottom : .top)
+        .task { if Self.debugScreen == "benchmark" { await runBenchmark() } }
         .background(Color.fmBackground.ignoresSafeArea())
         .fullScreenCover(isPresented: $showSetup) {
             SetupFlowView(startAt: store.profile.currentStep)
@@ -38,7 +42,7 @@ struct HomeView: View {
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
         .sheet(item: $photoCandidate) { PhotoReplacementSheet(candidate: $0) }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
-            photoCandidate = PhotoCandidate(image: image.normalized())
+            Task { photoCandidate = PhotoCandidate(image: await image.normalizedInBackground()) }
         }
         .confirmationDialog("Delete your avatar?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete Avatar and Captures", role: .destructive) { store.deleteEverything() }
@@ -61,12 +65,47 @@ struct HomeView: View {
         }
     }
 
-    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | bottom.
+    /// Debug and profiling builds can open straight into a screen with
+    /// FM_DEBUG_SCREEN=setup | metrics | bottom | benchmark.
     private static var debugScreen: String? {
-        #if DEBUG
+        #if DEBUG || FM_BENCH
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
         #else
         nil
+        #endif
+    }
+
+    /// Scrolls the page up and down and spins the avatar with no one touching the screen,
+    /// so the same interactions can be recorded in Instruments run after run.
+    private func runBenchmark() async {
+        #if FM_BENCH
+        let monitor = FrameMonitor()
+        monitor.start("launch")
+        #endif
+        try? await Task.sleep(for: .seconds(4))
+        #if FM_BENCH
+        monitor.start("scroll")
+        #endif
+        for _ in 0..<4 {
+            withAnimation(.linear(duration: 1.2)) { scrollPosition.scrollTo(edge: .bottom) }
+            try? await Task.sleep(for: .seconds(1.5))
+            withAnimation(.linear(duration: 1.2)) { scrollPosition.scrollTo(edge: .top) }
+            try? await Task.sleep(for: .seconds(1.5))
+        }
+        #if FM_BENCH
+        monitor.start("spin")
+        #endif
+        benchmarkSpin = true
+        try? await Task.sleep(for: .seconds(6))
+        #if FM_BENCH
+        // Regenerate while spinning, as happens after the user edits a measurement.
+        monitor.start("regenerate")
+        store.generate()
+        try? await Task.sleep(for: .seconds(4))
+        #endif
+        benchmarkSpin = false
+        #if FM_BENCH
+        monitor.stop()
         #endif
     }
 
@@ -153,9 +192,9 @@ struct StatusCard: View {
     private var title: String {
         switch state {
         case .empty, .setupInProgress: "Create your avatar"
-        case .generating: "Creating avatar…"
-        case .ready: "Avatar ready"
-        case .error: "Avatar couldn't be created"
+        case .generating: "Saving your captures…"
+        case .ready: "Captures saved"
+        case .error: "Captures couldn't be processed"
         }
     }
 
@@ -164,7 +203,7 @@ struct StatusCard: View {
         case .empty: "Scan your face, add a photo, and enter your measurements."
         case .setupInProgress: "Setup saved: \(stepsDone) of 3 steps done."
         case .generating: progress.isEmpty ? "This takes a moment." : progress
-        case .ready: "Saved on this iPhone."
+        case .ready: "Your personalized avatar isn't built yet. Showing the preview avatar."
         case .error(let message): message
         }
     }
@@ -190,17 +229,19 @@ struct StatusCard: View {
 // MARK: Avatar preview
 
 struct AvatarPreviewCard: View {
-    var retry: () -> Void
-    @Environment(AvatarStore.self) private var store
-    @State private var resetToken = 0
+    var spin = false
+    /// Lives as long as the card, so the loaded model is reused across every redraw, scroll and rotation.
+    @State private var stage = AvatarStage()
+    @State private var pose: AvatarModelPose = Self.initialPose
 
-    private var personalized: Bool { store.hasPersonalizedAvatar }
+    /// The sample character bundled with the app. Personalized avatars will replace it once generation is wired up.
+    private static let previewModel = Bundle.main.url(forResource: "PreviewAvatar", withExtension: "usdz")
 
-    private var content: AvatarContent {
-        if personalized, let shape = store.profile.shape {
-            return AvatarContent(shape: shape, faceKind: store.profile.faceKind, revision: store.avatarRevision)
-        }
-        return AvatarContent(shape: .template, faceKind: nil, revision: 0)
+    private static var initialPose: AvatarModelPose {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["FM_DEBUG_POSE"] == "joint" { return .jointTest }
+        #endif
+        return .standing
     }
 
     var body: some View {
@@ -208,7 +249,7 @@ struct AvatarPreviewCard: View {
             HStack {
                 Eyebrow(text: "Studio preview", color: .white.opacity(0.6))
                 Spacer()
-                Text(personalized ? "Your avatar" : "Template avatar")
+                Text("Preview avatar")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
                     .padding(.horizontal, 8)
@@ -219,27 +260,41 @@ struct AvatarPreviewCard: View {
             .padding(.vertical, 12)
 
             ZStack {
-                AvatarSceneView(content: content, files: store.files, resetToken: resetToken)
-                    .accessibilityLabel(personalized ? "3D preview of your avatar" : "3D preview of a template avatar")
+                Color.fmStudio
+                AvatarModelView(stage: stage, modelURL: Self.previewModel)
+                    .opacity(stage.isLoading ? 0 : 1)
+                    .animation(.easeOut(duration: 0.25), value: stage.isLoading)
+                    .accessibilityLabel("3D preview avatar. Drag sideways to rotate.")
                 Text("Drag to rotate")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.fmSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(10)
                     .allowsHitTesting(false)
                 overlay
             }
-            .frame(height: 400)
+            .frame(height: 440)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .padding(.horizontal, 10)
 
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(caption.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                    Text(caption.detail).font(.system(size: 12)).foregroundStyle(.white.opacity(0.62))
+                    Text("Sample character").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                    Text("Not personalized yet").font(.system(size: 12)).foregroundStyle(.white.opacity(0.62))
                 }
                 Spacer(minLength: 8)
-                Button { resetToken += 1 } label: {
+                #if DEBUG
+                // Development aid: bends an elbow, a shoulder, a hip and a knee to check how skin and clothes deform.
+                Button { pose = pose == .standing ? .jointTest : .standing } label: {
+                    Image(systemName: pose == .standing ? "figure.arms.open" : "figure.stand")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.white.opacity(0.14), in: Circle())
+                }
+                .accessibilityLabel(pose == .standing ? "Show joint test pose" : "Show standing pose")
+                #endif
+                Button { stage.resetView() } label: {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
@@ -252,49 +307,27 @@ struct AvatarPreviewCard: View {
             .padding(.vertical, 10)
         }
         .background(Color.fmCharcoal, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
-
-    private var caption: (title: String, detail: String) {
-        guard personalized, let shape = store.profile.shape else {
-            return ("Standard proportions", "Not personalized yet")
-        }
-        let face = store.profile.faceKind == .mesh ? "3D face scan" : "Photo-based approximation"
-        let body = shape.usedPhotoOutline ? "Approximate body from photo, height, weight"
-                                          : "Approximate body from height and weight"
-        return (face, body)
+        .onChange(of: pose, initial: true) { stage.setPose(pose) }
+        .onChange(of: spin) { stage.setSpinning(spin) }
     }
 
     @ViewBuilder
     private var overlay: some View {
-        switch store.homeState {
-        case .generating:
+        if stage.isLoading {
+            ProgressView()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Loading avatar")
+        } else if stage.loadFailed || Self.previewModel == nil {
             VStack(spacing: 10) {
-                ProgressView().controlSize(.large)
-                Text(store.progressLabel.isEmpty ? "Creating avatar…" : store.progressLabel)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color.fmInk)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.fmStudio.opacity(0.82))
-        case .error(let message):
-            VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 28)).foregroundStyle(Color.fmAmber)
-                Text(message)
+                Text("The preview avatar couldn't be loaded.")
                     .font(.system(size: 14))
                     .foregroundStyle(Color.fmInk)
                     .multilineTextAlignment(.center)
-                Button("Try Again", action: retry)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
-                    .frame(minHeight: 44)
-                    .background(Color.fmCobalt, in: Capsule())
             }
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.fmStudio.opacity(0.9))
-        case .empty, .setupInProgress, .ready:
-            EmptyView()
         }
     }
 }
@@ -311,7 +344,7 @@ struct SourceReferenceCard: View {
                 Text("Source Reference").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
                 Spacer()
                 Button(action: changePhoto) {
-                    Label(store.bodyPhoto == nil ? "Add photo" : "Change photo", systemImage: "arrow.triangle.2.circlepath")
+                    Label(store.profile.hasBodyPhoto ? "Change photo" : "Add photo", systemImage: "arrow.triangle.2.circlepath")
                         .labelStyle(.titleAndIcon)
                         .font(.system(size: 13, weight: .semibold))
                 }
@@ -320,20 +353,21 @@ struct SourceReferenceCard: View {
             }
             HStack(spacing: 12) {
                 Group {
-                    if let photo = store.bodyPhoto {
+                    if let photo = store.bodyThumbnail {
                         Image(uiImage: photo).resizable().scaledToFill()
                     } else {
                         Image(systemName: "figure.stand").font(.system(size: 24)).foregroundStyle(Color.fmSecondary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
+                .animation(.easeOut(duration: 0.2), value: store.bodyThumbnail == nil)
                 .frame(width: 54, height: 72)
                 .background(Color.fmCard)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    if store.bodyPhoto != nil {
+                    if store.profile.hasBodyPhoto {
                         let notice = store.profile.photoAnalysis.notice
                         Text("Full-body photo").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk)
                         NoticeRow(tone: notice.tone, text: notice.text).font(.system(size: 13))

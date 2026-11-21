@@ -225,10 +225,13 @@ struct FaceStepView: View {
     }
 
     private func usePhoto(_ image: UIImage) {
-        guard let cgImage = image.normalized().cgImage else { return }
         isProcessingPhoto = true
         photoError = nil
         Task {
+            guard let cgImage = await image.normalizedInBackground().cgImage else {
+                isProcessingPhoto = false
+                return
+            }
             switch await FacePhotoProcessor.cropFace(in: cgImage) {
             case .face(let crop): store.saveFacePhoto(crop: crop)
             case .noFaceFound: photoError = "No face found in that photo. Try again facing the camera in good light."
@@ -312,10 +315,10 @@ struct BodyPhotoStepView: View {
             }
         }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
-            let normalized = image.normalized()
-            candidate = normalized
-            check = .checking
             Task {
+                let normalized = await image.normalizedInBackground()
+                candidate = normalized
+                check = .checking
                 let analysis: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
                 if candidate === normalized { check = .done(analysis) }
             }
@@ -375,7 +378,7 @@ struct ReviewStepView: View {
             VStack(spacing: 12) {
                 row(step: .face, title: "Face", image: store.faceThumbnail, icon: "face.smiling",
                     detail: profile.faceKind.map { $0 == .mesh ? "3D face scan" : "Photo-based approximation" })
-                row(step: .body, title: "Full-body photo", image: store.bodyPhoto, icon: "figure.stand",
+                row(step: .body, title: "Full-body photo", image: store.bodyThumbnail ?? store.bodyPhoto, icon: "figure.stand",
                     detail: profile.hasBodyPhoto ? profile.photoAnalysis.notice.text : nil)
                 row(step: .metrics, title: "Height and weight", image: nil, icon: "ruler",
                     detail: measurementsText(profile))

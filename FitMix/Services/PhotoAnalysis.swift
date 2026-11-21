@@ -135,8 +135,15 @@ nonisolated enum FacePhotoProcessor {
 }
 
 extension UIImage {
+    /// `normalized`, done on a background thread: a 12-megapixel camera photo takes long enough to redraw
+    /// that doing it on the main thread makes the screen stutter.
+    @concurrent
+    nonisolated func normalizedInBackground(maxDimension: CGFloat = 2048) async -> UIImage {
+        normalized(maxDimension: maxDimension)
+    }
+
     /// Redraws the image upright, capped at `maxDimension`, so `cgImage` matches what the user sees.
-    func normalized(maxDimension: CGFloat = 2048) -> UIImage {
+    nonisolated func normalized(maxDimension: CGFloat = 2048) -> UIImage {
         let longest = max(size.width, size.height)
         guard longest > 0 else { return self }
         let scale = min(1, maxDimension / longest)

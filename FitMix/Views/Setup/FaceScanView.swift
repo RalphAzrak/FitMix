@@ -1,6 +1,6 @@
 import ARKit
 import CoreImage
-import RealityKit
+import SceneKit
 import SwiftUI
 import UIKit
 
@@ -18,6 +18,8 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
     private(set) var phase: Phase = .searching
     private(set) var sectors = [Bool](repeating: false, count: FaceScanModel.sectorCount)
     private(set) var hint = ""
+    /// True once the camera has delivered a picture.
+    private(set) var cameraIsLive = false
 
     @ObservationIgnored var onFinish: ((FaceMeshCapture) -> Void)?
     @ObservationIgnored private weak var session: ARSession?
@@ -27,10 +29,10 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
 
     static var isSupported: Bool { ARFaceTrackingConfiguration.isSupported }
 
-    func start(_ session: ARSession) {
+    /// Remembers the camera session. The scan starts with `restart()`, once the screen is on display.
+    func attach(_ session: ARSession) {
         self.session = session
         session.delegate = self
-        restart()
     }
 
     func restart() {
@@ -39,6 +41,7 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
         hint = ""
         straightFrames = 0
         capture = nil
+        cameraIsLive = false
         let configuration = ARFaceTrackingConfiguration()
         configuration.isLightEstimationEnabled = true
         session?.run(configuration, options: [.resetTracking, .removeExistingAnchors])
@@ -67,13 +70,25 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
         MainActor.assumeIsolated { if phase != .finished { restart() } }
     }
 
+    /// Reports that the camera never produced a picture.
+    func failIfCameraDidNotStart() {
+        guard !cameraIsLive, phase != .finished else { return }
+        phase = .failed("The camera didn't start.")
+    }
+
+    // The scan runs on every camera frame. Only write a property when its value really changes,
+    // so the screen is redrawn when something happens, not 60 times a second.
+    private func show(hint newHint: String) { if hint != newHint { hint = newHint } }
+    private func enter(_ newPhase: Phase) { if phase != newPhase { phase = newPhase } }
+
     private func process(_ frame: ARFrame) {
+        if !cameraIsLive { cameraIsLive = true }
         guard phase != .finished else { return }
         if case .failed = phase { return }
         guard let face = frame.anchors.lazy.compactMap({ $0 as? ARFaceAnchor }).first, face.isTracked else {
-            if phase == .holdStraight { phase = .searching }
+            if phase == .holdStraight { enter(.searching) }
             straightFrames = 0
-            hint = phase == .turning ? "Keep your face inside the circle" : ""
+            show(hint: phase == .turning ? "Keep your face inside the circle" : "")
             return
         }
 
@@ -86,15 +101,15 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
 
         switch phase {
         case .searching, .holdStraight:
-            phase = .holdStraight
+            enter(.holdStraight)
             if distance > 0.55 {
-                hint = "Move a little closer"; straightFrames = 0
+                show(hint: "Move a little closer"); straightFrames = 0
             } else if distance < 0.22 {
-                hint = "Move a little farther away"; straightFrames = 0
+                show(hint: "Move a little farther away"); straightFrames = 0
             } else if turn > 0.10 {
-                hint = "Face the screen directly"; straightFrames = 0
+                show(hint: "Face the screen directly"); straightFrames = 0
             } else {
-                hint = "Hold still"
+                show(hint: "Hold still")
                 straightFrames += 1
                 if straightFrames >= 12, let captured = makeCapture(face: face, frame: frame) {
                     capture = captured
@@ -104,7 +119,7 @@ final class FaceScanModel: NSObject, ARSessionDelegate {
                 }
             }
         case .turning:
-            hint = ""
+            show(hint: "")
             guard turn > 0.15 else { return }
             var angle = atan2(up, right)
             if angle < 0 { angle += 2 * .pi }
@@ -228,6 +243,16 @@ struct FaceScanView: View {
         }
         .onAppear { model.onFinish = onCapture }
         .onDisappear { model.stop() }
+        .task {
+            // Starting the camera blocks the main thread briefly, so wait until the screen has finished sliding in.
+            try? await Task.sleep(for: .milliseconds(450))
+            if !Task.isCancelled { model.restart() }
+        }
+        .task(id: model.phase == .searching) {
+            // If no camera picture has arrived after a few seconds, say so instead of showing a black circle.
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { model.failIfCameraDidNotStart() }
+        }
     }
 
     private var title: String {
@@ -247,7 +272,7 @@ struct FaceScanView: View {
         case .holdStraight: return "Keep a neutral expression."
         case .turning: return "Move your head in a circle until the ring is complete."
         case .finished: return ""
-        case .failed: return "Try again, or use a front-facing photo instead."
+        case .failed: return "Close other apps that use the camera, then try again, or use a front-facing photo instead."
         }
     }
 }
@@ -255,16 +280,17 @@ struct FaceScanView: View {
 private struct FaceScanCamera: UIViewRepresentable {
     var model: FaceScanModel
 
-    func makeUIView(context: Context) -> ARView {
-        let view = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
-        view.renderOptions = [.disableMotionBlur, .disableDepthOfField, .disableFaceMesh, .disablePersonOcclusion]
-        model.start(view.session)
+    func makeUIView(context: Context) -> ARSCNView {
+        let view = ARSCNView(frame: .zero)
+        view.automaticallyUpdatesLighting = false
+        view.backgroundColor = .black
+        model.attach(view.session)
         return view
     }
 
-    func updateUIView(_ view: ARView, context: Context) {}
+    func updateUIView(_ view: ARSCNView, context: Context) {}
 
-    static func dismantleUIView(_ view: ARView, coordinator: ()) { view.session.pause() }
+    static func dismantleUIView(_ view: ARSCNView, coordinator: ()) { view.session.pause() }
 }
 
 /// Tick marks around the camera circle. Each of the eight directions lights up once the head has turned that way.
