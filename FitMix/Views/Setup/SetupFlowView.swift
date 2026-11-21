@@ -166,14 +166,15 @@ struct BodyPhotoStepView: View {
     @Environment(AvatarStore.self) private var store
 
     @State private var showPhotoSource = false
-    @State private var candidate: UIImage?
-    @State private var analysis: BodyPhotoAnalysis??   // outer nil: still checking
+    /// A photo just picked, shown before it replaces the saved one. `checked` is nil while it is being checked.
+    @State private var picked: UIImage?
+    @State private var checked: AvatarStore.CheckedBodyPhoto?
 
     var body: some View {
         StepScaffold(title: "Add a full-body photo",
                      subtitle: "Face the camera with your whole body in view, head to shoes. This is the main reference for your avatar.") {
-            if let candidate {
-                PhotoPreview(image: candidate, label: "Your full-body photo", notice: analysis.map { $0.notice })
+            if let picked {
+                PhotoPreview(image: checked?.image ?? picked, label: "Your full-body photo", notice: checked.map { $0.analysis.notice })
             } else if let saved = store.bodyPhoto {
                 PhotoPreview(image: saved, label: "Your full-body photo", notice: store.profile.photoAnalysis.notice)
                 if store.profile.avatar == nil, store.profile.candidate == nil {
@@ -190,14 +191,15 @@ struct BodyPhotoStepView: View {
                 ])
             }
         } footer: {
-            if let candidate {
+            if picked != nil {
                 Button("Use This Photo") {
-                    if let analysis { store.saveBodyPhoto(candidate, analysis: analysis) }
-                    self.candidate = nil
+                    if let checked { store.saveBodyPhoto(checked.image, analysis: checked.analysis) }
+                    picked = nil
+                    checked = nil
                     onContinue()
                 }
                 .buttonStyle(FMFilledButtonStyle())
-                .disabled(analysis == nil)
+                .disabled(checked == nil)
                 Button("Choose Another Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
             } else if store.profile.hasBodyPhoto {
                 Button("Continue", action: onContinue).buttonStyle(FMFilledButtonStyle())
@@ -207,12 +209,11 @@ struct BodyPhotoStepView: View {
             }
         }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
+            picked = image
+            checked = nil
             Task {
-                let normalized = await image.normalizedInBackground()
-                candidate = normalized
-                analysis = nil
-                let result: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
-                if candidate === normalized { analysis = .some(result) }
+                let result = await store.checkBodyPhoto(image)
+                if picked === image { checked = result }
             }
         }
     }
@@ -225,14 +226,14 @@ struct SelfieStepView: View {
     @Environment(AvatarStore.self) private var store
 
     @State private var showPhotoSource = false
-    @State private var candidate: UIImage?
-    @State private var hasFace: Bool??   // outer nil: still checking
+    @State private var picked: UIImage?
+    @State private var checked: AvatarStore.CheckedSelfie?
 
     var body: some View {
         StepScaffold(title: "Add a selfie",
                      subtitle: "Optional. A close, clear photo of your face helps the avatar look like you.") {
-            if let candidate {
-                PhotoPreview(image: candidate, label: "Your selfie", notice: hasFace.map(Self.notice))
+            if let picked {
+                PhotoPreview(image: checked?.image ?? picked, label: "Your selfie", notice: checked.map { Self.notice($0.hasFace) })
             } else if let saved = store.selfie {
                 PhotoPreview(image: saved, label: "Your selfie", notice: Self.notice(store.profile.selfieHasFace))
             } else if store.profile.hasSelfie {
@@ -246,14 +247,15 @@ struct SelfieStepView: View {
                 NoticeRow(tone: .info, text: "Without a selfie, your face comes from the full-body photo, which usually shows less detail.")
             }
         } footer: {
-            if let candidate {
+            if picked != nil {
                 Button("Use This Selfie") {
-                    if let hasFace { store.saveSelfie(candidate, hasFace: hasFace) }
-                    self.candidate = nil
+                    if let checked { store.saveSelfie(checked.image, hasFace: checked.hasFace) }
+                    picked = nil
+                    checked = nil
                     onContinue()
                 }
                 .buttonStyle(FMFilledButtonStyle())
-                .disabled(hasFace == nil)
+                .disabled(checked == nil)
                 Button("Choose Another Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
             } else if store.profile.hasSelfie {
                 Button("Continue", action: onContinue).buttonStyle(FMFilledButtonStyle())
@@ -267,12 +269,11 @@ struct SelfieStepView: View {
             }
         }
         .photoSource(isPresented: $showPhotoSource, title: "Selfie", camera: .front) { image in
+            picked = image
+            checked = nil
             Task {
-                let normalized = await image.normalizedInBackground(maxDimension: 1600)
-                candidate = normalized
-                hasFace = nil
-                let result: Bool? = if let cg = normalized.cgImage { await SelfieCheck.hasFace(cg) } else { nil }
-                if candidate === normalized { hasFace = .some(result) }
+                let result = await store.checkSelfie(image)
+                if picked === image { checked = result }
             }
         }
     }
@@ -475,7 +476,7 @@ struct ReviewStepView: View {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 300)
             }
             if let record = store.profile.candidate {
-                Text(AvatarPortraitCard.madeFrom(record, units: store.profile.units))
+                Text(record.madeFromText(units: store.profile.units))
                     .font(.system(size: 14))
                     .foregroundStyle(Color.fmSecondary)
             }

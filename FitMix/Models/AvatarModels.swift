@@ -20,6 +20,14 @@ nonisolated struct AvatarRecord: Codable, Equatable, Sendable {
     var weightKg: Double
 }
 
+extension AvatarRecord {
+    /// Says what the portrait was actually made from.
+    func madeFromText(units: UnitSystem) -> String {
+        let photos = usedSelfie ? "your full-body photo and selfie" : "your full-body photo"
+        return "Made from \(photos), \(BodyMeasurements.heightText(cm: heightCm, units: units)) and \(BodyMeasurements.weightText(kg: weightKg, units: units))."
+    }
+}
+
 /// Everything FitMix remembers about the avatar, apart from the pictures themselves.
 nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
     var hasBodyPhoto = false

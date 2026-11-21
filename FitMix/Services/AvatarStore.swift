@@ -133,6 +133,36 @@ final class AvatarStore {
 
     // MARK: Photos and measurements
 
+    /// A picked photo made upright and checked on-device, ready to show the user before it is saved.
+    struct CheckedBodyPhoto: Identifiable {
+        let id = UUID()
+        var image: UIImage
+        /// `nil` means the check could not run.
+        var analysis: BodyPhotoAnalysis?
+    }
+
+    struct CheckedSelfie: Identifiable {
+        let id = UUID()
+        var image: UIImage
+        /// `nil` means the check could not run.
+        var hasFace: Bool?
+    }
+
+    /// Prepares a photo straight from the camera or library and checks that a whole person is in it.
+    /// Nothing is saved until `saveBodyPhoto`.
+    func checkBodyPhoto(_ picked: UIImage) async -> CheckedBodyPhoto {
+        let image = await picked.normalizedInBackground()
+        let analysis: BodyPhotoAnalysis? = if let cg = image.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
+        return CheckedBodyPhoto(image: image, analysis: analysis)
+    }
+
+    /// Prepares a selfie and checks that it shows a face. Nothing is saved until `saveSelfie`.
+    func checkSelfie(_ picked: UIImage) async -> CheckedSelfie {
+        let image = await picked.normalizedInBackground(maxDimension: 1600)
+        let hasFace: Bool? = if let cg = image.cgImage { await SelfieCheck.hasFace(cg) } else { nil }
+        return CheckedSelfie(image: image, hasFace: hasFace)
+    }
+
     func setStep(_ step: SetupStep) {
         guard profile.currentStep != step else { return }
         profile.currentStep = step
