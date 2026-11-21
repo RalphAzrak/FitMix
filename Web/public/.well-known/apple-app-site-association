@@ -1,0 +1,16 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["3DCANY67BR.REPLACE_WITH_BUNDLE_ID"],
+        "components": [
+          {
+            "/": "/auth/confirm",
+            "?": { "token_hash": "?*" },
+            "comment": "Sign-up confirmation (Verify email). Nothing else on this host opens FitMix."
+          }
+        ]
+      }
+    ]
+  }
+}

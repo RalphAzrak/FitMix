@@ -8,32 +8,12 @@ struct TryOnHero: View {
     var source: UIImage?
     var addPhoto: () -> Void
     var retry: () -> Void
-    var zoom: () -> Void
 
+    /// The parent sizes and frames the hero, and shows `status` and the zoom control over it.
     var body: some View {
         ZStack {
-            AuthPalette.containerHigh
+            Color.fmStudio
             content
-        }
-        .containerRelativeFrame(.vertical) { length, _ in min(max(length - 330, 180), 520) }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(alignment: .topLeading) {
-            if let label { StatusPill(text: label.text, emphasized: label.isTryOn).padding(10) }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if displayedImage != nil {
-                Button(action: zoom) {
-                    Image(systemName: "plus.magnifyingglass")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(AuthPalette.onSurface)
-                        .frame(width: 40, height: 40)
-                        .background(.white, in: Circle())
-                        .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-                        .frame(width: 44, height: 44)
-                }
-                .accessibilityLabel("Zoom photo")
-                .padding(8)
-            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("tryOnHero")
@@ -45,12 +25,13 @@ struct TryOnHero: View {
         return source
     }
 
-    private var label: (text: String, isTryOn: Bool)? {
+    /// What the hero is showing, for its status chip. Only a real try-on is called one.
+    static func status(preview: TryOnPreview, source: UIImage?) -> (text: String, isTryOn: Bool)? {
         switch preview {
         case .ready(_, let isTryOn, _):
-            return isTryOn ? ("TRY-ON", true) : ("STAND-IN · NOT A TRY-ON", false)
+            return isTryOn ? ("Try-On", true) : ("Stand-in · Not a Try-On", false)
         case .needsPhoto: return nil
-        default: return source == nil ? nil : ("YOUR PHOTO · NOT A TRY-ON", false)
+        default: return source == nil ? nil : ("Your Photo · Not a Try-On", false)
         }
     }
 
@@ -59,13 +40,15 @@ struct TryOnHero: View {
         switch preview {
         case .needsPhoto:
             VStack(spacing: 12) {
-                Image(systemName: "person.crop.rectangle").font(.system(size: 34)).foregroundStyle(AuthPalette.primaryContainer)
-                Text("See this look on you").font(.system(size: 20, weight: .medium, design: .serif)).foregroundStyle(AuthPalette.onSurface)
+                Image(systemName: "person.crop.rectangle")
+                    .font(.system(size: 28, weight: .medium)).foregroundStyle(Color.fmCobalt)
+                    .frame(width: 68, height: 68).background(.white, in: Circle()).fmFloatingShadow()
+                Text("See this look on you").font(.fmDisplay(20)).foregroundStyle(AuthPalette.onSurface)
                 Text("Add a full-body photo of yourself. Try-on starts from it.")
                     .font(.system(size: 13)).foregroundStyle(AuthPalette.secondary).multilineTextAlignment(.center)
                 Button(action: addPhoto) { Label("Add Your Photo", systemImage: "camera") }
-                    .buttonStyle(AuthPrimaryButtonStyle())
-                    .frame(maxWidth: 220)
+                    .buttonStyle(FMFilledButtonStyle())
+                    .frame(maxWidth: 240)
             }
             .padding(20)
         case .ready(let image, let isTryOn, _):
@@ -81,14 +64,14 @@ struct TryOnHero: View {
                 if let source { photo(source, label: "Your photo as taken") }
                 statusCard(icon: "hourglass", title: "Try-on isn't available yet",
                            detail: "This is your photo as you took it. FitMix can't put the selected clothes on it yet. Switch to Street Look to see the outfit.")
-                    .padding(.bottom, 56)
+                    .padding(.bottom, 14)
             }
             .accessibilityIdentifier("tryOnUnavailable")
         case .nothingSelected:
             ZStack(alignment: .bottom) {
                 if let source { photo(source, label: "Your photo as taken") }
                 statusCard(icon: "tshirt", title: "Nothing to try on", detail: "This look has no garments to apply.")
-                    .padding(.bottom, 56)
+                    .padding(.bottom, 14)
             }
         case .failed(let message, _):
             ZStack(alignment: .bottom) {
@@ -98,10 +81,10 @@ struct TryOnHero: View {
                     Button("Try Again", action: retry)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 18).frame(minHeight: 40)
-                        .background(AuthPalette.primaryContainer, in: Capsule())
+                        .padding(.horizontal, 20).frame(minHeight: 44)
+                        .background(.fmPrimaryGradient, in: Capsule())
                 }
-                .padding(.bottom, 56)
+                .padding(.bottom, 14)
             }
         }
     }
@@ -128,23 +111,12 @@ struct TryOnHero: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(12)
-        .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .padding(.horizontal, 14)
+        .padding(14)
+        .background(.white.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .fmFloatingShadow()
+        // Clear of the floating buttons on the right edge of the hero.
+        .padding(.leading, 14)
+        .padding(.trailing, 74)
         .accessibilityElement(children: .combine)
-    }
-}
-
-private struct StatusPill: View {
-    var text: String
-    var emphasized: Bool
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 10, weight: .bold)).tracking(0.8)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8).frame(minHeight: 22)
-            .background(emphasized ? AuthPalette.primaryContainer : AuthPalette.onSurface.opacity(0.75), in: Capsule())
-            .accessibilityIdentifier("tryOnStatus")
     }
 }

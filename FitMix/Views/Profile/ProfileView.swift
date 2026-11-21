@@ -25,7 +25,7 @@ struct ProfileView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     Text("Profile")
-                        .font(.system(.largeTitle, design: .serif))
+                        .font(.fmDisplay(34, relativeTo: .largeTitle))
                         .foregroundStyle(AuthPalette.onSurface)
                         .accessibilityAddTraits(.isHeader)
 
@@ -205,14 +205,14 @@ private struct AccountCard: View {
             : AnyLayout(HStackLayout(alignment: .center, spacing: 14))
         layout {
             Text(user.initials)
-                .font(.system(.title3, design: .serif).weight(.semibold))
+                .font(.fmDisplay(21, relativeTo: .title3).weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(width: badge, height: badge)
                 .background(AuthPalette.primaryContainer, in: Circle())
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(user.displayName)
-                    .font(.system(.title3, design: .serif))
+                    .font(.fmDisplay(21, relativeTo: .title3))
                     .foregroundStyle(AuthPalette.onSurface)
                 if let email = user.email {
                     Text(email)
@@ -262,7 +262,7 @@ private struct TryOnPhotoCard: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("My Try-On Photo")
-                    .font(.system(.title3, design: .serif))
+                    .font(.fmDisplay(21, relativeTo: .title3))
                     .foregroundStyle(AuthPalette.onSurface)
                     .accessibilityAddTraits(.isHeader)
                 Text("Needed for virtual try-on.")
@@ -332,8 +332,8 @@ private struct TryOnPhotoCard: View {
                 .resizable()
                 .scaledToFill()
                 .frame(width: width, height: width * 4 / 3)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.containerHigh))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(AuthPalette.containerHigh))
                 .accessibilityLabel("Your try-on photo")
                 .accessibilityIdentifier("tryOnPreview")
             VStack(alignment: .leading, spacing: 10) {
@@ -370,8 +370,8 @@ extension View {
         self
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AuthPalette.containerLowest, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(AuthPalette.containerHigh))
+            .background(Color.fmCard, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.fmHairline))
     }
 }
 
@@ -382,9 +382,10 @@ struct ProfileSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(.headline, design: .serif))
-                .foregroundStyle(AuthPalette.onSurface)
+            Text(title.uppercased())
+                .font(.system(size: 13, weight: .bold))
+                .tracking(0.7)
+                .foregroundStyle(Color.fmInk)
                 .accessibilityAddTraits(.isHeader)
                 .padding(.leading, 4)
             VStack(spacing: 0) { content }
@@ -467,7 +468,7 @@ struct ProfileEmptyState<Actions: View>: View {
                 .foregroundStyle(AuthPalette.primaryContainer)
                 .accessibilityHidden(true)
             Text(title)
-                .font(.system(.title2, design: .serif))
+                .font(.fmDisplay(24, relativeTo: .title2))
                 .foregroundStyle(AuthPalette.onSurface)
                 .multilineTextAlignment(.center)
                 .accessibilityAddTraits(.isHeader)

@@ -9,9 +9,11 @@ import SwiftUI
     /// The signed-in account's sizes and addresses. Follows whoever is signed in.
     @State private var profile = ProfileStore()
 
+    init() { FMFonts.register() }
+
     var body: some Scene {
         WindowGroup {
-            HomeView()
+            AppShell()
                 .environment(store)
                 .environment(auth)
                 .environment(studio)
