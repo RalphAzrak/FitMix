@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Sign in / create account. Layout follows the Stitch frame "Sign In & Onboarding".
 ///
-/// Email and password go to Supabase Auth through `AuthSession`. Apple, Google, password reset,
-/// help, and the legal links sit where the design puts them but stay disabled until they are
-/// wired up. It is not part of the launch flow: it opens from Account on My Avatar.
+/// Email and password go to Supabase Auth through `AuthSession`, and "Forgot password?" opens
+/// the reset request. Apple, Google, help, and the legal links sit where the design puts them but
+/// stay disabled until they are wired up. It is not part of the launch flow: it opens from Account on My Avatar.
 /// Debug builds can open it with FM_DEBUG_SCREEN=auth or auth-create.
 struct AuthView: View {
     enum Mode: String, CaseIterable, Identifiable {
@@ -20,6 +20,7 @@ struct AuthView: View {
     enum Banner: Equatable {
         case failure(String)
         case checkEmail(String)
+        case info(String)
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -31,6 +32,7 @@ struct AuthView: View {
     @State private var attempted = false
     @State private var submitting = false
     @State private var banner: Banner?
+    @State private var showForgotPassword = false
     @FocusState private var focus: Field?
 
     var showsClose: Bool
@@ -77,6 +79,16 @@ struct AuthView: View {
             if mode == .signIn, focus == .name { focus = .email }
         }
         .onChange(of: form) { if case .failure = banner { banner = nil } }
+        .onAppear {
+            guard let notice = auth.signInNotice else { return }
+            auth.signInNotice = nil
+            mode = .signIn
+            if let email = notice.email { form.email = email }
+            banner = .info(notice.message)
+        }
+        .fullScreenCover(isPresented: $showForgotPassword) {
+            ForgotPasswordView(email: form.email.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         .interactiveDismissDisabled(submitting)
     }
 
@@ -90,10 +102,7 @@ struct AuthView: View {
                 Color.clear.frame(width: 36, height: 36)
             }
             Spacer()
-            Text("FITMIX STUDIO")
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(1.6)
-                .foregroundStyle(AuthPalette.secondary)
+            FitMixWordmark()
                 .accessibilityAddTraits(.isHeader)
             Spacer()
             CircleIconButton(systemName: "questionmark.circle", label: "Help") {}
@@ -165,14 +174,15 @@ struct AuthView: View {
                 .onSubmit(submitTapped)
             } accessory: {
                 // Kept in place in Create Account so the layout doesn't jump, but hidden there.
-                Button("Forgot password?") {}
+                Button("Forgot password?") { showForgotPassword = true }
                     .font(.system(size: 11, weight: .semibold))
                     .tracking(0.4)
                     .foregroundStyle(AuthPalette.primary)
-                    .disabled(true)
-                    .opacity(mode == .signIn ? 0.55 : 0)
+                    .frame(minHeight: 32)
+                    .contentShape(Rectangle())
+                    .opacity(mode == .signIn ? 1 : 0)
+                    .disabled(mode != .signIn || submitting)
                     .accessibilityHidden(mode != .signIn)
-                    .accessibilityHint("Not available yet")
             } trailing: {
                 Button {
                     showPassword.toggle()
@@ -335,7 +345,7 @@ struct AuthForm: Equatable {
 // MARK: Palette
 
 /// Surface and accent tokens from the Stitch project's theme, used only on this screen.
-private enum AuthPalette {
+enum AuthPalette {
     static let surface = Color(hex: 0xFBF9F5)
     static let containerLowest = Color.white
     static let containerLow = Color(hex: 0xF5F3EF)
@@ -358,7 +368,21 @@ private extension Color {
 
 // MARK: Components
 
-private struct CircleIconButton: View {
+/// The FitMix logotype shown at the top of the auth and account screens.
+struct FitMixWordmark: View {
+    var height: CGFloat = 22
+
+    var body: some View {
+        Image("Wordmark")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(height: height)
+            .accessibilityLabel("FitMix")
+    }
+}
+
+struct CircleIconButton: View {
     var systemName: String
     var label: String
     var action: () -> Void
@@ -465,7 +489,7 @@ private struct ModeSwitch: View {
 }
 
 /// Labelled input row: leading icon, the field, optional label accessory and trailing control, and an error line.
-private struct AuthField<Input: View, Accessory: View, Trailing: View>: View {
+struct AuthField<Input: View, Accessory: View, Trailing: View>: View {
     var label: String
     var icon: String
     var error: String?
@@ -514,13 +538,13 @@ private struct AuthField<Input: View, Accessory: View, Trailing: View>: View {
     }
 }
 
-private extension AuthField where Accessory == EmptyView, Trailing == EmptyView {
+extension AuthField where Accessory == EmptyView, Trailing == EmptyView {
     init(label: String, icon: String, error: String?, @ViewBuilder input: () -> Input) {
         self.init(label: label, icon: icon, error: error, input: input, accessory: { EmptyView() }, trailing: { EmptyView() })
     }
 }
 
-private struct AuthPrimaryButtonStyle: ButtonStyle {
+struct AuthPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 15, weight: .semibold))
@@ -535,7 +559,7 @@ private struct AuthPrimaryButtonStyle: ButtonStyle {
 }
 
 /// Full-width row for a sign-in provider. Dimmed while the provider isn't connected.
-private struct AuthSocialButtonStyle: ButtonStyle {
+struct AuthSocialButtonStyle: ButtonStyle {
     var background: Color
     var foreground: Color
     @Environment(\.isEnabled) private var isEnabled
@@ -614,7 +638,7 @@ private struct FooterPill: View {
 }
 
 /// Result of the last request, shown under the main button.
-private struct BannerView: View {
+struct BannerView: View {
     var banner: AuthView.Banner
 
     var body: some View {
@@ -623,27 +647,45 @@ private struct BannerView: View {
             NoticeRow(tone: .caution, text: message)
                 .accessibilityIdentifier("authError")
         case .checkEmail(let address):
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "envelope.badge")
-                    .font(.system(size: 18))
-                    .foregroundStyle(AuthPalette.primary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Check your email")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(AuthPalette.onSurface)
-                    Text("We sent a confirmation link to \(address). Open it, then sign in here.")
+            NoticeCard(icon: "envelope.badge", title: "Check your email",
+                       message: "We sent a confirmation link to \(address). Open it, then sign in here.")
+                .accessibilityIdentifier("checkEmail")
+        case .info(let message):
+            NoticeCard(icon: "checkmark.circle", title: message, message: nil)
+                .accessibilityIdentifier("authInfo")
+        }
+    }
+}
+
+/// Soft card with a cobalt icon, for "check your email" and other good news.
+struct NoticeCard: View {
+    var icon: String
+    var title: String
+    var message: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundStyle(AuthPalette.primary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(AuthPalette.onSurface)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let message {
+                    Text(message)
                         .font(.system(size: 13))
                         .foregroundStyle(AuthPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(12)
-            .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.primary.opacity(0.25)))
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("checkEmail")
+            Spacer(minLength: 0)
         }
+        .padding(12)
+        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.primary.opacity(0.25)))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -656,6 +698,15 @@ struct AccountFlowView: View {
     @Environment(AuthSession.self) private var auth
 
     var body: some View {
+        if let recovery = auth.recovery {
+            ResetPasswordView(recovery: recovery)
+        } else {
+            accountOrSignIn
+        }
+    }
+
+    @ViewBuilder
+    private var accountOrSignIn: some View {
         switch auth.state {
         case .signedIn(let user):
             AccountView(user: user)
@@ -684,10 +735,7 @@ struct AccountView: View {
                 HStack {
                     CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
                     Spacer()
-                    Text("FITMIX STUDIO")
-                        .font(.system(size: 11, weight: .semibold))
-                        .tracking(1.6)
-                        .foregroundStyle(AuthPalette.secondary)
+                    FitMixWordmark()
                     Spacer()
                     Color.clear.frame(width: 36, height: 36)
                 }

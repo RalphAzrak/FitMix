@@ -9,6 +9,9 @@ struct HomeView: View {
     @State private var flow: SetupStep?
     @State private var showMetricsEditor = false
     @State private var placeholder: PlaceholderScreen?
+    /// True when Camera was opened from Studio, so closing Camera goes back there.
+    @State private var cameraReturnsToStudio = false
+    @Environment(StudioStore.self) private var studio
     @State private var confirmDelete = false
     @State private var authPreview: AuthView.Mode?
     /// Set when sign-in or sign-up finishes and there is no avatar yet; opens the creation flow once Account closes.
@@ -36,7 +39,42 @@ struct HomeView: View {
         .defaultScrollAnchor(Self.debugScreen == "bottom" ? .bottom : .top)
         .background(Color.fmBackground.ignoresSafeArea())
         .fullScreenCover(item: $flow) { SetupFlowView(startAt: $0) }
-        .fullScreenCover(item: $placeholder) { PlaceholderView(screen: $0) }
+        .fullScreenCover(item: $placeholder) { screen in
+            switch screen {
+            case .studio:
+                StudioView(openCamera: {
+                    cameraReturnsToStudio = true
+                    placeholder = .scanFits
+                })
+            case .scanFits:
+                CameraView(close: {
+                    // Back to where Camera was opened from; Studio keeps its previous look.
+                    placeholder = cameraReturnsToStudio ? .studio : nil
+                }, capture: { capture in
+                    // Camera → Outfit Review, which finds the garments. Studio's current look
+                    // stays until Try Full Look.
+                    studio.review(capture)
+                    placeholder = .review
+                }, confirm: { scan in
+                    studio.review(scan)
+                    placeholder = .review
+                })
+            case .review:
+                if let scan = studio.pendingScan {
+                    OutfitReviewView(scan: scan, retake: {
+                        studio.discardReview()
+                        placeholder = .scanFits
+                    }, close: {
+                        studio.discardReview()
+                        placeholder = cameraReturnsToStudio ? .studio : nil
+                    }, openStudio: {
+                        placeholder = .studio
+                    })
+                    // A finished analysis replaces the scan; start its selection fresh.
+                    .id(scan.id)
+                }
+            }
+        }
         .fullScreenCover(item: $authPreview, onDismiss: {
             if setupAfterAuth {
                 setupAfterAuth = false
@@ -61,19 +99,41 @@ struct HomeView: View {
         } message: {
             Text(store.storageErrorMessage ?? "")
         }
+        .onChange(of: auth.recovery != nil) { _, active in
+            if active { showRecovery() }
+        }
         .onAppear {
+            if auth.recovery != nil { showRecovery() }
             switch Self.debugScreen {
             case "setup": flow = store.resumeStep
             case "generate": flow = .generate
             case "metrics": showMetricsEditor = true
             case "auth": authPreview = .signIn
             case "auth-create": authPreview = .createAccount
+            case "studio": placeholder = .studio
+            case "camera": placeholder = .scanFits
             default: break
             }
         }
     }
 
-    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | generate | metrics | auth | auth-create | bottom.
+    /// A reset link was opened: show "Set a new password" in the Account cover. Anything else
+    /// presented here closes first (the avatar flow saves as it goes), since only one can show at a time.
+    private func showRecovery() {
+        guard authPreview == nil else { return }
+        let otherOpen = flow != nil || showMetricsEditor || placeholder != nil
+        flow = nil
+        showMetricsEditor = false
+        placeholder = nil
+        setupAfterAuth = false
+        Task {
+            if otherOpen { try? await Task.sleep(for: .milliseconds(650)) }
+            authPreview = .signIn
+        }
+    }
+
+    /// Debug builds can open straight into a screen with
+    /// FM_DEBUG_SCREEN=setup | generate | metrics | auth | auth-create | studio | camera | bottom.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -145,7 +205,10 @@ struct HomeView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
-            Button { placeholder = .scanFits } label: { Label("Open Camera to Scan Fits", systemImage: "camera") }
+            Button {
+                cameraReturnsToStudio = false
+                placeholder = .scanFits
+            } label: { Label("Open Camera to Scan Fits", systemImage: "camera") }
                 .buttonStyle(FMFilledButtonStyle())
             Button { placeholder = .studio } label: { Label("Jump to Studio", systemImage: "paintpalette") }
                 .buttonStyle(FMFilledButtonStyle(color: .fmCharcoal))
@@ -500,40 +563,10 @@ struct MetricsEditorSheet: View {
     }
 }
 
-// MARK: Placeholders
+// MARK: Full-screen destinations
 
+/// Camera and Studio, presented full screen from My Avatar. (Named before Camera existed.)
 enum PlaceholderScreen: String, Identifiable {
-    case scanFits, studio
+    case scanFits, review, studio
     var id: String { rawValue }
-
-    var title: String { self == .scanFits ? "Scan Fits" : "Studio" }
-    var icon: String { self == .scanFits ? "camera.viewfinder" : "paintpalette" }
-    var detail: String {
-        self == .scanFits ? "Scanning clothing with the camera isn't built yet. It comes after the avatar milestone."
-                          : "Trying outfits on your avatar isn't built yet. It comes after the avatar milestone."
-    }
-}
-
-struct PlaceholderView: View {
-    var screen: PlaceholderScreen
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: screen.icon).font(.system(size: 44)).foregroundStyle(Color.fmCobalt)
-            Eyebrow(text: "Placeholder")
-            Text(screen.title).font(.fmSerif(34)).foregroundStyle(Color.fmInk)
-            Text(screen.detail)
-                .font(.system(size: 16))
-                .foregroundStyle(Color.fmSecondary)
-                .multilineTextAlignment(.center)
-            Spacer()
-            Button("Back to My Avatar") { dismiss() }.buttonStyle(FMFilledButtonStyle(color: .fmCharcoal))
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.fmBackground.ignoresSafeArea())
-        .preferredColorScheme(.light)
-    }
 }
