@@ -11,3 +11,4 @@ FitMix/Resources/Backend.local.json
 
 # Leftover downloads from the removed Blender pipeline (1.6 GB). Safe to delete.
 AvatarPipeline/
+Backend/.cache/
