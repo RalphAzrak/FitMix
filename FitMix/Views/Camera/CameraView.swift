@@ -14,7 +14,7 @@ struct CameraView: View {
     var confirm: (OutfitScan) -> Void
 
     @State private var camera = CameraController()
-    @Environment(StudioStore.self) private var studio
+    @Environment(CartStore.self) private var cart
     @Environment(\.scenePhase) private var scenePhase
     @State private var showAccount = false
     @State private var showBag = false
@@ -66,7 +66,7 @@ struct CameraView: View {
         .onChange(of: covered) { _, covered in
             if covered { camera.deactivate(release: false) } else { Task { await camera.activate() } }
         }
-        .sheet(isPresented: $showBag) { ShoppingReviewView() }
+        .sheet(isPresented: $showBag) { NavigationStack { CartView() } }
         .fullScreenCover(isPresented: $showAccount) { AccountFlowView() }
     }
 
@@ -93,7 +93,7 @@ struct CameraView: View {
                 .font(.fmDisplay(26))
                 .foregroundStyle(AuthPalette.onSurface)
             Spacer()
-            FMBagButton(count: studio.bagCount) { showBag = true }
+            FMBagButton(count: cart.count) { showBag = true }
             Button { showAccount = true } label: {
                 Image(systemName: "person.crop.circle")
                     .font(.system(size: 20))
