@@ -9,7 +9,7 @@ FitMix is a SwiftUI iPhone app for recreating outfits you spot in real life. The
 | Where | What you can try |
 | --- | --- |
 | `main` | Create a 3D preview in **My Avatar** using your measurements and photos, with a face scan on a compatible iPhone. Open **Account** to sign up, sign in, or reset your password using Supabase Auth. Avatar captures are stored on the device. |
-| [`studio-fit`](../../tree/studio-fit) | Open an outfit in **Studio**, inspect individual garments, swap in sample catalog items, and review sizes and retailer links. The branch uses sample scans to demonstrate the Camera → Studio handoff. |
+| [`studio-fit`](https://github.com/RalphAzrak/FitMix/tree/studio-fit) | Open an outfit in **Studio**, inspect individual garments, swap in sample catalog items, and review sizes and retailer links. The branch uses sample scans to demonstrate the Camera → Studio handoff. |
 
 ## The outfit flow we're building
 
