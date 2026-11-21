@@ -137,6 +137,7 @@ final class AuthSession {
                 emitLocalSessionAsInitialSession: true
             ))
         )
+        AuthDebugLog.log("client project=\(AuthDebugLog.origin(SupabaseConfig.url)) signup_redirect=\(AuthDebugLog.origin(SupabaseConfig.signupRedirect))")
         #if DEBUG
         // Debug builds only: FM_DEBUG_ACCOUNT_ID signs in a local stand-in account without Supabase,
         // so Profile can be checked in the simulator. Requests that need the server will fail.
@@ -216,6 +217,7 @@ final class AuthSession {
     }
 
     func signUp(fullName: String, email: String, password: String) async throws -> SignUpOutcome {
+        AuthDebugLog.log("signup started redirect_to=\(AuthDebugLog.origin(SupabaseConfig.signupRedirect))")
         do {
             let response = try await client.auth.signUp(
                 email: email,
@@ -225,13 +227,16 @@ final class AuthSession {
             )
             switch response {
             case .session(let session):
+                AuthDebugLog.log("signup result=ok session_returned (email confirmation is off for this project)")
                 state = .signedIn(AccountUser(session.user))
                 return .signedIn
             case .user:
+                AuthDebugLog.log("signup result=ok confirmation_email_requested")
                 pendingConfirmationEmail = email
                 return .confirmEmail(email)
             }
         } catch {
+            AuthDebugLog.log("signup result=failed \(AuthDebugLog.category(error))")
             throw AuthFailure(error)
         }
     }
@@ -239,12 +244,16 @@ final class AuthSession {
     /// Sends a new sign-up confirmation link. Supabase answers the same way for unknown and
     /// already-confirmed addresses, so this never reveals which emails have accounts.
     func resendConfirmation(email: String) async throws {
+        AuthDebugLog.log("resend started type=signup redirect_to=\(AuthDebugLog.origin(SupabaseConfig.signupRedirect))")
         do {
             try await client.auth.resend(email: email, type: .signup, emailRedirectTo: SupabaseConfig.signupRedirect)
+            AuthDebugLog.log("resend result=ok")
             pendingConfirmationEmail = email
         } catch let error as AuthError where [.userNotFound, .emailAddressNotAuthorized].contains(error.errorCode) {
             // Treated like success, for the same reason as password reset.
+            AuthDebugLog.log("resend result=treated_as_ok \(AuthDebugLog.category(error))")
         } catch {
+            AuthDebugLog.log("resend result=failed \(AuthDebugLog.category(error))")
             throw AuthFailure(error)
         }
     }
@@ -276,6 +285,7 @@ final class AuthSession {
     /// so they are never logged or shown.
     @discardableResult
     func handle(url: URL) -> Bool {
+        Self.logCallback(url)
         if Self.matches(url, SupabaseConfig.emailChangeRedirect) {
             handleEmailChange(url: url)
             return true
@@ -289,8 +299,10 @@ final class AuthSession {
         Task {
             do {
                 let session = try await client.auth.session(from: url)
+                AuthDebugLog.log("reset exchange result=ok session_established")
                 recovery = .ready(email: session.user.email)
             } catch {
+                AuthDebugLog.log("reset exchange result=failed \(AuthDebugLog.category(error))")
                 recovery = .invalid(Self.recoveryLinkMessage(for: error))
             }
         }
@@ -328,6 +340,7 @@ final class AuthSession {
         // parameters (expired, already used, or invalid all report `otp_expired`).
         guard params["error"] == nil, params["error_code"] == nil, params["error_description"] == nil,
               params["code"] != nil else {
+            AuthDebugLog.log("confirm exchange skipped reason=\(params["code"] == nil && params["error_code"] == nil ? "no_code_in_callback" : "supabase_reported_error")")
             confirmation = .unconfirmed(email: email, reason: .linkRejected)
             return
         }
@@ -336,15 +349,30 @@ final class AuthSession {
             do {
                 // PKCE: trades the code for a session using the verifier saved when this device signed up.
                 let session = try await client.auth.session(from: url)
+                AuthDebugLog.log("confirm exchange result=ok session_established email_confirmed=\(session.user.emailConfirmedAt != nil)")
                 state = .signedIn(AccountUser(session.user))
                 pendingConfirmationEmail = nil
                 confirmation = .verified(email: session.user.email)
             } catch {
                 // Only a successful exchange proves the confirmation. Anyone can open a
                 // fitmix://confirm-email?code=… URL, so a failed exchange says nothing either way.
+                AuthDebugLog.log("confirm exchange result=failed \(AuthDebugLog.category(error))")
                 confirmation = .unconfirmed(email: email, reason: .notConfirmedHere)
             }
         }
+    }
+
+    /// Which auth link arrived and what kind of parameters it carries, never their values
+    /// (except Supabase's error code, which is a fixed label).
+    private static func logCallback(_ url: URL) {
+        #if DEBUG
+        let params = linkParameters(url)
+        let route = matches(url, SupabaseConfig.signupRedirect) ? "confirm-email"
+            : matches(url, SupabaseConfig.passwordResetRedirect) ? "reset-password"
+            : matches(url, SupabaseConfig.emailChangeRedirect) ? "email-change" : "unhandled"
+        let errorCode = params["error_code"].map(AuthDebugLog.clean) ?? "-"
+        AuthDebugLog.log("callback received origin=\(AuthDebugLog.origin(url)) route=\(route) has_code=\(params["code"] != nil) has_error=\(params["error"] != nil || params["error_code"] != nil) error_code=\(errorCode)")
+        #endif
     }
 
     private static func matches(_ url: URL, _ redirect: URL) -> Bool {
