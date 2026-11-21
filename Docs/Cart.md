@@ -8,9 +8,9 @@ keeps **View at retailer**.
 | --- | --- |
 | Saved line item (`CartItem`, `CartData`) | `FitMix/Models/Cart.swift` |
 | `CartStore` (add, quantity, remove, clear, subtotal) | `FitMix/Services/CartStore.swift` |
-| Cart screen and `CartBadge` | `FitMix/Views/Checkout/CartView.swift` |
+| Cart screen | `FitMix/Views/Checkout/CartView.swift` |
 | Add to Cart buttons, View Cart | `FitMix/Views/Studio/ShoppingReviewView.swift` |
-| Bag button with count badge | `FitMix/Views/Home/HomeView.swift` |
+| Bag button with count badge | `FMBagButton` in `FitMix/Views/Theme.swift` |
 
 ## Behaviour
 
