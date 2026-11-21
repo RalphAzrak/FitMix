@@ -8,6 +8,7 @@ struct HomeView: View {
     @Environment(AvatarStore.self) private var store
     @Environment(StudioStore.self) private var studio
     @Environment(AuthSession.self) private var auth
+    @Environment(CartStore.self) private var cart
     @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var showProfile = false
@@ -18,6 +19,7 @@ struct HomeView: View {
     /// True when Camera was opened from Studio, so closing Camera goes back there.
     @State private var cameraReturnsToStudio = false
     @State private var showCart = false
+    @State private var showShopLook = false
     @State private var authPreview: AuthView.Mode?
     /// Set when sign-in or sign-up finishes and there is no avatar yet; opens the avatar flow once Account closes.
     @State private var setupAfterAuth = false
@@ -96,7 +98,10 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
-        .sheet(isPresented: $showCart) { ShoppingReviewView() }
+        .sheet(isPresented: $showCart) {
+            NavigationStack { CartView() }.preferredColorScheme(.light)
+        }
+        .sheet(isPresented: $showShopLook) { ShoppingReviewView() }
         .alert("Couldn't save", isPresented: Binding(get: { store.storageErrorMessage != nil && flow == nil },
                                                     set: { if !$0 { store.storageErrorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -117,6 +122,7 @@ struct HomeView: View {
             case "auth-create": authPreview = .createAccount
             case "profile": authPreview = .signIn
             case "cart": showCart = true
+            case "shop": showShopLook = true
             case "studio": placeholder = .studio
             case "camera": placeholder = .scanFits
             #if DEBUG
@@ -144,11 +150,12 @@ struct HomeView: View {
     /// presented here closes first (the avatar flow saves as it goes), since only one can show at a time.
     private func showAuthLink() {
         guard authPreview == nil else { return }
-        let otherOpen = flow != nil || showMetricsEditor || placeholder != nil || showCart
+        let otherOpen = flow != nil || showMetricsEditor || placeholder != nil || showCart || showShopLook
         flow = nil
         showMetricsEditor = false
         placeholder = nil
         showCart = false
+        showShopLook = false
         setupAfterAuth = false
         Task {
             if otherOpen { try? await Task.sleep(for: .milliseconds(650)) }
@@ -157,7 +164,7 @@ struct HomeView: View {
     }
 
     /// Debug builds can open straight into a screen with
-    /// FM_DEBUG_SCREEN=setup | generate | avatar-profile | metrics | auth | auth-create | profile | studio | camera | cart.
+    /// FM_DEBUG_SCREEN=setup | generate | avatar-profile | metrics | auth | auth-create | profile | studio | camera | cart | shop.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -181,9 +188,11 @@ struct HomeView: View {
             }
             Spacer(minLength: 12)
             HStack(spacing: 8) {
-                headerButton(label: "Cart", identifier: "cartButton") {
+                headerButton(label: cart.count == 0 ? "Cart" : (cart.count == 1 ? "Cart, 1 item" : "Cart, \(cart.count) items"),
+                             identifier: "cartButton") {
                     Image(systemName: "bag").font(.system(size: 19, weight: .regular))
                 } action: { showCart = true }
+                .overlay(alignment: .topTrailing) { CartBadge(count: cart.count).offset(x: 4, y: -2) }
                 // Opens the account Profile when signed in, otherwise Sign In (see AccountFlowView).
                 // The avatar's Profile opens from the avatar on Home.
                 headerButton(label: auth.user == nil ? "Sign in" : "Account", identifier: "accountButton") {
@@ -271,7 +280,7 @@ struct HomeView: View {
                 cameraReturnsToStudio = false
                 placeholder = .scanFits
             },
-            HomeFeature(id: "shop", title: "Shop This Look", detail: "Review the pieces in your look", icon: "bag") { showCart = true },
+            HomeFeature(id: "shop", title: "Shop This Look", detail: "Review the pieces in your look", icon: "bag") { showShopLook = true },
         ]
         // Try-on is offered only once something can actually render it.
         if TryOnRenderers.current?.producesTryOn == true {

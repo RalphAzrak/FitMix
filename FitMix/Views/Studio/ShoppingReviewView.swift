@@ -2,14 +2,17 @@ import SwiftUI
 import SafariServices
 
 /// Review of the current look's purchasable pieces, including confirmed swaps.
-/// FitMix has no cart or checkout yet, so this stops at review: sizes and retailer pages.
+/// Each piece can be added to the cart in its chosen size. There's no checkout yet, so buying still
+/// happens on the retailer's page.
 struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
+    @Environment(CartStore.self) private var cart
     @Environment(\.dismiss) private var dismiss
     @Environment(ProfileStore.self) private var profile
     /// Sizes the user picked here. Without a pick, a saved Profile size is used when the product lists it.
     @State private var sizes: [UUID: String] = [:]
     @State private var retailer: URL?
+    @State private var cartFailure: String?
 
     var body: some View {
         NavigationStack {
@@ -33,6 +36,11 @@ struct ShoppingReviewView: View {
         }
         .preferredColorScheme(.light)
         .sheet(item: $retailer) { SafariView(url: $0).ignoresSafeArea() }
+        .alert("Couldn't add to cart", isPresented: Binding(get: { cartFailure != nil }, set: { if !$0 { cartFailure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(cartFailure ?? "")
+        }
     }
 
     private func content(_ look: WorkingLook) -> some View {
@@ -78,16 +86,20 @@ struct ShoppingReviewView: View {
                     Spacer()
                     PriceSummary(look: look)
                 }
-                Button {} label: { Label("Add to Cart", systemImage: "cart") }
+                if cart.isEmpty {
+                    Text(purchasable.isEmpty ? "Nothing here can be added to your cart yet."
+                                             : "Add pieces to your cart, then review them together.")
+                        .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    NavigationLink {
+                        CartView(showsDone: false)
+                    } label: {
+                        Label(cart.count == 1 ? "View Cart (1 item)" : "View Cart (\(cart.count) items)", systemImage: "bag")
+                    }
                     .buttonStyle(AuthPrimaryButtonStyle())
-                    .disabled(true)
-                    .opacity(0.5)
-                    .accessibilityHint("Not available yet")
-                Text(purchasable.contains { $0.product?.retailerURL != nil }
-                     ? "Checkout isn't connected yet. Use View at retailer to buy a piece."
-                     : "Checkout isn't connected yet.")
-                    .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
-                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("shopViewCart")
+                }
             }
             .padding(16)
             .background(AuthPalette.surface)
@@ -153,6 +165,10 @@ struct ShoppingReviewView: View {
                     }
                 }
                 Spacer()
+            }
+            HStack {
+                addButton(product: product, size: chosen?.value)
+                Spacer()
                 if let url = product.retailerURL {
                     Button("View at retailer") { retailer = url }
                         .font(.system(size: 14, weight: .semibold))
@@ -165,6 +181,37 @@ struct ShoppingReviewView: View {
         .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.containerHigh))
         .accessibilityIdentifier("shopRow-\(piece.detected.category.rawValue)")
+    }
+}
+
+extension ShoppingReviewView {
+    /// Add to Cart for one piece. A product that lists sizes needs one chosen first; one that lists
+    /// none (most live retailer matches) is added without a size.
+    @ViewBuilder
+    fileprivate func addButton(product: CatalogProduct, size: String?) -> some View {
+        let needsSize = !product.sizes.isEmpty && size == nil
+        if !needsSize && cart.contains(productID: product.id, size: size) {
+            Label("In Cart", systemImage: "checkmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.fmGreen)
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("shopInCart-\(product.category.rawValue)")
+        } else {
+            Button {
+                do { try cart.add(product, size: size) } catch { cartFailure = error.localizedDescription }
+            } label: {
+                Label(needsSize ? "Choose a size to add" : "Add to Cart", systemImage: "bag.badge.plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 36)
+                    .background(AuthPalette.container, in: Capsule())
+            }
+            .foregroundStyle(AuthPalette.onSurface)
+            .disabled(needsSize)
+            .opacity(needsSize ? 0.55 : 1)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
+        }
     }
 }
 
