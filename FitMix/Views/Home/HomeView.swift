@@ -11,6 +11,7 @@ struct HomeView: View {
     @State private var photoCandidate: PhotoCandidate?
     @State private var placeholder: PlaceholderScreen?
     @State private var confirmDelete = false
+    @State private var authPreview: AuthView.Mode?
 
     var body: some View {
         @Bindable var store = store
@@ -35,6 +36,7 @@ struct HomeView: View {
             SetupFlowView(startAt: store.profile.currentStep)
         }
         .fullScreenCover(item: $placeholder) { PlaceholderView(screen: $0) }
+        .fullScreenCover(item: $authPreview) { AuthView(mode: $0) }
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
         .sheet(item: $photoCandidate) { PhotoReplacementSheet(candidate: $0) }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
@@ -56,12 +58,14 @@ struct HomeView: View {
             switch Self.debugScreen {
             case "setup": showSetup = true
             case "metrics": showMetricsEditor = true
+            case "auth": authPreview = .signIn
+            case "auth-create": authPreview = .createAccount
             default: break
             }
         }
     }
 
-    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | bottom.
+    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | bottom.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
