@@ -13,6 +13,10 @@ struct HomeView: View {
     @State private var confirmDelete = false
     @State private var scrollPosition = ScrollPosition(edge: .top)
     @State private var benchmarkSpin = false
+    @State private var authPreview: AuthView.Mode?
+    /// Set when sign-in or sign-up finishes and avatar setup still needs doing; opens setup once Account closes.
+    @State private var setupAfterAuth = false
+    @Environment(AuthSession.self) private var auth
 
     var body: some View {
         @Bindable var store = store
@@ -39,6 +43,17 @@ struct HomeView: View {
             SetupFlowView(startAt: store.profile.currentStep)
         }
         .fullScreenCover(item: $placeholder) { PlaceholderView(screen: $0) }
+        .fullScreenCover(item: $authPreview, onDismiss: {
+            if setupAfterAuth {
+                setupAfterAuth = false
+                showSetup = true
+            }
+        }) { mode in
+            AccountFlowView(mode: mode) { _ in
+                setupAfterAuth = !store.profile.setupCompleted
+                authPreview = nil
+            }
+        }
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
         .sheet(item: $photoCandidate) { PhotoReplacementSheet(candidate: $0) }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
@@ -60,13 +75,15 @@ struct HomeView: View {
             switch Self.debugScreen {
             case "setup": showSetup = true
             case "metrics": showMetricsEditor = true
+            case "auth": authPreview = .signIn
+            case "auth-create": authPreview = .createAccount
             default: break
             }
         }
     }
 
     /// Debug and profiling builds can open straight into a screen with
-    /// FM_DEBUG_SCREEN=setup | metrics | bottom | benchmark.
+    /// FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | bottom | benchmark.
     private static var debugScreen: String? {
         #if DEBUG || FM_BENCH
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -110,15 +127,30 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Eyebrow(text: "Fitting Room Suite")
-            Text("My Avatar")
-                .font(.fmSerif(42))
-                .foregroundStyle(Color.fmInk)
-                .accessibilityAddTraits(.isHeader)
-            Text("Your virtual fitting room.")
-                .font(.system(size: 15))
-                .foregroundStyle(Color.fmSecondary)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Eyebrow(text: "Fitting Room Suite")
+                Text("My Avatar")
+                    .font(.fmSerif(42))
+                    .foregroundStyle(Color.fmInk)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Your virtual fitting room.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color.fmSecondary)
+            }
+            Spacer(minLength: 12)
+            Button { authPreview = .signIn } label: {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundStyle(Color.fmInk)
+                    .frame(width: 44, height: 44)
+                    .background(Color.fmCard, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.fmHairline))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Account")
+            .accessibilityValue(auth.user == nil ? "Signed out" : "Signed in")
+            .accessibilityIdentifier("accountButton")
         }
     }
 
