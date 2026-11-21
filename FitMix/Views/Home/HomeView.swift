@@ -12,6 +12,9 @@ struct HomeView: View {
     @State private var placeholder: PlaceholderScreen?
     @State private var confirmDelete = false
     @State private var authPreview: AuthView.Mode?
+    /// Set when sign-in or sign-up finishes and avatar setup still needs doing; opens setup once Account closes.
+    @State private var setupAfterAuth = false
+    @Environment(AuthSession.self) private var auth
 
     var body: some View {
         @Bindable var store = store
@@ -36,7 +39,17 @@ struct HomeView: View {
             SetupFlowView(startAt: store.profile.currentStep)
         }
         .fullScreenCover(item: $placeholder) { PlaceholderView(screen: $0) }
-        .fullScreenCover(item: $authPreview) { AuthView(mode: $0) }
+        .fullScreenCover(item: $authPreview, onDismiss: {
+            if setupAfterAuth {
+                setupAfterAuth = false
+                showSetup = true
+            }
+        }) { mode in
+            AccountFlowView(mode: mode) { _ in
+                setupAfterAuth = !store.profile.setupCompleted
+                authPreview = nil
+            }
+        }
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
         .sheet(item: $photoCandidate) { PhotoReplacementSheet(candidate: $0) }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
@@ -97,6 +110,7 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account")
+            .accessibilityValue(auth.user == nil ? "Signed out" : "Signed in")
             .accessibilityIdentifier("accountButton")
         }
     }
