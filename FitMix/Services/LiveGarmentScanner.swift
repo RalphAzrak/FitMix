@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import OSLog
 import QuartzCore
 
 // MARK: - Live garment scanning (frames → stable targets → one selection)
@@ -28,6 +29,16 @@ nonisolated struct LiveScanState: Sendable, Equatable {
     /// Detection can't run here (the simulator can't run Vision body pose).
     var unavailable = false
     var engine: LiveGarmentDetector.Engine = .vision
+    /// Filled only when the performance overlay is on (FM_DEBUG_PERF_HUD=1).
+    var perf: LivePerf?
+}
+
+/// How fast the scanner is, for the debug overlay and the Instruments signposts.
+nonisolated struct LivePerf: Sendable, Equatable {
+    /// The last analyzed frame.
+    var frame = LiveGarmentDetector.Timings()
+    /// Seconds from the first frame with a person in it until each garment became tappable.
+    var tappableAfter: [GarmentCategory: Double] = [:]
 }
 
 /// The garment the user tapped, with the frame it was detected in. Never written to disk.
@@ -50,6 +61,7 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
     let selected: GarmentCategory
     /// Debug sample data rather than a camera frame.
     var isSample = false
+    var isTestPhoto = false
 
     /// Pads a region a little and cuts it from `frame`.
     static func crop(_ frame: CGImage, to bounds: CGRect, padding: Double = 0.05) -> CGImage? {
@@ -145,8 +157,22 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     /// Analyzing a still (debug recorded frame): its targets don't go stale.
     private var holdingStill = false
     private var lastState = LiveScanState()
+    /// When the current person was first seen, for time-to-tappable.
+    private var personSince: Double?
+    private var lastPersonSeen = 0.0
+    private var tappableAfter: [GarmentCategory: Double] = [:]
+    private let signposter = OSSignposter(subsystem: "app.fitmix", category: "LiveGarmentScanner")
+    private let log = Logger(subsystem: "app.fitmix", category: "LiveGarmentScanner")
 
+    /// Between analyses while nothing is waiting to be confirmed; keeps the phone cool.
     private static let minInterval = 0.12
+    static let perfEnabled: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["FM_DEBUG_PERF_HUD"] == "1"
+        #else
+        false
+        #endif
+    }()
 
     /// `publish` is called on the main queue.
     init(publish: @escaping @MainActor @Sendable (LiveScanState) -> Void) {
@@ -165,12 +191,16 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard !paused, !holdingStill else { return }
         let now = CACurrentMediaTime()
-        guard now - lastRun >= Self.minInterval, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        // A garment seen once is confirmed on the very next frame instead of after the interval,
+        // so it becomes tappable as soon as two frames agree.
+        let confirming = tracker.tracks.values.contains { $0.hits < GarmentTracker.minHits }
+        guard confirming || now - lastRun >= Self.minInterval, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastRun = now
         let extent = CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels))
-        // A copy, so retained frames don't hold the camera's buffer pool.
+        // A copy, so retained frames don't hold the camera's buffer pool. Vision reads the camera's
+        // buffer directly; the copy is what a tap crops.
         guard let image = context.createCGImage(CIImage(cvPixelBuffer: pixels), from: extent) else { return }
-        process(image, time: now)
+        process(image, pixelBuffer: pixels, time: now)
     }
 
     /// Debug builds: analyze a photo as if it were the live feed, so overlays and taps can be
@@ -186,8 +216,11 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         }
     }
 
-    private func process(_ image: CGImage, time: Double, replay: [LiveDetection]? = nil) {
-        let result = replay.map { LiveGarmentDetector.Result(detections: $0) } ?? detector.detect(image, time: time)
+    private func process(_ image: CGImage, pixelBuffer: CVPixelBuffer? = nil, time: Double, replay: [LiveDetection]? = nil) {
+        let interval = signposter.beginInterval("analyze frame")
+        let result = replay.map { LiveGarmentDetector.Result(detections: $0) } ?? detector.detect(image, pixelBuffer: pixelBuffer, time: time)
+        signposter.endInterval("analyze frame", interval,
+                               "\(result.timings.total, format: .fixed(precision: 1)) ms, classify \(result.timings.classify, format: .fixed(precision: 1)) ms")
         var state = LiveScanState(frameSize: CGSize(width: image.width, height: image.height), hint: result.hint,
                                   unavailable: result.failed, engine: detector.engine)
         if !result.failed {
@@ -206,13 +239,38 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         let referenced = Set(tracker.tracks.values.map(\.frameID))
         frames = frames.filter { referenced.contains($0.key) }
         state.targets = tracker.targets
+        measureTappable(result, targets: state.targets, time: time)
+        if Self.perfEnabled { state.perf = LivePerf(frame: result.timings, tappableAfter: tappableAfter) }
         guard state != lastState else { return }
         lastState = state
         publish(state)
     }
 
+    /// Time from first seeing a person to each garment being tappable, once per appearance.
+    private func measureTappable(_ result: LiveGarmentDetector.Result, targets: [LiveTarget], time: Double) {
+        let personVisible = !result.detections.isEmpty || (result.hint != nil && result.hint != .noPerson)
+        if personVisible {
+            if personSince == nil || time - lastPersonSeen > GarmentTracker.staleAfter {
+                personSince = time
+                tappableAfter = [:]
+            }
+            lastPersonSeen = time
+        }
+        guard let since = personSince else { return }
+        // Tappable once this frame's analysis has finished, measured from when the person's first frame arrived.
+        let finished = time + result.timings.total / 1000
+        for target in targets where tappableAfter[target.category] == nil {
+            let seconds = finished - since
+            tappableAfter[target.category] = seconds
+            signposter.emitEvent("tappable", "\(target.category.rawValue, privacy: .public) after \(seconds, format: .fixed(precision: 3)) s")
+            log.info("\(target.category.rawValue, privacy: .public) tappable \(Int(seconds * 1000)) ms after the person appeared")
+        }
+    }
+
     private func clear() {
         tracker.reset()
+        personSince = nil
+        tappableAfter = [:]
         frames = [:]
         holdingStill = false
         recentSharpness = 0

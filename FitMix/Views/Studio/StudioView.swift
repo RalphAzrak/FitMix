@@ -22,6 +22,8 @@ struct StudioView: View {
     @State private var showLiveTwinInfo = false
     @State private var mode: PreviewMode = .tryOn
     @State private var addPhoto = false
+    @State private var matchListPiece: WorkingLook.Piece?
+    @State private var needsAvatar = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +35,7 @@ struct StudioView: View {
                         modeSwitch.padding(.bottom, 10)
                         switch mode {
                         case .tryOn:
-                            TryOnHero(preview: studio.preview, source: studio.tryOnSource,
+                            TryOnHero(preview: studio.preview, source: studio.tryOnSource, avatarListing: studio.avatarTryOn,
                                       addPhoto: { addPhoto = true }, retry: studio.retryPreview,
                                       zoom: { showZoom = true })
                         case .street:
@@ -56,6 +58,28 @@ struct StudioView: View {
         .fullScreenCover(isPresented: $showAccount) { AccountFlowView() }
         .sheet(isPresented: $showShopping) { ShoppingReviewView() }
         .sheet(item: $swapPiece) { SwapPickerSheet(piece: $0) }
+        .sheet(item: $matchListPiece) { piece in
+            MatchListSheet(category: piece.detected.category, listings: studio.matchLists[piece.id] ?? [],
+                           chosenID: studio.matchStates[piece.id].flatMap { if case .found(let p) = $0 { p.id } else { nil } }) { product in
+                studio.chooseListing(product, for: piece.id)
+                matchListPiece = nil
+            }
+        }
+        #if DEBUG
+        // FM_DEBUG_AUTO_TRYON=1: press "Try on my avatar" once the selected garment's match arrives.
+        .task(id: studio.selectedPiece.flatMap { studio.matchStates[$0.id] }) {
+            // Runs on appear too, in case the match arrived before Studio did.
+            guard ProcessInfo.processInfo.environment["FM_DEBUG_AUTO_TRYON"] == "1", studio.avatarTryOn == nil,
+                  let piece = studio.selectedPiece, case .found? = studio.matchStates[piece.id] else { return }
+            try? await Task.sleep(for: .seconds(2))
+            tryOnAvatar(piece)
+        }
+        #endif
+        .alert("Create your avatar first", isPresented: $needsAvatar) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Try-on uses your full-body avatar. Create it in My Avatar, then come back to try this on.")
+        }
         .fullScreenCover(isPresented: $showZoom) {
             if mode == .tryOn, let image = tryOnImage {
                 ZoomableImageView(image: image, focus: nil, focusLabel: nil)
@@ -77,6 +101,15 @@ struct StudioView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(liveTwinMessage)
+        }
+    }
+
+    /// "Try on my avatar" on a found card: the chosen listing plus the user's full-body avatar go to try-on.
+    private func tryOnAvatar(_ piece: WorkingLook.Piece) {
+        if studio.tryOnAvatar(pieceID: piece.id, avatar: avatar.avatarImage) {
+            withAnimation(.snappy(duration: 0.2)) { mode = .tryOn }
+        } else if avatar.avatarImage == nil {
+            needsAvatar = true
         }
     }
 
@@ -200,7 +233,8 @@ struct StudioView: View {
             .frame(minHeight: 44)
             #if DEBUG
             if let scan = studio.scan, SampleScans.kind(of: scan) == .fixture {
-                NoticeRow(tone: .caution, text: "Test fixture: garment data is from scan.json")
+                NoticeRow(tone: .caution, text: studio.isLiveLook ? "Test fixture: Camera used a test photo"
+                                                                : "Test fixture: garment data is from scan.json")
                     .font(.system(size: 12))
                     .accessibilityIdentifier("fixtureNotice")
             }
@@ -214,8 +248,11 @@ struct StudioView: View {
                             ForEach(look.pieces) { piece in
                                 RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
                                                   state: studio.matchStates[piece.id],
+                                                  moreCount: max(0, (studio.matchLists[piece.id]?.count ?? 0) - 1),
                                                   select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
-                                                  retry: { studio.findMatch(for: piece.id) })
+                                                  retry: { studio.findMatch(for: piece.id) },
+                                                  showMore: { matchListPiece = piece },
+                                                  tryOnAvatar: { tryOnAvatar(piece) })
                                     .containerRelativeFrame(.horizontal, count: 5, span: 3, spacing: 10)
                                     .id(piece.id)
                             }
@@ -507,8 +544,12 @@ private struct RetailerMatchCard: View {
     var piece: WorkingLook.Piece
     var selected: Bool
     var state: RetailerMatchState?
+    /// How many other ranked listings there are.
+    var moreCount: Int = 0
     var select: () -> Void
     var retry: () -> Void
+    var showMore: () -> Void = {}
+    var tryOnAvatar: () -> Void = {}
 
     @Environment(\.openURL) private var openURL
 
@@ -542,7 +583,8 @@ private struct RetailerMatchCard: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(selected ? AuthPalette.primary : AuthPalette.onSurface)
                 if let product {
-                    TagPill(text: product.match == .exact ? "Exact match" : "Similar match")
+                    TagPill(text: product.matchLabel)
+                        .accessibilityIdentifier("matchLabel")
                 }
                 Spacer(minLength: 0)
             }
@@ -608,6 +650,25 @@ private struct RetailerMatchCard: View {
                     .accessibilityHint("Opens the listing at \(product.retailer ?? "the retailer")")
                     .accessibilityIdentifier("viewListing")
                 }
+                Button(action: tryOnAvatar) {
+                    Label("Try on my avatar", systemImage: "person.crop.rectangle")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(minHeight: 36)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(AuthPalette.primary)
+                .accessibilityHint("Shows this listing with your full-body avatar")
+                .accessibilityIdentifier("tryOnAvatar")
+                if moreCount > 0 {
+                    Button(action: showMore) {
+                        Label("More matches (\(moreCount))", systemImage: "list.bullet")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(minHeight: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AuthPalette.primary)
+                    .accessibilityIdentifier("moreMatches")
+                }
             }
         case .searching:
             Text("Searching retailers for \(category.searchNoun) only.")
@@ -656,6 +717,64 @@ private extension GarmentCategory {
         case .tshirt: "this T-shirt"
         default: "this \(title.lowercased())"
         }
+    }
+}
+
+/// Every ranked listing for one garment: exact matches first, then likely-same-brand, then similar.
+private struct MatchListSheet: View {
+    var category: GarmentCategory
+    var listings: [CatalogProduct]
+    var chosenID: String?
+    var choose: (CatalogProduct) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        NavigationStack {
+            List(listings) { product in
+                Button { choose(product) } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        GarmentTile(source: product.image.tileSource, category: category)
+                            .frame(width: 72, height: 72)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                TagPill(text: product.matchLabel)
+                                if product.isFixture { TagPill(text: "Test fixture") }
+                                if product.id == chosenID {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(AuthPalette.primaryContainer)
+                                        .accessibilityLabel("Chosen")
+                                }
+                            }
+                            Text(product.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                                .lineLimit(2)
+                            if let retailer = product.retailer {
+                                Text(retailer).font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                            }
+                            Text(product.price.map { "\($0.formatted) \($0.currencyCode)" } ?? "Price unavailable")
+                                .font(.system(size: 13, weight: product.price == nil ? .regular : .bold))
+                                .foregroundStyle(product.price == nil ? AuthPalette.secondary : AuthPalette.onSurface)
+                            ForEach(product.evidence, id: \.self) { line in
+                                Label(line, systemImage: "checkmark.seal").font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
+                            }
+                            if let url = product.retailerURL {
+                                Button("View listing") { openURL(url) }
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(product.id == chosenID ? .isSelected : [])
+            }
+            .listStyle(.plain)
+            .navigationTitle("Matches")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .accessibilityIdentifier("matchList")
     }
 }
 

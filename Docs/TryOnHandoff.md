@@ -9,6 +9,20 @@ Flow: **Camera → Outfit Review → Try Full Look → Studio**.
 | Try Full Look | same file, `tryFullLook()` | Uses `AvatarStore.bodyPhoto` if saved; otherwise `TryOnPhotoSheet` asks for one (camera or Photos, on-device full-body check, saved with `saveBodyPhoto`). Then `studio.open(scan, selected:, tryOnSource:)`. |
 | Studio preview | `StudioStore.refreshPreview()`, `TryOnHero` | Builds a `TryOnRequest` from the **original** photo and the full current selection, on open and after every swap. Older results are dropped by `signature`. |
 
+## Try on my avatar (listing handoff)
+
+On a live garment's card, once a listing is chosen, **Try on my avatar** calls
+`StudioStore.tryOnAvatar(pieceID:avatar:)` with `AvatarStore.avatarImage`, the full-body portrait from My Avatar.
+It records an `AvatarTryOn` (listing ID, category, product name, product image URL and the listing photo), makes the
+avatar the try-on source, and builds a `TryOnRequest` with exactly one garment:
+`TryOnGarment(category:, productID: <listing ID>, image: <listing photo>, productImageURL:)`. Nothing from the
+street capture is applied. Studio switches to **Your Try-On**, shows the avatar labeled
+**YOUR AVATAR · NOT A TRY-ON** with the listing's photo and name, and says try-on can't be generated yet. With no
+avatar, Studio asks the user to create one in My Avatar first. Choosing a different listing clears the handoff.
+
+Verified in the simulator with `FM_DEBUG_TRYON_STUB=1`: the stand-in renderer received the avatar and stamped
+"Shoes: <listing ID>" on it.
+
 ## What's missing: the renderer
 
 `TryOnRenderers.current` (in `FitMix/Models/TryOn.swift`) is `nil`, so Studio shows the user's
@@ -40,6 +54,20 @@ renderer calls. Garment cutouts from the Camera's segmentation (issue 09) give m
 than crops. Catalog product images are used for swapped pieces; remote product images (`.remote`
 URLs) are currently passed as `image = nil`, so the renderer should download `productID`'s image
 itself or the catalog should provide local images.
+
+### Generation work that remains
+
+1. **A try-on model.** Its inputs are a person image (the avatar portrait) and a garment product image; its output is
+   the person wearing that garment, with everything else unchanged. Options include a hosted VTON model, or an
+   image-edit model given both images. Either belongs behind the FitMix backend, like `/v1/avatar`, so its keys stay
+   server-side.
+2. **A backend endpoint**, e.g. `POST /v1/try-on`, taking the avatar image, the category and the listing's product
+   image (or its URL, fetched server-side through the same public-host check as listing pages), and returning a PNG.
+   It should be rate limited, and should log and store nothing, like `/v1/avatar`.
+3. **A `TryOnRenderer`** that calls it, reports `producesTryOn = true` only for real try-ons, and is assigned in
+   `TryOnRenderers.current` at launch.
+4. **Consent copy.** The avatar (derived from the user's photos) would go to the try-on provider. That is separate from
+   product search, which never receives it.
 
 ## Debugging without a renderer
 

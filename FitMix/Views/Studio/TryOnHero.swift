@@ -6,6 +6,8 @@ import UIKit
 struct TryOnHero: View {
     var preview: TryOnPreview
     var source: UIImage?
+    /// Set after "Try on my avatar": `source` is the avatar and this listing is what goes on it.
+    var avatarListing: AvatarTryOn? = nil
     var addPhoto: () -> Void
     var retry: () -> Void
     var zoom: () -> Void
@@ -18,7 +20,11 @@ struct TryOnHero: View {
         .containerRelativeFrame(.vertical) { length, _ in min(max(length - 330, 180), 520) }
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(alignment: .topLeading) {
-            if let label { StatusPill(text: label.text, emphasized: label.isTryOn).padding(10) }
+            VStack(alignment: .leading, spacing: 6) {
+                if let label { StatusPill(text: label.text, emphasized: label.isTryOn) }
+                if let avatarListing { ListingChip(listing: avatarListing) }
+            }
+            .padding(10)
         }
         .overlay(alignment: .bottomTrailing) {
             if displayedImage != nil {
@@ -50,7 +56,9 @@ struct TryOnHero: View {
         case .ready(_, let isTryOn, _):
             return isTryOn ? ("TRY-ON", true) : ("STAND-IN · NOT A TRY-ON", false)
         case .needsPhoto: return nil
-        default: return source == nil ? nil : ("YOUR PHOTO · NOT A TRY-ON", false)
+        default:
+            guard source != nil else { return nil }
+            return (avatarListing == nil ? "YOUR PHOTO · NOT A TRY-ON" : "YOUR AVATAR · NOT A TRY-ON", false)
         }
     }
 
@@ -78,10 +86,16 @@ struct TryOnHero: View {
             .accessibilityIdentifier("tryOnRendering")
         case .unavailable:
             ZStack(alignment: .bottom) {
-                if let source { photo(source, label: "Your photo as taken") }
-                statusCard(icon: "hourglass", title: "Try-on isn't available yet",
-                           detail: "This is your photo as you took it. FitMix can't put the selected clothes on it yet. Switch to Street Look to see the outfit.")
-                    .padding(.bottom, 56)
+                if let source { photo(source, label: avatarListing == nil ? "Your photo as taken" : "Your avatar") }
+                if let avatarListing {
+                    statusCard(icon: "hourglass", title: "Try-on isn't available yet",
+                               detail: "This is your avatar. \(avatarListing.productName) is ready to try on, but FitMix can't generate the try-on image yet.")
+                        .padding(.bottom, 56)
+                } else {
+                    statusCard(icon: "hourglass", title: "Try-on isn't available yet",
+                               detail: "This is your photo as you took it. FitMix can't put the selected clothes on it yet. Switch to Street Look to see the outfit.")
+                        .padding(.bottom, 56)
+                }
             }
             .accessibilityIdentifier("tryOnUnavailable")
         case .nothingSelected:
@@ -132,6 +146,35 @@ struct TryOnHero: View {
         .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(.horizontal, 14)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The listing headed for the avatar: its own product photo and name.
+private struct ListingChip: View {
+    var listing: AvatarTryOn
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Group {
+                if let image = listing.productImage {
+                    Image(uiImage: image).resizable().scaledToFit()
+                } else {
+                    Image(systemName: listing.category.symbol).foregroundStyle(AuthPalette.secondary)
+                }
+            }
+            .frame(width: 36, height: 36)
+            .background(.white, in: RoundedRectangle(cornerRadius: 6))
+            Text(listing.productName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AuthPalette.onSurface)
+                .lineLimit(2)
+                .frame(maxWidth: 140, alignment: .leading)
+        }
+        .padding(6)
+        .background(.white.opacity(0.92), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Trying on \(listing.productName)")
+        .accessibilityIdentifier("avatarListing")
     }
 }
 

@@ -31,7 +31,7 @@ struct SwapPickerSheet: View {
                             option(id: product.id, title: product.name,
                                    subtitle: product.brand,
                                    source: product.image.tileSource,
-                                   tag: product.match == .similar ? "Similar" : "Exact match",
+                                   tag: product.matchLabel,
                                    price: product.price)
                         }
                     }

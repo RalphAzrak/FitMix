@@ -1,13 +1,6 @@
-"""Retailer matching for one garment the user selected in the live camera.
-
-The app sends only that garment's crop (never the full outfit frame), its category (jacket, tshirt, pants or
-shoes), and attributes read on the phone (dominant colour, words printed on the garment). This module asks a
-product-search provider for real listings and keeps only those in the selected category.
-
-Provider today: eBay Browse API `item_summary/search_by_image` (official, authorized; free developer account).
-Its keys live only in this server's environment. Every name, price, currency, image and link returned comes
-from the listing itself; nothing is estimated. Results are "similar" matches: image search alone is no
-evidence that a listing is the exact same product.
+"""eBay Browse API client used by `providers.EbayProvider`: OAuth app token, `item_summary/search_by_image`, the
+category check for its results, and turning an item summary into listing fields. Ranking and match labels live in
+`visual_search.py`; eBay is one provider among several.
 """
 
 import asyncio
@@ -16,7 +9,6 @@ import logging
 import re
 import time
 from dataclasses import asdict, dataclass
-from typing import Protocol
 
 import httpx
 
@@ -44,12 +36,6 @@ CATEGORY_WORDS = {
 # ...and, where the category is broad (Women's Tops), its title says what it is.
 TITLE_WORDS = {"tshirt": ("t-shirt", "t shirt", "tshirt", "tee")}
 
-COLOR_SYNONYMS = {"gray": ("gray", "grey"), "beige": ("beige", "tan", "cream", "khaki"), "navy": ("navy",),
-                  "burgundy": ("burgundy", "maroon", "wine"), "olive": ("olive", "khaki")}
-
-MAX_RESULTS = 5
-
-
 class MatchError(Exception):
     """A provider failure the app can show. `code` decides whether the app offers Retry."""
 
@@ -73,13 +59,6 @@ class Listing:
         return asdict(self)
 
 
-class Matcher(Protocol):
-    name: str
-    fixture: bool
-
-    async def search(self, category: str, image: bytes, color: str | None, brand_hints: list[str]) -> list[Listing]: ...
-
-
 def keep(category: str, item: dict) -> bool:
     """True when an eBay item summary is in the selected garment category."""
     names = " ".join(c.get("categoryName", "") for c in item.get("categories") or []).lower()
@@ -89,24 +68,6 @@ def keep(category: str, item: dict) -> bool:
     if title_words and "t-shirts" not in names:
         return any(word in (item.get("title") or "").lower() for word in title_words)
     return True
-
-
-def rank(candidates: list[tuple[int, Listing]], color: str | None, brand_hints: list[str]) -> list[Listing]:
-    """Provider order first (it is visual similarity), nudged by the colour and any brand read on the garment."""
-    colors = COLOR_SYNONYMS.get(color or "", (color,) if color else ())
-    hints = [h for h in brand_hints if len(h) >= 3]
-
-    def score(entry: tuple[int, Listing]) -> float:
-        position, listing = entry
-        title = listing.title.lower()
-        value = 1.0 / (1 + position)
-        if any(re.search(rf"\b{re.escape(c)}\b", title) for c in colors):
-            value += 0.35
-        if any(re.search(rf"\b{re.escape(h)}\b", title) for h in hints):
-            value += 0.5
-        return value
-
-    return [listing for _, listing in sorted(candidates, key=score, reverse=True)]
 
 
 def listing_from_ebay(item: dict) -> Listing | None:
@@ -185,32 +146,3 @@ class EbayMatcher:
                 raise MatchError(502, "provider_rejected", "eBay couldn't search with this image. Try scanning the garment again.")
             return response.json().get("itemSummaries") or []
         return []
-
-    async def search(self, category: str, image: bytes, color: str | None, brand_hints: list[str]) -> list[Listing]:
-        encoded = base64.b64encode(image).decode()
-        pages = await asyncio.gather(*(self._search_category(cid, encoded) for cid in EBAY_CATEGORY_IDS[category]))
-        seen: set[str] = set()
-        candidates: list[tuple[int, Listing]] = []
-        for page in pages:
-            for position, item in enumerate(page):
-                if not keep(category, item):
-                    continue
-                listing = listing_from_ebay(item)
-                if listing and listing.id not in seen:
-                    seen.add(listing.id)
-                    candidates.append((position, listing))
-        return rank(candidates, color, brand_hints)[:MAX_RESULTS]
-
-
-class FixtureMatcher:
-    """FITMIX_MATCH_PROVIDER=fixture: development data, clearly marked, nothing sent anywhere."""
-
-    name = "fixture"
-    fixture = True
-
-    async def search(self, category: str, image: bytes, color: str | None, brand_hints: list[str]) -> list[Listing]:
-        await asyncio.sleep(1)
-        label = {"tshirt": "T-shirt"}.get(category, category.capitalize())
-        return [Listing(id=f"fixture-{category}", title=f"Test fixture {label.lower()} (not a real listing)",
-                        retailer="FitMix test fixture", seller=None, image_url=None, url=None,
-                        price={"value": "42.00", "currency": "USD"})]

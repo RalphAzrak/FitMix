@@ -2,8 +2,9 @@
 
 - `POST /v1/avatar`: the app posts the user's photos; this server adds the instruction and calls OpenAI's Image
   Edits API.
-- `POST /v1/garment-match`: the app posts one garment's crop and category; this server searches a retailer
-  catalog (eBay Browse API) and returns real listings in that category.
+- `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
+  server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
+  labeled "exact", "brand" or "similar" (see visual_search.py).
 
 Provider keys live only in this process's environment. Images are held in memory for the length of one request:
 they are never written to disk and never logged.
@@ -16,6 +17,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -27,7 +29,12 @@ from fastapi.responses import JSONResponse, Response
 
 from .mock import placeholder_png
 from .prompt import build_prompt
-from .retail import CATEGORIES, EbayMatcher, FixtureMatcher, Matcher, MatchError
+from .listing import ListingEnricher
+from .providers import CropHost, EbayProvider, FixtureProvider, ScrappaLensProvider
+from .retail import EbayMatcher
+from .visual_search import CATEGORIES, Clues, Enricher, ProviderError, VisualProvider, search_all
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "visual.json"
 
 log = logging.getLogger("fitmix")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,8 +60,14 @@ class Settings:
     ebay_client_id: str = field(default="", repr=False)
     ebay_client_secret: str = field(default="", repr=False)
     ebay_marketplace: str = "EBAY_US"
-    # "ebay" (real listings, needs the keys above) or "fixture" (labeled test data, no keys, nothing sent).
-    match_provider: str = "ebay"
+    # Which providers receive garment crops, in FITMIX_VISUAL_PROVIDERS (comma-separated): ebay, google_lens,
+    # fixture. Default: eBay when its keys are set. google_lens (Scrappa) is never on unless listed here.
+    visual_providers: tuple[str, ...] = ("ebay",)
+    scrappa_api_key: str = field(default="", repr=False)
+    # An https address of this server that Scrappa can reach, to fetch the crop it is asked about.
+    public_base_url: str = ""
+    # Read listing pages for photo, price, currency, brand and codes.
+    listing_enrichment: bool = True
     match_rate_limit_per_hour: int = 120
 
     @staticmethod
@@ -72,7 +85,10 @@ class Settings:
             ebay_client_id=env.get("EBAY_CLIENT_ID", "").strip(),
             ebay_client_secret=env.get("EBAY_CLIENT_SECRET", "").strip(),
             ebay_marketplace=env.get("EBAY_MARKETPLACE_ID", "").strip() or Settings.ebay_marketplace,
-            match_provider=env.get("FITMIX_MATCH_PROVIDER", "").strip().lower() or Settings.match_provider,
+            visual_providers=_provider_list(env),
+            scrappa_api_key=env.get("SCRAPPA_API_KEY", "").strip(),
+            public_base_url=env.get("FITMIX_PUBLIC_BASE_URL", "").strip(),
+            listing_enrichment=env.get("FITMIX_LISTING_ENRICHMENT", "1").strip().lower() not in ("0", "false", "no"),
             match_rate_limit_per_hour=int(env.get("FITMIX_MATCH_RATE_LIMIT_PER_HOUR", "") or Settings.match_rate_limit_per_hour),
         )
 
@@ -145,24 +161,52 @@ class OpenAIGenerator:
                                              quality=self.settings.quality, n=1, **options)
 
 
-def default_matcher(settings: Settings) -> Matcher | None:
-    if settings.match_provider == "fixture":
-        return FixtureMatcher()
-    if settings.match_provider == "ebay" and settings.ebay_client_id and settings.ebay_client_secret:
-        return EbayMatcher(settings.ebay_client_id, settings.ebay_client_secret, settings.ebay_marketplace)
-    return None
+def _provider_list(env) -> tuple[str, ...]:
+    listed = env.get("FITMIX_VISUAL_PROVIDERS", "").strip()
+    if not listed:  # older setting: FITMIX_MATCH_PROVIDER=ebay|fixture
+        listed = env.get("FITMIX_MATCH_PROVIDER", "").strip() or "ebay"
+    return tuple(p.strip().lower() for p in listed.split(",") if p.strip())
+
+
+def default_providers(settings: Settings, crop_host: CropHost) -> tuple[list[VisualProvider], list[dict]]:
+    """The providers that can run, plus why any listed one can't."""
+    ready, skipped = [], []
+    for name in settings.visual_providers:
+        if name == "fixture":
+            ready.append(FixtureProvider(FIXTURE_PATH))
+        elif name == "ebay":
+            if settings.ebay_client_id and settings.ebay_client_secret:
+                ready.append(EbayProvider(EbayMatcher(settings.ebay_client_id, settings.ebay_client_secret, settings.ebay_marketplace)))
+            else:
+                skipped.append({"name": "ebay", "status": "skipped", "message": "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not set"})
+        elif name in ("google_lens", "scrappa"):
+            if not settings.scrappa_api_key:
+                skipped.append({"name": "google_lens", "status": "skipped", "message": "SCRAPPA_API_KEY not set"})
+            elif not settings.public_base_url.startswith("https://"):
+                skipped.append({"name": "google_lens", "status": "skipped",
+                                "message": "FITMIX_PUBLIC_BASE_URL must be an https address Scrappa can reach"})
+            else:
+                ready.append(ScrappaLensProvider(settings.scrappa_api_key, settings.public_base_url, crop_host))
+        else:
+            skipped.append({"name": name, "status": "skipped", "message": "unknown provider"})
+    return ready, skipped
 
 
 def create_app(settings: Settings | None = None, generator: Generator | None = None,
-               matcher: Matcher | None = None) -> FastAPI:
+               providers: list[VisualProvider] | None = None, enricher: Enricher | None = None,
+               crop_host: CropHost | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
     if generator is None:
         if settings.mock:
             generator = MockGenerator()
         elif settings.api_key:
             generator = OpenAIGenerator(settings)
-    if matcher is None:
-        matcher = default_matcher(settings)
+    crop_host = crop_host or CropHost()
+    skipped: list[dict] = []
+    if providers is None:
+        providers, skipped = default_providers(settings, crop_host)
+    if enricher is None and settings.listing_enrichment:
+        enricher = ListingEnricher()
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
     recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -199,7 +243,16 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     @app.get("/health")
     async def health():
         return {"status": "ok", "ready": generator is not None, "mock": settings.mock,
-                "match_ready": matcher is not None, "match_provider": matcher.name if matcher else None}
+                "match_ready": bool(providers), "match_providers": [p.name for p in providers],
+                "match_skipped": skipped}
+
+    @app.get("/v1/crops/{token}.jpg")
+    async def crop_for_provider(token: str):
+        """A garment crop published for an image-URL provider (Scrappa). Unguessable, short-lived, few fetches."""
+        data = crop_host.fetch(token)
+        if data is None:
+            return Response(status_code=404)
+        return Response(content=data, media_type=_media_type(data) or "image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/garment-match")
     async def garment_match(
@@ -207,32 +260,43 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         category: str = Form(...),
         color: str | None = Form(None),
         brand_hints: str | None = Form(None),
+        text: str | None = Form(None),
+        pattern: str | None = Form(None),
+        style: str | None = Form(None),
         _: str = Depends(authorize_match),
     ):
         if category not in CATEGORIES:
             raise ApiError(400, "invalid_category", "FitMix can search for a jacket, T-shirt, pants or shoes.")
-        if matcher is None:
-            raise ApiError(503, "not_configured",
-                           "Retailer search isn't set up yet: the server has no eBay API keys (EBAY_CLIENT_ID, EBAY_CLIENT_SECRET).")
+        if not providers:
+            reasons = "; ".join(f"{s['name']}: {s['message']}" for s in skipped) or "no provider is enabled"
+            raise ApiError(503, "not_configured", f"Retailer search isn't set up yet ({reasons}).")
         data = await crop.read(MAX_CROP_BYTES + 1)
         if len(data) > MAX_CROP_BYTES:
             raise ApiError(413, "image_too_large", "The garment image is too large to send.")
         if _media_type(data) is None:
             raise ApiError(400, "invalid_image", "The garment image isn't a JPEG, PNG or WebP picture.")
-        hints = [h.strip().lower() for h in (brand_hints or "").split(",") if h.strip()][:3]
-        color = (color or "").strip().lower()[:20] or None
 
+        def words(value: str | None, limit: int) -> list[str]:
+            return [w.strip().lower()[:40] for w in (value or "").split(",") if w.strip()][:limit]
+
+        clues = Clues(category=category, color=(color or "").strip().lower()[:20] or None,
+                      brand_hints=words(brand_hints, 3), text=words(text, 12),
+                      pattern=(pattern or "").strip().lower()[:30] or None, style=(style or "").strip().lower()[:30] or None)
         started = time.monotonic()
         try:
-            results = await matcher.search(category, data, color, hints)
-        except MatchError as error:
+            outcome = await search_all(providers, data, clues, enricher)
+        except ProviderError as error:
             log.info("match %s: failed (%s) after %.1fs", category, error.code, time.monotonic() - started)
-            raise ApiError(error.status, error.code, error.message)
-        log.info("match %s: %d KB crop, %d result(s) in %.1fs", category, len(data) // 1024, len(results),
-                 time.monotonic() - started)
-        return JSONResponse({"status": "matched" if results else "no_match", "category": category,
-                             "provider": matcher.name, "fixture": matcher.fixture,
-                             "results": [r.to_json() for r in results]}, headers={"Cache-Control": "no-store"})
+            status = 504 if error.code == "provider_timeout" else 503 if error.code == "provider_busy" else 502
+            raise ApiError(status, error.code if not error.retryable or error.code.startswith("provider_") else "provider_error",
+                           error.message)
+        tiers = [r.tier for r in outcome.results]
+        log.info("match %s: %d KB crop, %d result(s) %s in %.1fs", category, len(data) // 1024, len(tiers),
+                 {t: tiers.count(t) for t in set(tiers)}, time.monotonic() - started)
+        return JSONResponse({"status": "matched" if outcome.results else "no_match", "category": category,
+                             "fixture": any(r.candidate.fixture for r in outcome.results),
+                             "providers": outcome.providers + skipped,
+                             "results": [r.to_json() for r in outcome.results]}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(
