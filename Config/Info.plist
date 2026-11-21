@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Merged with the generated Info.plist. Registers fitmix:// for password-reset links. -->
+	<!-- Merged with the generated Info.plist. Registers fitmix:// for auth email links (reset password, confirm sign-up, email change). -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

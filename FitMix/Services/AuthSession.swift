@@ -12,6 +12,9 @@ enum SupabaseConfig {
     /// Where email-change confirmation links send people. Add it to the same Redirect URLs list;
     /// if it isn't listed, Supabase falls back to the Site URL and the change still completes.
     static let emailChangeRedirect = URL(string: "fitmix://email-change")!
+    /// Where sign-up confirmation links (and resent ones) send people. Add it to the same Redirect
+    /// URLs list; if it isn't listed, Supabase sends the link to the Site URL instead.
+    static let signupRedirect = URL(string: "fitmix://confirm-email")!
 }
 
 /// The signed-in FitMix account, as shown in the app.
@@ -85,6 +88,22 @@ final class AuthSession {
         case invalid(String)
     }
 
+    /// A sign-up confirmation link that has been opened.
+    enum Confirmation: Equatable {
+        enum Reason: Equatable {
+            /// Supabase reported the link as expired, already used, or invalid.
+            case linkRejected
+            /// FitMix couldn't confirm the link here: opened on another device or install, a code
+            /// already used, a network problem, or a link that wasn't from Supabase.
+            case notConfirmedHere
+        }
+        case verifying
+        /// Supabase exchanged the link's code for a session: the email is confirmed and the user is signed in.
+        case verified(email: String?)
+        /// FitMix couldn't establish that the email is confirmed. The user can sign in or ask for a new link.
+        case unconfirmed(email: String?, reason: Reason)
+    }
+
     /// Shown on Sign In the next time it appears, e.g. after a password change.
     struct SignInNotice: Equatable {
         var email: String?
@@ -93,9 +112,13 @@ final class AuthSession {
 
     private(set) var state: State = .restoring
     private(set) var recovery: Recovery?
+    private(set) var confirmation: Confirmation?
     var signInNotice: SignInNotice?
     /// Set after an email-change confirmation link is opened, for Account details to show.
     var emailChangeNotice: String?
+
+    /// True while a reset or confirmation link needs the Account screen.
+    var hasOpenAuthLink: Bool { recovery != nil || confirmation != nil }
 
     var user: AccountUser? {
         if case .signedIn(let user) = state { return user }
@@ -143,8 +166,11 @@ final class AuthSession {
         do {
             let session = try await client.auth.signIn(email: email, password: password)
             state = .signedIn(AccountUser(session.user))
+            pendingConfirmationEmail = nil
         } catch {
-            throw AuthFailure(error)
+            let failure = AuthFailure(error)
+            if failure.needsConfirmation { pendingConfirmationEmail = email }
+            throw failure
         }
     }
 
@@ -194,19 +220,42 @@ final class AuthSession {
             let response = try await client.auth.signUp(
                 email: email,
                 password: password,
-                data: ["full_name": .string(fullName)]
+                data: ["full_name": .string(fullName)],
+                redirectTo: SupabaseConfig.signupRedirect
             )
             switch response {
             case .session(let session):
                 state = .signedIn(AccountUser(session.user))
                 return .signedIn
             case .user:
+                pendingConfirmationEmail = email
                 return .confirmEmail(email)
             }
         } catch {
             throw AuthFailure(error)
         }
     }
+
+    /// Sends a new sign-up confirmation link. Supabase answers the same way for unknown and
+    /// already-confirmed addresses, so this never reveals which emails have accounts.
+    func resendConfirmation(email: String) async throws {
+        do {
+            try await client.auth.resend(email: email, type: .signup, emailRedirectTo: SupabaseConfig.signupRedirect)
+            pendingConfirmationEmail = email
+        } catch let error as AuthError where [.userNotFound, .emailAddressNotAuthorized].contains(error.errorCode) {
+            // Treated like success, for the same reason as password reset.
+        } catch {
+            throw AuthFailure(error)
+        }
+    }
+
+    /// The address that most recently signed up or was told to confirm, kept on this device so the
+    /// confirmation screens can fill it in after a relaunch. Cleared once that account signs in.
+    private(set) var pendingConfirmationEmail: String? {
+        get { UserDefaults.standard.string(forKey: Self.pendingEmailKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.pendingEmailKey) }
+    }
+    private static let pendingEmailKey = "auth.pendingConfirmationEmail"
 
     // MARK: Password reset
 
@@ -222,15 +271,20 @@ final class AuthSession {
         }
     }
 
-    /// Opens a link from a password-reset email. Returns false for URLs that aren't reset links.
+    /// Opens a link from a FitMix auth email (reset password, confirm sign-up, confirm email
+    /// change). Returns false for URLs that aren't one of those. Link URLs carry one-time codes,
+    /// so they are never logged or shown.
     @discardableResult
     func handle(url: URL) -> Bool {
-        if url.scheme == SupabaseConfig.emailChangeRedirect.scheme, url.host == SupabaseConfig.emailChangeRedirect.host {
+        if Self.matches(url, SupabaseConfig.emailChangeRedirect) {
             handleEmailChange(url: url)
             return true
         }
-        guard url.scheme == SupabaseConfig.passwordResetRedirect.scheme,
-              url.host == SupabaseConfig.passwordResetRedirect.host else { return false }
+        if Self.matches(url, SupabaseConfig.signupRedirect) {
+            handleConfirmation(url: url)
+            return true
+        }
+        guard Self.matches(url, SupabaseConfig.passwordResetRedirect) else { return false }
         recovery = .verifying
         Task {
             do {
@@ -260,6 +314,50 @@ final class AuthSession {
         }
         signInNotice = notice.map { SignInNotice(email: $0.email ?? email, message: $0.message) }
         recovery = nil
+    }
+
+    /// Ends the confirmation screen, e.g. to go to Sign In or after continuing into FitMix.
+    func finishConfirmation() {
+        confirmation = nil
+    }
+
+    private func handleConfirmation(url: URL) {
+        let params = Self.linkParameters(url)
+        let email = pendingConfirmationEmail
+        // Supabase checks the email token before redirecting: failures arrive as `error…`
+        // parameters (expired, already used, or invalid all report `otp_expired`).
+        guard params["error"] == nil, params["error_code"] == nil, params["error_description"] == nil,
+              params["code"] != nil else {
+            confirmation = .unconfirmed(email: email, reason: .linkRejected)
+            return
+        }
+        confirmation = .verifying
+        Task {
+            do {
+                // PKCE: trades the code for a session using the verifier saved when this device signed up.
+                let session = try await client.auth.session(from: url)
+                state = .signedIn(AccountUser(session.user))
+                pendingConfirmationEmail = nil
+                confirmation = .verified(email: session.user.email)
+            } catch {
+                // Only a successful exchange proves the confirmation. Anyone can open a
+                // fitmix://confirm-email?code=… URL, so a failed exchange says nothing either way.
+                confirmation = .unconfirmed(email: email, reason: .notConfirmedHere)
+            }
+        }
+    }
+
+    private static func matches(_ url: URL, _ redirect: URL) -> Bool {
+        url.scheme?.lowercased() == redirect.scheme && url.host?.lowercased() == redirect.host
+    }
+
+    /// Query and fragment parameters of an auth link. Supabase puts errors in either.
+    private static func linkParameters(_ url: URL) -> [String: String] {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return [:] }
+        var fragment = URLComponents()
+        fragment.percentEncodedQuery = components.percentEncodedFragment
+        let items = (components.queryItems ?? []) + (fragment.queryItems ?? [])
+        return Dictionary(items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
     }
 
     private func handleEmailChange(url: URL) {

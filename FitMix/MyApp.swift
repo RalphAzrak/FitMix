@@ -17,8 +17,17 @@ import SwiftUI
                 .environment(studio)
                 .environment(profile)
                 .preferredColorScheme(.light)
-                // Password-reset links (fitmix://reset-password), including when the app was closed.
+                // Auth email links (fitmix://reset-password, confirm-email, email-change), including when the app was closed.
                 .onOpenURL { auth.handle(url: $0) }
+                #if DEBUG
+                // Debug builds only: FM_DEBUG_OPEN_URL feeds a link to the same handler at launch, so
+                // link states can be checked without tapping the system "Open in FitMix?" prompt.
+                .task {
+                    if let raw = ProcessInfo.processInfo.environment["FM_DEBUG_OPEN_URL"], let url = URL(string: raw) {
+                        auth.handle(url: url)
+                    }
+                }
+                #endif
                 // Only the signed-in account's saved data is ever loaded; signing out clears it from memory.
                 .onChange(of: auth.user?.id, initial: true) { _, id in profile.activate(accountID: id) }
                 // Studio always renders from the current try-on photo, including after it's replaced or removed.

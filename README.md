@@ -24,7 +24,7 @@ Live garment detection, automated product matching, and photo-based try-on are p
 1. Clone this repository and open [`FitMix.xcodeproj`](FitMix.xcodeproj) in Xcode. The project on `main` targets iOS **27.2**. Use an Xcode version and run destination that support it.
 2. Let Xcode resolve the Swift packages, select an iPhone simulator, and press **⌘R**. The app opens on **My Avatar**.
 3. For camera capture, run on a physical iPhone, configure signing if prompted, and grant camera access. Face scanning requires a TrueDepth camera.
-4. To test email authentication, open **Account**. The app includes the team's Supabase client configuration. To use a different Supabase project, update `SupabaseConfig` in [`AuthSession.swift`](FitMix/Services/AuthSession.swift) and add `fitmix://reset-password` to the project's allowed auth redirect URLs.
+4. To test email authentication, open **Account**. The app includes the team's Supabase client configuration. To use a different Supabase project, update `SupabaseConfig` in [`AuthSession.swift`](FitMix/Services/AuthSession.swift) and add `fitmix://confirm-email`, `fitmix://reset-password` and `fitmix://email-change` to the project's allowed auth redirect URLs. See [Docs/EmailConfirmation.md](Docs/EmailConfirmation.md) for the dashboard settings and how to test confirmation links.
 
 ### Preview Studio with a sample scan
 

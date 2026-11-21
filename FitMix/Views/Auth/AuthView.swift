@@ -58,6 +58,9 @@ struct AuthView: View {
                 submit.padding(.top, 24)
                 if let banner {
                     BannerView(banner: banner).padding(.top, 12)
+                    if case .checkEmail(let address) = banner {
+                        ResendConfirmationButton(email: address).padding(.top, 4)
+                    }
                 }
                 LegalLine().padding(.top, 12)
                 FastConnectDivider().padding(.vertical, 24)
@@ -648,7 +651,7 @@ struct BannerView: View {
                 .accessibilityIdentifier("authError")
         case .checkEmail(let address):
             NoticeCard(icon: "envelope.badge", title: "Check your email",
-                       message: "We sent a confirmation link to \(address). Open it, then sign in here.")
+                       message: "We sent a confirmation link to \(address). Open it on this iPhone to finish signing up. If you confirm on another device, come back and sign in here.")
                 .accessibilityIdentifier("checkEmail")
         case .info(let message):
             NoticeCard(icon: "checkmark.circle", title: message, message: nil)
@@ -691,7 +694,7 @@ struct NoticeCard: View {
 
 // MARK: Account
 
-/// What Account opens: Profile when signed in, or the sign-in forms.
+/// What Account opens: an opened reset or confirmation link, else Profile when signed in, or the sign-in forms.
 struct AccountFlowView: View {
     var mode: AuthView.Mode = .signIn
     var onAuthenticated: (AuthView.Mode) -> Void = { _ in }
@@ -700,6 +703,9 @@ struct AccountFlowView: View {
     var body: some View {
         if let recovery = auth.recovery {
             ResetPasswordView(recovery: recovery)
+        } else if let confirmation = auth.confirmation {
+            // A confirmation link that signed in continues like a finished sign-up.
+            EmailConfirmationView(confirmation: confirmation) { onAuthenticated(.createAccount) }
         } else {
             accountOrSignIn
         }
