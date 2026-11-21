@@ -14,6 +14,7 @@ struct CameraView: View {
     var confirm: (OutfitScan) -> Void
 
     @State private var camera = CameraController()
+    @Environment(StudioStore.self) private var studio
     @Environment(\.scenePhase) private var scenePhase
     @State private var showAccount = false
     @State private var showBag = false
@@ -89,16 +90,10 @@ struct CameraView: View {
             CircleIconButton(systemName: "xmark", label: "Close Camera", action: close)
                 .accessibilityIdentifier("closeCamera")
             Text("FitMix")
-                .font(.system(size: 24, weight: .medium, design: .serif))
+                .font(.fmDisplay(26))
                 .foregroundStyle(AuthPalette.onSurface)
             Spacer()
-            Button { showBag = true } label: {
-                Image(systemName: "bag")
-                    .font(.system(size: 19))
-                    .foregroundStyle(AuthPalette.onSurface)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Shopping bag")
+            FMBagButton(count: studio.bagCount) { showBag = true }
             Button { showAccount = true } label: {
                 Image(systemName: "person.crop.circle")
                     .font(.system(size: 20))
@@ -292,7 +287,7 @@ struct CameraView: View {
             VStack(spacing: 12) {
                 Image(systemName: content.icon).font(.system(size: 40)).foregroundStyle(.white.opacity(0.9))
                 Text(content.title)
-                    .font(.system(size: 24, weight: .medium, design: .serif))
+                    .font(.fmDisplay(24))
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
                 Text(content.message)

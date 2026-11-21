@@ -1,5 +1,59 @@
 # Email confirmation links
 
+## Demo setup: link plus in-app code
+
+The demo uses the existing `fitmix://confirm-email` callback for the **Verify email** button. The
+code is a fallback for when a mail app won't hand the link back to FitMix. The "Check your email"
+card on Sign In has a **Confirmation Code** field and a **Verify** button. FitMix calls
+`verifyOTP(email:token:type: .email)` and continues into onboarding, signed in, only when Supabase
+returns a session for a user whose email is confirmed. The code needs no PKCE verifier, and the
+user never leaves the app.
+
+The code only exists in the email if the "Confirm signup" template includes `{{ .Token }}`.
+Proposed template (keeps the existing link):
+
+```html
+<h2>Confirm your FitMix account</h2>
+<p>On the iPhone where you signed up, tap the button:</p>
+<p><a href="{{ .ConfirmationURL }}">Verify email</a></p>
+<p>If FitMix doesn't open, enter this code in FitMix instead: <strong>{{ .Token }}</strong></p>
+```
+
+The link and the code use the same one-time token. Once either one is used, the other stops
+working, but the account is already confirmed, so the user can just sign in.
+
+Requirements: Redirect URLs must contain lowercase `fitmix://confirm-email`. The Associated
+Domains entitlement isn't wired into the target for the demo; `Config/FitMix.entitlements` is kept
+for the Universal Link setup below.
+
+## App-first Verify email (Universal Link, not live)
+
+Once the template below is live, the sign-up email links to
+`https://<link host>/auth/confirm?token_hash={{ .TokenHash }}&type=email`.
+
+- **iPhone with FitMix installed:** iOS opens FitMix directly, on a cold or warm launch, through
+  `onOpenURL`. FitMix calls `verifyOTP(tokenHash:type:)`, which sends `POST /verify`. It shows
+  **Email verified** and continues only when Supabase returns a session for a user whose email is
+  confirmed. Every other result shows the neutral screens below. This doesn't need the PKCE
+  verifier, so it works even if sign-up happened on another device.
+- **Any browser (desktop, or an iPhone without FitMix):** `Web/public/auth/confirm/` explains how
+  to open the email on the iPhone. The page makes no network requests and removes the token from
+  the address bar. Loading it, whether by a person or a mail scanner such as Outlook Safe Links,
+  never uses up the token. Only the app's `POST /verify` does.
+- Password reset (`fitmix://reset-password`) and email change (`fitmix://email-change`) are
+  unchanged. Links from older emails to `fitmix://confirm-email?code=…` still work.
+
+The values to supply (host, bundle ID, signing) are listed in `Web/README.md`. The Supabase
+template change is:
+
+```html
+<h2>Confirm your FitMix account</h2>
+<p>Open this email on the iPhone where FitMix is installed, then tap the button.</p>
+<p><a href="https://LINK_HOST/auth/confirm?token_hash={{ .TokenHash }}&type=email">Verify email</a></p>
+```
+
+## Earlier flow (`fitmix://confirm-email`)
+
 FitMix keeps Supabase email confirmation on. Sign-up asks Supabase to send the confirmation link
 to `fitmix://confirm-email` (`SupabaseConfig.signupRedirect` in `AuthSession.swift`). The app
 opens that link through the same Account screen it uses for password-reset links.

@@ -4,7 +4,7 @@ Flow: **Camera → Outfit Review → Try Full Look → Studio**.
 
 | Step | Where | What it does today |
 | --- | --- | --- |
-| Camera confirms a scan | `HomeView` `CameraView(confirm:)` | `studio.review(scan)`, opens Outfit Review. Studio's current look is unchanged. |
+| Camera confirms a scan | `AppShell` → `CameraView` confirmation callback | `studio.review(scan)`, opens Outfit Review. Studio's current look is unchanged. |
 | Outfit Review | `FitMix/Views/Studio/OutfitReviewView.swift` | User picks which detected garments to try (all on by default). |
 | Try Full Look | same file, `tryFullLook()` | Uses `AvatarStore.bodyPhoto` if saved; otherwise `TryOnPhotoSheet` asks for one (camera or Photos, on-device full-body check, saved with `saveBodyPhoto`). Then `studio.open(scan, selected:, tryOnSource:)`. |
 | Studio preview | `StudioStore.refreshPreview()`, `TryOnHero` | Builds a `TryOnRequest` from the **original** photo and the full current selection, on open and after every swap. Older results are dropped by `signature`. |

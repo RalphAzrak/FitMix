@@ -28,7 +28,7 @@ struct AuthScreen<Content: View>: View {
                     .foregroundStyle(AuthPalette.primary)
                     .padding(.bottom, 4)
                 Text(title)
-                    .font(.system(size: 28, weight: .medium, design: .serif))
+                    .font(.fmDisplay(28))
                     .kerning(-0.3)
                     .foregroundStyle(AuthPalette.onSurface)
                     .accessibilityAddTraits(.isHeader)

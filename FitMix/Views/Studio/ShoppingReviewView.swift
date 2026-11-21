@@ -19,7 +19,7 @@ struct ShoppingReviewView: View {
                 } else {
                     VStack(spacing: 10) {
                         Image(systemName: "bag").font(.system(size: 36)).foregroundStyle(AuthPalette.secondary)
-                        Text("Your bag is empty").font(.system(size: 22, weight: .medium, design: .serif))
+                        Text("Your bag is empty").font(.fmDisplay(22))
                         Text("Scan an outfit, then shop it from Studio.")
                             .font(.system(size: 14)).foregroundStyle(AuthPalette.secondary)
                     }
@@ -48,8 +48,8 @@ struct ShoppingReviewView: View {
                 }
                 if !unmatched.isEmpty {
                     Text("NOT MATCHED YET")
-                        .font(.system(size: 11, weight: .semibold)).tracking(0.9)
-                        .foregroundStyle(AuthPalette.secondary)
+                        .font(.system(size: 13, weight: .bold)).tracking(0.7)
+                        .foregroundStyle(Color.fmInk)
                         .padding(.top, 8)
                     ForEach(unmatched) { piece in
                         HStack(spacing: 12) {
@@ -63,7 +63,7 @@ struct ShoppingReviewView: View {
                             Spacer()
                         }
                         .padding(10)
-                        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .accessibilityElement(children: .combine)
                     }
                 }
@@ -162,8 +162,8 @@ struct ShoppingReviewView: View {
             }
         }
         .padding(12)
-        .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.containerHigh))
+        .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(AuthPalette.containerHigh))
         .accessibilityIdentifier("shopRow-\(piece.detected.category.rawValue)")
     }
 }

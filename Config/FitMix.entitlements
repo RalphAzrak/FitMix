@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Universal Links for the sign-up "Verify email" button. Keep the host in sync with
+	     SupabaseConfig.universalLinkHost. TODO(config): replace links.fitmix.example.com.
+	     While testing on a device before Apple's CDN has the file, "?mode=developer" can be appended
+	     (needs Developer Mode and Settings → Developer → Associated Domains Development). -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:links.fitmix.example.com</string>
+	</array>
+</dict>
+</plist>

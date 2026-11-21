@@ -24,8 +24,8 @@ struct SwapPickerSheet: View {
                             .padding(.top, 8)
                     } else {
                         Text("ALTERNATIVES")
-                            .font(.system(size: 11, weight: .semibold)).tracking(0.9)
-                            .foregroundStyle(AuthPalette.secondary)
+                            .font(.system(size: 13, weight: .bold)).tracking(0.7)
+                            .foregroundStyle(Color.fmInk)
                             .padding(.top, 12)
                         ForEach(piece.alternatives) { product in
                             option(id: product.id, title: product.name,
@@ -100,8 +100,8 @@ struct SwapPickerSheet: View {
                     .foregroundStyle(selected ? AuthPalette.primaryContainer : AuthPalette.outline)
             }
             .padding(10)
-            .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(selected ? AuthPalette.primaryContainer : AuthPalette.containerHigh, lineWidth: selected ? 2 : 1))
         }
         .buttonStyle(.plain)
