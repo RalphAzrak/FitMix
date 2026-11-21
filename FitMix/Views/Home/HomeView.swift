@@ -113,9 +113,10 @@ struct HomeView: View {
             case "metrics": showMetricsEditor = true
             case "auth": authPreview = .signIn
             case "auth-create": authPreview = .createAccount
+            case "profile": authPreview = .signIn
+            case "cart": showCart = true
             case "studio": placeholder = .studio
             case "camera": placeholder = .scanFits
-            case "cart": showCart = true
             default: break
             }
         }
@@ -138,7 +139,7 @@ struct HomeView: View {
     }
 
     /// Debug builds can open straight into a screen with
-    /// FM_DEBUG_SCREEN=setup | generate | avatar-profile | metrics | auth | auth-create | studio | camera | cart.
+    /// FM_DEBUG_SCREEN=setup | generate | avatar-profile | metrics | auth | auth-create | profile | studio | camera | cart.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -161,18 +162,40 @@ struct HomeView: View {
                     .foregroundStyle(Color.fmSecondary)
             }
             Spacer(minLength: 12)
-            Button { showProfile = true } label: {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(Color.fmInk)
-                    .frame(width: 44, height: 44)
-                    .background(Color.fmCard, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.fmHairline))
+            HStack(spacing: 8) {
+                headerButton(label: "Cart", identifier: "cartButton") {
+                    Image(systemName: "bag").font(.system(size: 19, weight: .regular))
+                } action: { showCart = true }
+                // Opens the account Profile when signed in, otherwise Sign In (see AccountFlowView).
+                // The avatar's Profile opens from the avatar on Home.
+                headerButton(label: auth.user == nil ? "Sign in" : "Account", identifier: "accountButton") {
+                    if let user = auth.user {
+                        Text(user.initials)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.fmCobalt, in: Circle())
+                    } else {
+                        Image(systemName: "person.crop.circle").font(.system(size: 22, weight: .regular))
+                    }
+                } action: { authPreview = .signIn }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Profile")
-            .accessibilityIdentifier("profileButton")
         }
+    }
+
+    private func headerButton<Icon: View>(label: String, identifier: String, @ViewBuilder icon: () -> Icon,
+                                          action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            icon()
+                .foregroundStyle(Color.fmInk)
+                .frame(width: 44, height: 44)
+                .background(Color.fmCard, in: Circle())
+                .overlay(Circle().strokeBorder(Color.fmHairline))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 
     /// Shown only while something about the avatar needs attention. Everything else stays reachable meanwhile.

@@ -198,6 +198,24 @@ final class AvatarStore {
         } catch { storageErrorMessage = AvatarError.saveFailed.localizedDescription }
     }
 
+    /// Removes the full-body (try-on) photo from this iPhone. The avatar keeps the shape it already
+    /// has; updating it later needs a new photo. Studio drops the photo too (see `MyApp`).
+    func removeBodyPhoto() {
+        do {
+            if FileManager.default.fileExists(atPath: files.bodyPhoto.path) {
+                try FileManager.default.removeItem(at: files.bodyPhoto)
+            }
+        } catch {
+            storageErrorMessage = "FitMix couldn't remove the photo from this iPhone. Try again."
+            return
+        }
+        bodyPhoto = nil
+        bodyThumbnail = nil
+        profile.hasBodyPhoto = false
+        profile.photoAnalysis = nil
+        persist()
+    }
+
     func removeSelfie() {
         try? FileManager.default.removeItem(at: files.selfie)
         selfie = nil

@@ -56,10 +56,35 @@ struct CameraPicker: UIViewControllerRepresentable {
     }
 }
 
-/// Offers "Take Photo" or "Choose from Photos", and explains what to do when the camera can't be used.
+/// Where a photo should come from.
+enum PhotoSourceKind: Hashable, Identifiable {
+    case camera, library
+    var id: Self { self }
+}
+
+/// Offers "Take Photo" or "Choose from Photos" in a dialog, then runs the chosen picker.
 struct PhotoSourceModifier: ViewModifier {
     @Binding var isPresented: Bool
     var title: String
+    var camera: UIImagePickerController.CameraDevice
+    var onImage: (UIImage) -> Void
+    @State private var request: PhotoSourceKind?
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(title, isPresented: $isPresented, titleVisibility: .visible) {
+                Button("Take Photo") { request = .camera }
+                Button("Choose from Photos") { request = .library }
+                Button("Cancel", role: .cancel) {}
+            }
+            .photoPicker(request: $request, camera: camera, onImage: onImage)
+    }
+}
+
+/// Runs the camera or the photo library when `request` is set, and explains what to do when the
+/// camera can't be used. Cancelling either picker calls nothing.
+struct PhotoPickerModifier: ViewModifier {
+    @Binding var request: PhotoSourceKind?
     var camera: UIImagePickerController.CameraDevice
     var onImage: (UIImage) -> Void
 
@@ -71,14 +96,17 @@ struct PhotoSourceModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .confirmationDialog(title, isPresented: $isPresented, titleVisibility: .visible) {
-                Button("Take Photo") {
+            .onChange(of: request) { _, kind in
+                guard let kind else { return }
+                request = nil
+                switch kind {
+                case .camera:
                     Task {
                         if let problem = await CameraAccess.check() { cameraProblem = problem } else { showCamera = true }
                     }
+                case .library:
+                    showLibrary = true
                 }
-                Button("Choose from Photos") { showLibrary = true }
-                Button("Cancel", role: .cancel) {}
             }
             .fullScreenCover(isPresented: $showCamera) {
                 CameraPicker(device: camera, onImage: onImage).ignoresSafeArea()
@@ -121,5 +149,11 @@ extension View {
     func photoSource(isPresented: Binding<Bool>, title: String, camera: UIImagePickerController.CameraDevice,
                      onImage: @escaping (UIImage) -> Void) -> some View {
         modifier(PhotoSourceModifier(isPresented: isPresented, title: title, camera: camera, onImage: onImage))
+    }
+
+    /// Opens the camera or the library directly, without the choice dialog.
+    func photoPicker(request: Binding<PhotoSourceKind?>, camera: UIImagePickerController.CameraDevice,
+                     onImage: @escaping (UIImage) -> Void) -> some View {
+        modifier(PhotoPickerModifier(request: request, camera: camera, onImage: onImage))
     }
 }

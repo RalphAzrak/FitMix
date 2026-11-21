@@ -6,6 +6,8 @@ import SafariServices
 struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
     @Environment(\.dismiss) private var dismiss
+    @Environment(ProfileStore.self) private var profile
+    /// Sizes the user picked here. Without a pick, a saved Profile size is used when the product lists it.
     @State private var sizes: [UUID: String] = [:]
     @State private var retailer: URL?
 
@@ -93,8 +95,15 @@ struct ShoppingReviewView: View {
         }
     }
 
+    /// The user's pick, else their saved size for this kind of piece if the product lists it exactly.
+    private func size(for piece: WorkingLook.Piece, _ product: CatalogProduct) -> (value: String, fromProfile: Bool)? {
+        if let picked = sizes[piece.id] { return (picked, false) }
+        return profile.sizing.preferredSize(among: product.sizes, for: product.category).map { ($0, true) }
+    }
+
     private func row(piece: WorkingLook.Piece, product: CatalogProduct) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let chosen = size(for: piece, product)
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
                 GarmentTile(source: piece.isSwapped ? product.image.tileSource : (product.image.tileSource.isNone ? piece.tileSource : product.image.tileSource),
                             category: piece.detected.category)
@@ -125,7 +134,7 @@ struct ShoppingReviewView: View {
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text(sizes[piece.id].map { "Size \($0)" } ?? "Choose size")
+                            Text(chosen.map { "Size \($0.value)" } ?? "Choose size")
                             Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
                         }
                         .font(.system(size: 14, weight: .semibold))
@@ -135,7 +144,13 @@ struct ShoppingReviewView: View {
                         .background(AuthPalette.container, in: Capsule())
                     }
                     .accessibilityLabel("Size for \(product.name)")
-                    .accessibilityValue(sizes[piece.id] ?? "Not chosen")
+                    .accessibilityValue(chosen.map { $0.fromProfile ? "\($0.value), your saved size" : $0.value } ?? "Not chosen")
+                    if chosen?.fromProfile == true {
+                        Text("Your saved size")
+                            .font(.system(size: 12))
+                            .foregroundStyle(AuthPalette.secondary)
+                            .accessibilityHidden(true)
+                    }
                 }
                 Spacer()
                 if let url = product.retailerURL {
