@@ -67,7 +67,11 @@ struct HomeView: View {
         } message: {
             Text(store.storageErrorMessage ?? "")
         }
+        .onChange(of: auth.recovery != nil) { _, active in
+            if active { showRecovery() }
+        }
         .onAppear {
+            if auth.recovery != nil { showRecovery() }
             switch Self.debugScreen {
             case "setup": showSetup = true
             case "metrics": showMetricsEditor = true
@@ -75,6 +79,23 @@ struct HomeView: View {
             case "auth-create": authPreview = .createAccount
             default: break
             }
+        }
+    }
+
+    /// A reset link was opened: show "Set a new password" in the Account cover. Anything else
+    /// presented here closes first (setup saves as it goes), since only one can show at a time.
+    private func showRecovery() {
+        guard authPreview == nil else { return }
+        let otherOpen = showSetup || showMetricsEditor || placeholder != nil || photoCandidate != nil || showPhotoSource
+        showSetup = false
+        showMetricsEditor = false
+        placeholder = nil
+        photoCandidate = nil
+        showPhotoSource = false
+        setupAfterAuth = false
+        Task {
+            if otherOpen { try? await Task.sleep(for: .milliseconds(650)) }
+            authPreview = .signIn
         }
     }
 
