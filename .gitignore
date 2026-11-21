@@ -11,3 +11,8 @@ FitMix/Resources/Backend.local.json
 
 # Leftover downloads from the removed Blender pipeline (1.6 GB). Safe to delete.
 AvatarPipeline/
+
+# Vision service: secrets, private Python environment, cached catalog embeddings
+vision-service/.env
+vision-service/.venv/
+vision-service/catalog/embeddings.npz

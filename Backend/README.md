@@ -78,12 +78,39 @@ The eBay category IDs searched for each garment are in `app/retail.py` (`EBAY_CA
 eBay category doesn't name that garment is dropped. If eBay renumbers a category, searches for it show
 "No match found" rather than listings from another category.
 
+## Google Lens matches through the vision service
+
+With `FITMIX_MATCH_PROVIDER=vision`, `/v1/garment-match` forwards the garment crop to the FitMix vision service
+([`vision-service/`](../vision-service/README.md)). There, it's described by OpenAI and searched with
+**Google Lens and Google Shopping**, then re-ranked by how alike the products look. The best 5 come back in
+the same response shape, so **the app needs no change or rebuild**. As before, only the tapped garment's
+crop leaves the phone.
+
+1. Set up and start the vision service: see its README, "Setup on Mac". Leave that window open.
+2. In `Backend/.env`:
+   ```
+   FITMIX_MATCH_PROVIDER=vision
+   VISION_SERVICE_URL=http://localhost:8790
+   VISION_APP_TOKEN=            # only if you set one in vision-service/.env
+   ```
+3. Restart `./run.sh`. `GET /health` should say `"match_ready": true, "match_provider": "vision"`.
+
+- **Cost:** each garment the user taps costs one OpenAI description and two SerpAPI searches. The vision
+  service caches repeats of the same crop.
+- **Errors:** if the vision service isn't running, the app shows **Search failed** with **Retry**.
+- **Mock data:** with the vision service in `MOCK_MODE`, results are labelled as test data in the app. Its
+  mock product pictures are served by the vision service itself, so for them to load on an iPhone, set
+  `VISION_SERVICE_URL=http://<your-mac>.local:8790` instead of `localhost`. Real Lens and Shopping pictures
+  are ordinary web links and load either way.
+
 ## What happens to the photos
 
 The server keeps each photo in memory only while its request runs. It writes nothing to disk and logs only the
 number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the avatar
 photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For retailer
-search, eBay receives only the garment crop; its API terms govern what eBay does with it.
+search, eBay receives only the garment crop; its API terms govern what eBay does with it. With the `vision`
+provider, the crop goes to the vision service instead, which sends it to OpenAI, Supabase Storage (deleted
+after the search) and Google via SerpAPI.
 
 ## Tests
 
