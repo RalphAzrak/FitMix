@@ -1,8 +1,13 @@
 import SwiftUI
 import UIKit
 
-/// The three-step avatar setup, plus a final review. Each step saves as it goes, so closing
-/// the flow (or the app) and coming back resumes where the user left off.
+extension SetupStep: Identifiable {
+    var id: String { rawValue }
+}
+
+/// Creating an avatar: full-body photo, optional selfie, height and weight, generate, then review.
+/// Each step saves as it goes, so closing the flow (or the app) and coming back resumes where the user left off.
+/// The accepted avatar is only replaced when the user chooses Use This Avatar on the review step.
 struct SetupFlowView: View {
     @Environment(AvatarStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -10,51 +15,69 @@ struct SetupFlowView: View {
 
     init(startAt step: SetupStep) { _step = State(initialValue: step) }
 
+    private static let inputSteps: [SetupStep] = [.bodyPhoto, .selfie, .measurements, .generate]
+
     var body: some View {
         VStack(spacing: 0) {
             header
             switch step {
-            case .face: FaceStepView { go(to: .body) }
-            case .body: BodyPhotoStepView { go(to: .metrics) }
-            case .metrics: MetricsStepView { go(to: .review) }
+            case .bodyPhoto: BodyPhotoStepView { go(to: .selfie) }
+            case .selfie: SelfieStepView { go(to: .measurements) }
+            case .measurements: MeasurementsStepView { go(to: .generate) }
+            case .generate: GenerateStepView(onDone: { go(to: .review) }, changePhotos: { go(to: .bodyPhoto) })
             case .review:
-                ReviewStepView(edit: go(to:)) {
-                    store.completeSetup()
-                    dismiss()
-                }
+                ReviewStepView(regenerate: { go(to: .generate) }, changePhotos: { go(to: .bodyPhoto) }) { dismiss() }
             }
         }
         .background(Color.fmBackground.ignoresSafeArea())
         .preferredColorScheme(.light)
+        .alert("Couldn't save", isPresented: Binding(get: { store.storageErrorMessage != nil },
+                                                    set: { if !$0 { store.storageErrorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.storageErrorMessage ?? "")
+        }
     }
 
     private var header: some View {
-        VStack(spacing: 12) {
+        let index = Self.inputSteps.firstIndex(of: step)
+        return VStack(spacing: 12) {
             HStack {
-                if let previous = SetupStep(rawValue: step.rawValue - 1) {
+                if let previous = previousStep, store.generation != .generating {
                     Button { go(to: previous) } label: {
                         Label("Back", systemImage: "chevron.left").font(.system(size: 16, weight: .medium))
                     }
                 }
                 Spacer()
-                Button("Save & Close") { dismiss() }
+                Button("Close") { dismiss() }
                     .font(.system(size: 16, weight: .medium))
             }
             .tint(Color.fmInk)
             .frame(minHeight: 44)
 
             HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
+                ForEach(Self.inputSteps.indices, id: \.self) { i in
                     Capsule()
-                        .fill(index <= min(step.rawValue, 2) ? Color.fmCobalt : Color.black.opacity(0.12))
+                        .fill(i <= (index ?? Self.inputSteps.count) ? Color.fmCobalt : Color.black.opacity(0.12))
                         .frame(height: 4)
                 }
             }
-            Eyebrow(text: step == .review ? "Review" : "Step \(step.rawValue + 1) of 3")
+            .accessibilityHidden(true)
+            Eyebrow(text: index.map { "Step \($0 + 1) of \(Self.inputSteps.count)" } ?? "Review")
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
+    }
+
+    private var previousStep: SetupStep? {
+        switch step {
+        case .bodyPhoto: nil
+        case .selfie: .bodyPhoto
+        case .measurements: .selfie
+        case .generate: .measurements
+        case .review: nil      // the review step has its own Regenerate and Change Photos
+        }
     }
 
     private func go(to next: SetupStep) {
@@ -74,7 +97,7 @@ struct StepScaffold<Content: View, Footer: View>: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(title).font(.fmSerif(32)).foregroundStyle(Color.fmInk)
+                    Text(title).font(.fmSerif(32)).foregroundStyle(Color.fmInk).accessibilityAddTraits(.isHeader)
                     Text(subtitle).font(.system(size: 16)).foregroundStyle(Color.fmSecondary)
                 }
                 content
@@ -109,149 +132,12 @@ struct GuidanceList: View {
     }
 }
 
-// MARK: Step 1 — face
-
-struct FaceStepView: View {
-    var onContinue: () -> Void
-    @Environment(AvatarStore.self) private var store
-
-    @State private var showScanner = false
-    @State private var showPhotoSource = false
-    @State private var isProcessingPhoto = false
-    @State private var photoError: String?
-    @State private var cameraProblem: CameraAccess.Problem?
-
-    private var scanSupported: Bool { FaceScanModel.isSupported }
-
-    var body: some View {
-        StepScaffold(title: "Scan your face",
-                     subtitle: "Your face scan shapes your avatar's head.") {
-            if let kind = store.profile.faceKind {
-                review(kind)
-            } else {
-                intro
-            }
-            if let photoError { NoticeRow(tone: .caution, text: photoError) }
-        } footer: {
-            if isProcessingPhoto {
-                ProgressView("Finding your face…").frame(minHeight: 52)
-            } else if store.profile.faceKind != nil {
-                Button("Continue", action: onContinue).buttonStyle(FMFilledButtonStyle())
-                Button(scanSupported ? "Scan Again" : "Replace Photo") { scanSupported ? startScan() : (showPhotoSource = true) }
-                    .buttonStyle(FMOutlineButtonStyle())
-            } else if scanSupported {
-                Button("Start Face Scan", action: startScan).buttonStyle(FMFilledButtonStyle())
-                Button("Use a Photo Instead") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
-            } else {
-                Button("Add a Front-Facing Photo") { showPhotoSource = true }.buttonStyle(FMFilledButtonStyle())
-                #if DEBUG && targetEnvironment(simulator)
-                Button("Use Sample Scan (Simulator only)") { store.saveFaceScan(.simulatorSample()) }
-                    .buttonStyle(FMOutlineButtonStyle())
-                #endif
-            }
-        }
-        .fullScreenCover(isPresented: $showScanner) {
-            FaceScanView(onCapture: { capture in
-                store.saveFaceScan(capture)
-                photoError = nil
-                showScanner = false
-            }, onCancel: { showScanner = false }, onUsePhoto: {
-                showScanner = false
-                Task {
-                    try? await Task.sleep(for: .milliseconds(600))
-                    showPhotoSource = true
-                }
-            })
-        }
-        .photoSource(isPresented: $showPhotoSource, title: "Front-facing photo", camera: .front, onImage: usePhoto)
-        .alert(item: $cameraProblem) { problem in
-            Alert(title: Text(problem == .denied ? "Camera access is off" : "No camera available"),
-                  message: Text(problem == .denied
-                                ? "The face scan needs the camera. Turn on Camera for FitMix in Settings, or use a photo from your library instead."
-                                : "Use a photo from your library instead."),
-                  primaryButton: problem == .denied ? .default(Text("Open Settings")) { CameraAccess.openSettings() } : .cancel(),
-                  secondaryButton: .default(Text("Use a Photo")) { showPhotoSource = true })
-        }
-    }
-
-    private var intro: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if scanSupported {
-                GuidanceList(items: [
-                    ("face.smiling", "Hold your iPhone at eye level and look straight ahead."),
-                    ("arrow.triangle.2.circlepath", "Then slowly turn your head in a circle until the ring fills."),
-                    ("sun.max", "Use even light, and keep your whole face uncovered."),
-                ])
-            } else {
-                NoticeRow(tone: .info, text: "Face scanning needs a TrueDepth camera, which this device doesn't have. Use a front-facing photo instead. Your avatar's face will be a photo-based approximation.")
-                    .fmCard()
-                GuidanceList(items: [
-                    ("face.smiling", "Face the camera directly with a neutral expression."),
-                    ("sun.max", "Use even light, and keep your whole face uncovered."),
-                ])
-            }
-        }
-    }
-
-    private func review(_ kind: FaceCaptureKind) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Group {
-                if let thumbnail = store.faceThumbnail {
-                    Image(uiImage: thumbnail).resizable().scaledToFill()
-                } else {
-                    Image(systemName: "face.dashed").font(.system(size: 56)).foregroundStyle(Color.fmSecondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.fmStudio)
-                }
-            }
-            .frame(width: 168, height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .frame(maxWidth: .infinity)
-            .accessibilityLabel("Your face capture")
-
-            switch kind {
-            case .mesh:
-                NoticeRow(tone: .good, text: "3D face scan saved.").fmCard()
-            case .photo:
-                NoticeRow(tone: .info, text: "Photo-based approximation. Your avatar's head uses this photo on a standard head shape, not a 3D scan.")
-                    .fmCard()
-            }
-        }
-    }
-
-    private func startScan() {
-        Task {
-            if let problem = await CameraAccess.check() { cameraProblem = problem } else { showScanner = true }
-        }
-    }
-
-    private func usePhoto(_ image: UIImage) {
-        isProcessingPhoto = true
-        photoError = nil
-        Task {
-            guard let cgImage = await image.normalizedInBackground().cgImage else {
-                isProcessingPhoto = false
-                return
-            }
-            switch await FacePhotoProcessor.cropFace(in: cgImage) {
-            case .face(let crop): store.saveFacePhoto(crop: crop)
-            case .noFaceFound: photoError = "No face found in that photo. Try again facing the camera in good light."
-            }
-            isProcessingPhoto = false
-        }
-    }
-}
-
-// MARK: Step 2 — full-body photo
-
-enum PhotoCheck: Equatable {
-    case checking
-    case done(BodyPhotoAnalysis?)
-}
-
-/// A full-body photo with the result of the on-device check underneath.
-struct BodyPhotoPreview: View {
+/// A chosen photo with the result of its on-device check underneath.
+struct PhotoPreview: View {
     var image: UIImage
-    var check: PhotoCheck
+    var label: String
+    /// `nil` while the check is still running.
+    var notice: (tone: NoticeRow.Tone, text: String)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -260,19 +146,20 @@ struct BodyPhotoPreview: View {
                 .scaledToFit()
                 .frame(maxWidth: .infinity, maxHeight: 380)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .accessibilityLabel("Your full-body photo")
-            switch check {
-            case .checking:
+                .accessibilityLabel(label)
+            if let notice {
+                NoticeRow(tone: notice.tone, text: notice.text)
+            } else {
                 HStack(spacing: 10) {
                     ProgressView()
                     Text("Checking the photo…").font(.system(size: 14)).foregroundStyle(Color.fmSecondary)
                 }
-            case .done(let analysis):
-                NoticeRow(tone: analysis.notice.tone, text: analysis.notice.text)
             }
         }
     }
 }
+
+// MARK: Step 1 — full-body photo
 
 struct BodyPhotoStepView: View {
     var onContinue: () -> Void
@@ -280,19 +167,24 @@ struct BodyPhotoStepView: View {
 
     @State private var showPhotoSource = false
     @State private var candidate: UIImage?
-    @State private var check: PhotoCheck = .checking
+    @State private var analysis: BodyPhotoAnalysis??   // outer nil: still checking
 
     var body: some View {
         StepScaffold(title: "Add a full-body photo",
-                     subtitle: "Used as a reference for your avatar's approximate body shape.") {
+                     subtitle: "Face the camera with your whole body in view, head to shoes. This is the main reference for your avatar.") {
             if let candidate {
-                BodyPhotoPreview(image: candidate, check: check)
+                PhotoPreview(image: candidate, label: "Your full-body photo", notice: analysis.map { $0.notice })
             } else if let saved = store.bodyPhoto {
-                BodyPhotoPreview(image: saved, check: .done(store.profile.photoAnalysis))
+                PhotoPreview(image: saved, label: "Your full-body photo", notice: store.profile.photoAnalysis.notice)
+                if store.profile.avatar == nil, store.profile.candidate == nil {
+                    NoticeRow(tone: .info, text: "This is the full-body photo you already saved. Keep it or replace it.")
+                }
+            } else if store.profile.hasBodyPhoto {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 200)
             } else {
                 GuidanceList(items: [
-                    ("figure.stand", "Stand upright in a neutral pose, arms relaxed at your sides."),
-                    ("arrow.up.and.down", "Keep your full body in the frame, from head to feet."),
+                    ("figure.stand", "Stand upright and face the camera, arms relaxed and slightly away from your sides."),
+                    ("arrow.up.and.down", "Keep your whole body in the frame, from head to shoes."),
                     ("tshirt", "Wear fitted clothing so your outline is clear."),
                     ("sun.max", "Use even light and a plain background if you can."),
                 ])
@@ -300,14 +192,14 @@ struct BodyPhotoStepView: View {
         } footer: {
             if let candidate {
                 Button("Use This Photo") {
-                    if case .done(let analysis) = check { store.saveBodyPhoto(candidate, analysis: analysis) }
+                    if let analysis { store.saveBodyPhoto(candidate, analysis: analysis) }
                     self.candidate = nil
                     onContinue()
                 }
                 .buttonStyle(FMFilledButtonStyle())
-                .disabled(check == .checking)
-                Button("Replace Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
-            } else if store.bodyPhoto != nil {
+                .disabled(analysis == nil)
+                Button("Choose Another Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
+            } else if store.profile.hasBodyPhoto {
                 Button("Continue", action: onContinue).buttonStyle(FMFilledButtonStyle())
                 Button("Replace Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
             } else {
@@ -318,17 +210,86 @@ struct BodyPhotoStepView: View {
             Task {
                 let normalized = await image.normalizedInBackground()
                 candidate = normalized
-                check = .checking
-                let analysis: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
-                if candidate === normalized { check = .done(analysis) }
+                analysis = nil
+                let result: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
+                if candidate === normalized { analysis = .some(result) }
             }
+        }
+    }
+}
+
+// MARK: Step 2 — optional selfie
+
+struct SelfieStepView: View {
+    var onContinue: () -> Void
+    @Environment(AvatarStore.self) private var store
+
+    @State private var showPhotoSource = false
+    @State private var candidate: UIImage?
+    @State private var hasFace: Bool??   // outer nil: still checking
+
+    var body: some View {
+        StepScaffold(title: "Add a selfie",
+                     subtitle: "Optional. A close, clear photo of your face helps the avatar look like you.") {
+            if let candidate {
+                PhotoPreview(image: candidate, label: "Your selfie", notice: hasFace.map(Self.notice))
+            } else if let saved = store.selfie {
+                PhotoPreview(image: saved, label: "Your selfie", notice: Self.notice(store.profile.selfieHasFace))
+            } else if store.profile.hasSelfie {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 200)
+            } else {
+                GuidanceList(items: [
+                    ("face.smiling", "Face the camera with a relaxed expression."),
+                    ("sun.max", "Use even light, without strong shadows across your face."),
+                    ("eyeglasses", "Take off sunglasses, hats, or anything covering your face."),
+                ])
+                NoticeRow(tone: .info, text: "Without a selfie, your face comes from the full-body photo, which usually shows less detail.")
+            }
+        } footer: {
+            if let candidate {
+                Button("Use This Selfie") {
+                    if let hasFace { store.saveSelfie(candidate, hasFace: hasFace) }
+                    self.candidate = nil
+                    onContinue()
+                }
+                .buttonStyle(FMFilledButtonStyle())
+                .disabled(hasFace == nil)
+                Button("Choose Another Photo") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
+            } else if store.profile.hasSelfie {
+                Button("Continue", action: onContinue).buttonStyle(FMFilledButtonStyle())
+                Button("Replace Selfie") { showPhotoSource = true }.buttonStyle(FMOutlineButtonStyle())
+                Button("Remove Selfie", role: .destructive) { store.removeSelfie() }
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(minHeight: 44)
+            } else {
+                Button("Add a Selfie") { showPhotoSource = true }.buttonStyle(FMFilledButtonStyle())
+                Button("Continue Without a Selfie", action: onContinue).buttonStyle(FMOutlineButtonStyle())
+            }
+        }
+        .photoSource(isPresented: $showPhotoSource, title: "Selfie", camera: .front) { image in
+            Task {
+                let normalized = await image.normalizedInBackground(maxDimension: 1600)
+                candidate = normalized
+                hasFace = nil
+                let result: Bool? = if let cg = normalized.cgImage { await SelfieCheck.hasFace(cg) } else { nil }
+                if candidate === normalized { hasFace = .some(result) }
+            }
+        }
+    }
+
+    /// Only states what was actually checked.
+    static func notice(_ hasFace: Bool?) -> (tone: NoticeRow.Tone, text: String) {
+        switch hasFace {
+        case true?: (.good, "Face found.")
+        case false?: (.caution, "No face found in this photo. Try a clearer one, or continue without a selfie.")
+        case nil: (.info, "The face check couldn't run on this device. Make sure your face is clear and well lit.")
         }
     }
 }
 
 // MARK: Step 3 — height and weight
 
-struct MetricsStepView: View {
+struct MeasurementsStepView: View {
     var onContinue: () -> Void
     @Environment(AvatarStore.self) private var store
 
@@ -338,8 +299,8 @@ struct MetricsStepView: View {
     @State private var loaded = false
 
     var body: some View {
-        StepScaffold(title: "Enter height and weight",
-                     subtitle: "These scale your avatar. You can change them later.") {
+        StepScaffold(title: "Height and weight",
+                     subtitle: "Used alongside your photo as a cue for your overall build. Change them any time without retaking photos.") {
             if loaded {
                 MetricsForm(heightCm: $heightCm, weightKg: $weightKg, units: $units).fmCard()
             }
@@ -364,64 +325,178 @@ struct MetricsStepView: View {
     }
 }
 
-// MARK: Review
+// MARK: Step 4 — consent and generation
 
-struct ReviewStepView: View {
-    var edit: (SetupStep) -> Void
-    var onCreate: () -> Void
+/// Says exactly what will leave the phone, asks before sending it, then shows progress or what went wrong.
+struct GenerateStepView: View {
+    var onDone: () -> Void
+    var changePhotos: () -> Void
     @Environment(AvatarStore.self) private var store
+    /// What the avatar service said when this step opened; `nil` until it answers.
+    @State private var service: AvatarServiceStatus?
 
     var body: some View {
-        let profile = store.profile
-        StepScaffold(title: "Review your captures",
-                     subtitle: "Check each one, then create your avatar.") {
-            VStack(spacing: 12) {
-                row(step: .face, title: "Face", image: store.faceThumbnail, icon: "face.smiling",
-                    detail: profile.faceKind.map { $0 == .mesh ? "3D face scan" : "Photo-based approximation" })
-                row(step: .body, title: "Full-body photo", image: store.bodyThumbnail ?? store.bodyPhoto, icon: "figure.stand",
-                    detail: profile.hasBodyPhoto ? profile.photoAnalysis.notice.text : nil)
-                row(step: .metrics, title: "Height and weight", image: nil, icon: "ruler",
-                    detail: measurementsText(profile))
+        Group {
+            switch store.generation {
+            case .idle: consent
+            case .generating: progress
+            case .failed(let message): failure(message)
             }
-            NoticeRow(tone: .info, text: "Your captures and measurements are stored only on this iPhone.")
+        }
+        // Finding out early that the service can't be reached beats finding out after the upload.
+        .task {
+            if store.generationAvailable { service = await store.serviceStatus() }
+        }
+        // A new portrait has arrived: move on to reviewing it.
+        .onChange(of: store.profile.candidate) { old, new in
+            if let new, new != old { onDone() }
+        }
+        #if DEBUG
+        .onAppear {
+            if ProcessInfo.processInfo.environment["FM_DEBUG_AUTOGENERATE"] != nil, store.generation == .idle { store.generate() }
+        }
+        #endif
+    }
+
+    private var consent: some View {
+        let profile = store.profile
+        return StepScaffold(title: "Generate your avatar",
+                            subtitle: "FitMix needs your OK to send the items below to OpenAI, which draws the portrait.") {
+            if !store.generationAvailable || service == .notReady {
+                NoticeRow(tone: .caution, text: "Avatar generation isn't set up yet, so FitMix can't create an avatar right now.")
+            } else if service == .unreachable {
+                NoticeRow(tone: .caution, text: "FitMix can't reach its avatar service right now. Check your connection, then try again.")
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                Eyebrow(text: "What will be sent")
+                sentRow(image: store.bodyThumbnail ?? store.bodyPhoto, icon: "figure.stand", title: "Full-body photo", detail: "The main reference for your build")
+                if profile.hasSelfie {
+                    sentRow(image: store.selfie, icon: "face.smiling", title: "Selfie", detail: "For facial detail")
+                } else {
+                    sentRow(image: nil, icon: "face.dashed", title: "No selfie", detail: "Your face comes from the full-body photo")
+                }
+                sentRow(image: nil, icon: "ruler", title: "Height and weight", detail: measurements(profile))
+            }
+            .fmCard()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("FitMix sends these to its avatar service, which passes them to OpenAI to create the image. Location and other camera details are removed first.")
+                Text("FitMix's service doesn't keep your photos. OpenAI handles them under its own data policy.")
+                Text(profile.avatar == nil ? "The portrait is saved only on this iPhone."
+                                           : "The portrait is saved only on this iPhone. Your current avatar stays until you accept a new one.")
+            }
+            .font(.system(size: 14))
+            .foregroundStyle(Color.fmSecondary)
+
         } footer: {
-            Button("Create My Avatar", action: onCreate)
+            Button("Agree and Generate My Avatar") { store.generate() }
                 .buttonStyle(FMFilledButtonStyle())
-                .disabled(profile.stepsDone < 3)
+                .disabled(!store.generationAvailable || service == .notReady || !profile.readyToGenerate)
+            Button("Change Photos", action: changePhotos).buttonStyle(FMOutlineButtonStyle())
         }
     }
 
-    private func measurementsText(_ profile: AvatarProfile) -> String? {
-        guard let height = profile.heightCm, let weight = profile.weightKg else { return nil }
-        return "\(BodyMeasurements.heightText(cm: height, units: profile.units)) · \(BodyMeasurements.weightText(kg: weight, units: profile.units))"
+    private var progress: some View {
+        StepScaffold(title: "Creating your avatar…", subtitle: "This usually takes a minute or two. Keep FitMix open until it's done.") {
+            ProgressView()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity, minHeight: 220)
+                .accessibilityLabel("Creating your avatar")
+            if store.profile.avatar != nil {
+                NoticeRow(tone: .info, text: "Your current avatar stays in place while this one is made.")
+            }
+        } footer: {
+            Button("Cancel") { store.cancelGeneration() }.buttonStyle(FMOutlineButtonStyle())
+        }
     }
 
-    private func row(step: SetupStep, title: String, image: UIImage?, icon: String, detail: String?) -> some View {
-        HStack(spacing: 14) {
+    private func failure(_ message: String) -> some View {
+        StepScaffold(title: "Your avatar couldn't be created", subtitle: message) {
+            NoticeRow(tone: .info, text: store.profile.avatar == nil ? "Your photos and measurements are still saved."
+                                                                   : "Your current avatar and your photos are unchanged.")
+        } footer: {
+            Button("Try Again") { store.generate() }.buttonStyle(FMFilledButtonStyle())
+            Button("Change Photos") {
+                store.clearGenerationError()
+                changePhotos()
+            }
+            .buttonStyle(FMOutlineButtonStyle())
+        }
+    }
+
+    private func measurements(_ profile: AvatarProfile) -> String {
+        guard let cm = profile.heightCm, let kg = profile.weightKg else { return "Not entered yet" }
+        return "\(BodyMeasurements.heightText(cm: cm, units: profile.units)) · \(BodyMeasurements.weightText(kg: kg, units: profile.units))"
+    }
+
+    private func sentRow(image: UIImage?, icon: String, title: String, detail: String) -> some View {
+        HStack(spacing: 12) {
             Group {
                 if let image {
                     Image(uiImage: image).resizable().scaledToFill()
                 } else {
-                    Image(systemName: icon).font(.system(size: 22)).foregroundStyle(Color.fmSecondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.fmTile)
+                    Image(systemName: icon).font(.system(size: 20)).foregroundStyle(Color.fmSecondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(width: 52, height: 68)
+            .frame(width: 44, height: 58)
+            .background(Color.fmTile)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.fmInk)
-                Text(detail ?? "Not added yet")
-                    .font(.system(size: 13))
-                    .foregroundStyle(detail == nil ? Color.fmAmber : Color.fmSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
+                Text(detail).font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
             }
-            Spacer(minLength: 8)
-            Button(detail == nil ? "Add" : "Edit") { edit(step) }
-                .font(.system(size: 15, weight: .semibold))
-                .tint(Color.fmCobalt)
-                .frame(minWidth: 44, minHeight: 44)
+            Spacer(minLength: 0)
         }
-        .fmCard(padding: 12)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: Step 5 — review
+
+/// The new portrait, before it replaces anything.
+struct ReviewStepView: View {
+    var regenerate: () -> Void
+    var changePhotos: () -> Void
+    var onAccepted: () -> Void
+    @Environment(AvatarStore.self) private var store
+
+    var body: some View {
+        StepScaffold(title: "Review your avatar", subtitle: "An AI-generated illustration and an approximate likeness.") {
+            if let portrait = store.candidateImage {
+                Image(uiImage: portrait)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 400)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .accessibilityLabel("Your new avatar: a full-body animated-style portrait")
+            } else {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 300)
+            }
+            if let record = store.profile.candidate {
+                Text(AvatarPortraitCard.madeFrom(record, units: store.profile.units))
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.fmSecondary)
+            }
+            if store.profile.avatar != nil {
+                NoticeRow(tone: .info, text: "Your current avatar stays until you choose Use This Avatar.")
+            }
+        } footer: {
+            Button("Use This Avatar") {
+                if store.acceptCandidate() { onAccepted() }
+            }
+            .buttonStyle(FMFilledButtonStyle())
+            .disabled(store.candidateImage == nil)
+            HStack(spacing: 10) {
+                Button("Regenerate", action: regenerate).buttonStyle(FMOutlineButtonStyle())
+                Button("Change Photos", action: changePhotos).buttonStyle(FMOutlineButtonStyle())
+            }
+        }
+        #if DEBUG
+        .onChange(of: store.candidateImage != nil, initial: true) {
+            if ProcessInfo.processInfo.environment["FM_DEBUG_ACCEPT"] != nil, store.candidateImage != nil, store.acceptCandidate() { onAccepted() }
+        }
+        #endif
     }
 }

@@ -6,42 +6,64 @@ nonisolated enum UnitSystem: String, Codable, CaseIterable, Sendable {
     var title: String { self == .metric ? "Metric" : "Imperial" }
 }
 
-/// How the avatar's face was captured.
-nonisolated enum FaceCaptureKind: String, Codable, Sendable {
-    /// ARKit face-tracking geometry (TrueDepth camera).
-    case mesh
-    /// A single front-facing photo. The result is a photo-based approximation.
-    case photo
+/// The steps of creating an avatar, in order.
+nonisolated enum SetupStep: String, Codable, CaseIterable, Sendable {
+    case bodyPhoto, selfie, measurements, generate, review
 }
 
-nonisolated enum SetupStep: Int, Codable, CaseIterable, Sendable {
-    case face, body, metrics, review
+/// What one generated portrait was made from. Kept with the picture so the screen can say so, and can tell
+/// when the measurements have changed since.
+nonisolated struct AvatarRecord: Codable, Equatable, Sendable {
+    var createdAt: Date
+    var usedSelfie: Bool
+    var heightCm: Double
+    var weightKg: Double
 }
 
-nonisolated enum GenerationState: Codable, Equatable, Sendable {
-    case idle
-    case generating
-    case ready
-    case failed(String)
-}
-
-/// Everything FitMix remembers about the avatar, apart from the capture files themselves.
+/// Everything FitMix remembers about the avatar, apart from the pictures themselves.
 nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
-    var setupCompleted = false
-    var currentStep: SetupStep = .face
-    var faceKind: FaceCaptureKind?
     var hasBodyPhoto = false
+    var hasSelfie = false
     var heightCm: Double?
     var weightKg: Double?
     var units: UnitSystem = .metric
-    var generation: GenerationState = .idle
-    var shape: BodyShape?
+    var currentStep: SetupStep = .bodyPhoto
     /// Result of checking the full-body photo. `nil` means the check could not run.
     var photoAnalysis: BodyPhotoAnalysis?
+    /// Whether a face was found in the selfie. `nil` means the check could not run.
+    var selfieHasFace: Bool?
+    /// The avatar the user accepted. It stays until they accept a replacement.
+    var avatar: AvatarRecord?
+    /// A newly generated portrait the user has not decided on yet.
+    var candidate: AvatarRecord?
 
     var hasMetrics: Bool { heightCm != nil && weightKg != nil }
-    var stepsDone: Int { (faceKind != nil ? 1 : 0) + (hasBodyPhoto ? 1 : 0) + (hasMetrics ? 1 : 0) }
-    var setupStarted: Bool { stepsDone > 0 }
+    var setupStarted: Bool { hasBodyPhoto || hasSelfie || hasMetrics || avatar != nil || candidate != nil }
+    var readyToGenerate: Bool { hasBodyPhoto && BodyMeasurements.isValid(heightCm: heightCm, weightKg: weightKg) }
+
+    /// True when height or weight differ from what the accepted avatar was made with.
+    var measurementsChangedSinceAvatar: Bool {
+        guard let avatar, let heightCm, let weightKg else { return false }
+        return abs(avatar.heightCm - heightCm) > 0.05 || abs(avatar.weightKg - weightKg) > 0.05
+    }
+
+    init() {}
+
+    /// Also reads profiles saved by the earlier 3D-avatar version of FitMix: the full-body photo, height, weight
+    /// and units carry over, and everything that version stored about its 3D model is ignored.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hasBodyPhoto = (try? c.decodeIfPresent(Bool.self, forKey: .hasBodyPhoto)) ?? false
+        hasSelfie = (try? c.decodeIfPresent(Bool.self, forKey: .hasSelfie)) ?? false
+        heightCm = try? c.decodeIfPresent(Double.self, forKey: .heightCm)
+        weightKg = try? c.decodeIfPresent(Double.self, forKey: .weightKg)
+        units = (try? c.decodeIfPresent(UnitSystem.self, forKey: .units)) ?? .metric
+        currentStep = (try? c.decodeIfPresent(SetupStep.self, forKey: .currentStep)) ?? .bodyPhoto
+        photoAnalysis = try? c.decodeIfPresent(BodyPhotoAnalysis.self, forKey: .photoAnalysis)
+        selfieHasFace = try? c.decodeIfPresent(Bool.self, forKey: .selfieHasFace)
+        avatar = try? c.decodeIfPresent(AvatarRecord.self, forKey: .avatar)
+        candidate = try? c.decodeIfPresent(AvatarRecord.self, forKey: .candidate)
+    }
 }
 
 /// What the full-body photo check measured. Widths are fractions of the person's height in the photo.
@@ -52,68 +74,6 @@ nonisolated struct BodyPhotoAnalysis: Codable, Equatable, Sendable {
     var chestRatio: Double?
     var waistRatio: Double?
     var hipRatio: Double?
-}
-
-/// Approximate body proportions for the avatar, in metres.
-nonisolated struct BodyShape: Codable, Equatable, Sendable {
-    var heightM: Double
-    var shoulderWidth: Double
-    var chestWidth: Double
-    var waistWidth: Double
-    var hipWidth: Double
-    /// Overall girth factor from BMI (1 = reference build).
-    var girth: Double
-    /// True when the photo outline adjusted the widths; false when only height and weight were used.
-    var usedPhotoOutline: Bool
-
-    static let template = estimate(heightCm: 172, weightKg: 63.6, analysis: nil)
-
-    /// Starts from average proportions scaled by height and BMI, then nudges the widths
-    /// toward the photo outline when a full body was found. This is an approximation, not a measurement.
-    static func estimate(heightCm: Double, weightKg: Double, analysis: BodyPhotoAnalysis?) -> BodyShape {
-        let h = heightCm / 100
-        let bmi = weightKg / (h * h)
-        let g = min(max((bmi / 21.5).squareRoot(), 0.78), 1.5)
-        var shoulder = 0.252 * pow(g, 0.35)
-        var chest = 0.176 * g
-        var waist = 0.150 * pow(g, 1.25)
-        var hip = 0.186 * g
-        var used = false
-
-        if let a = analysis, a.personDetected, a.fullBodyVisible {
-            func nudge(_ prior: Double, _ measured: Double?) -> Double {
-                guard let m = measured, m > 0 else { return prior }
-                used = true
-                // Clothing and arms widen the outline, so keep the photo's influence bounded.
-                let bounded = min(max(m, prior * 0.82), prior * 1.22)
-                return prior + 0.6 * (bounded - prior)
-            }
-            shoulder = nudge(shoulder, a.shoulderRatio)
-            chest = nudge(chest, a.chestRatio)
-            waist = nudge(waist, a.waistRatio)
-            hip = nudge(hip, a.hipRatio)
-        }
-        return BodyShape(heightM: h, shoulderWidth: shoulder * h, chestWidth: chest * h,
-                         waistWidth: waist * h, hipWidth: hip * h, girth: g, usedPhotoOutline: used)
-    }
-}
-
-/// ARKit face geometry saved from the scan, in metres, in the face anchor's coordinate space.
-nonisolated struct FaceMeshData: Codable, Sendable {
-    /// x, y, z per vertex.
-    var vertices: [Float]
-    /// u, v per vertex into the face texture, with v measured from the top of the image. Empty if there is no texture.
-    var uvs: [Float]
-    var indices: [UInt32]
-
-    var vertexCount: Int { vertices.count / 3 }
-
-    var isValid: Bool {
-        vertexCount >= 3 && vertices.count % 3 == 0 && indices.count >= 3 && indices.count % 3 == 0
-            && (uvs.isEmpty || uvs.count == vertexCount * 2)
-            && indices.allSatisfy { Int($0) < vertexCount }
-            && vertices.allSatisfy { $0.isFinite }
-    }
 }
 
 nonisolated enum BodyMeasurements {

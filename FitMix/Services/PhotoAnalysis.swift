@@ -92,45 +92,13 @@ nonisolated enum BodyPhotoAnalyzer {
     }
 }
 
-/// Finds and crops the face in a front-facing photo for the photo-based fallback.
-nonisolated enum FacePhotoProcessor {
-    enum Result: @unchecked Sendable {
-        case face(CGImage)
-        case noFaceFound
-    }
-
-    /// Width-to-height ratio of the crop; matches the face patch on the avatar's head.
-    static let cropAspect = 0.70
-
+/// Checks, on-device, whether a selfie shows a face. `nil` means the check could not run.
+nonisolated enum SelfieCheck {
     @concurrent
-    static func cropFace(in image: CGImage) async -> Result {
+    static func hasFace(_ image: CGImage) async -> Bool? {
         let request = VNDetectFaceRectanglesRequest()
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        let W = Double(image.width), H = Double(image.height)
-        var cropRect: CGRect
-        do {
-            try handler.perform([request])
-            guard let face = request.results?.max(by: { $0.boundingBox.width < $1.boundingBox.width }) else {
-                return .noFaceFound
-            }
-            let box = face.boundingBox
-            let faceW = box.width * W, faceH = box.height * H
-            let cx = box.midX * W
-            let cy = (1 - box.midY) * H - faceH * 0.06
-            let cropW = faceW * 1.08
-            let cropH = cropW / cropAspect
-            cropRect = CGRect(x: cx - cropW / 2, y: cy - cropH / 2, width: cropW, height: cropH)
-        } catch {
-            // Face detection could not run here; fall back to the middle of the photo.
-            let cropH = min(H, W / cropAspect) * 0.7
-            let cropW = cropH * cropAspect
-            cropRect = CGRect(x: (W - cropW) / 2, y: (H - cropH) / 2, width: cropW, height: cropH)
-        }
-        cropRect = cropRect.intersection(CGRect(x: 0, y: 0, width: W, height: H)).integral
-        guard cropRect.width > 16, cropRect.height > 16, let crop = image.cropping(to: cropRect) else {
-            return .noFaceFound
-        }
-        return .face(crop)
+        do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([request]) } catch { return nil }
+        return !(request.results ?? []).isEmpty
     }
 }
 
@@ -140,6 +108,13 @@ extension UIImage {
     @concurrent
     nonisolated func normalizedInBackground(maxDimension: CGFloat = 2048) async -> UIImage {
         normalized(maxDimension: maxDimension)
+    }
+
+    /// A JPEG of the picture, upright and no larger than `maxDimension`, for sending to the avatar service.
+    /// Redrawing the picture also leaves out everything the camera attached to it, such as where it was taken.
+    @concurrent
+    nonisolated func uploadJPEG(maxDimension: CGFloat = 1536, quality: CGFloat = 0.85) async -> Data? {
+        normalized(maxDimension: maxDimension).jpegData(compressionQuality: quality)
     }
 
     /// Redraws the image upright, capped at `maxDimension`, so `cgImage` matches what the user sees.
@@ -154,22 +129,5 @@ extension UIImage {
         return UIGraphicsImageRenderer(size: target, format: format).image { _ in
             draw(in: CGRect(origin: .zero, size: target))
         }
-    }
-}
-
-extension CGImage {
-    /// Average colour of the middle of the image, used to tint the head to match the face.
-    nonisolated func averageCentreColor() -> UIColor? {
-        let region = CGRect(x: Double(width) * 0.3, y: Double(height) * 0.3,
-                            width: Double(width) * 0.4, height: Double(height) * 0.4).integral
-        guard let centre = cropping(to: region) else { return nil }
-        var pixel = [UInt8](repeating: 0, count: 4)
-        guard let ctx = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.interpolationQuality = .medium
-        ctx.draw(centre, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-        return UIColor(red: CGFloat(pixel[0]) / 255, green: CGFloat(pixel[1]) / 255,
-                       blue: CGFloat(pixel[2]) / 255, alpha: 1)
     }
 }

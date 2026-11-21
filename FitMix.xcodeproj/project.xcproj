@@ -14,7 +14,9 @@
     {
       "kind": "remote",
       "repository": "https://github.com/supabase/supabase-swift.git",
-      "version": { "up-to-next-major-version": "2.55.7" },
+      "version": {
+        "up-to-next-major-version": "2.55.7",
+      },
     },
   ],
   "files": [
@@ -33,13 +35,17 @@
       "id": "000000000000000100000000",
       "product": "Products/FitMix.app",
       "product-type": "application",
-      "package-product-members": [
-        { "package": "supabase-swift", "product-name": "Supabase", "build-phase": { "build-phase": "frameworks" } },
-      ],
       "build-phases": [
         "compile-sources",
         "frameworks",
         "resources",
+      ],
+      "package-product-members": [
+        {
+          "package": "supabase-swift",
+          "product-name": "Supabase",
+          "build-phase": { "build-phase": "frameworks" },
+        },
       ],
       "build-settings": {
         "CODE_SIGN_STYLE": "Automatic",
@@ -50,7 +56,9 @@
         "ENABLE_USER_SELECTED_FILES": "readonly",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_KEY_CFBundleDisplayName": "FitMix",
-        "INFOPLIST_KEY_NSCameraUsageDescription": "FitMix uses the camera to scan your face and take your full-body photo for your avatar. Captures stay on this iPhone.",
+        "INFOPLIST_FILE": "Config/Info.plist",
+        "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "FitMix connects to its avatar service on your network to create your avatar.",
+        "INFOPLIST_KEY_NSCameraUsageDescription": "FitMix uses the camera to take your full-body photo and selfie for your avatar.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]": "YES",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]": "YES",
@@ -73,7 +81,6 @@
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
         "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
         "SWIFT_EMIT_LOC_STRINGS": "YES",
-        "SWIFT_OBJC_BRIDGING_HEADER": "FitMix/FitMix-Bridging-Header.h",
         "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
         "SWIFT_VERSION": "5.0",
         "TARGETED_DEVICE_FAMILY": "1",
