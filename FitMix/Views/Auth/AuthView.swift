@@ -691,7 +691,7 @@ struct NoticeCard: View {
 
 // MARK: Account
 
-/// What Account opens: the signed-in account, or the sign-in forms.
+/// What Account opens: Profile when signed in, or the sign-in forms.
 struct AccountFlowView: View {
     var mode: AuthView.Mode = .signIn
     var onAuthenticated: (AuthView.Mode) -> Void = { _ in }
@@ -708,114 +708,14 @@ struct AccountFlowView: View {
     @ViewBuilder
     private var accountOrSignIn: some View {
         switch auth.state {
-        case .signedIn(let user):
-            AccountView(user: user)
+        case .signedIn:
+            ProfileView()
         case .signedOut:
             AuthView(mode: mode, onAuthenticated: onAuthenticated)
         case .restoring:
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(AuthPalette.surface.ignoresSafeArea())
-        }
-    }
-}
-
-/// The signed-in account, in the same visual system as the sign-in screen.
-struct AccountView: View {
-    var user: AccountUser
-    @Environment(\.dismiss) private var dismiss
-    @Environment(AuthSession.self) private var auth
-    @State private var confirmSignOut = false
-    @State private var signingOut = false
-    @State private var failure: String?
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
-                    Spacer()
-                    FitMixWordmark()
-                    Spacer()
-                    Color.clear.frame(width: 36, height: 36)
-                }
-                .frame(height: 44)
-                .padding(.bottom, 16)
-
-                Text("ACCOUNT")
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.9)
-                    .foregroundStyle(AuthPalette.primary)
-                    .padding(.bottom, 4)
-                Text(user.fullName.map { "Hi, \($0.split(separator: " ").first.map(String.init) ?? $0)." } ?? "You're signed in.")
-                    .font(.system(size: 28, weight: .medium, design: .serif))
-                    .foregroundStyle(AuthPalette.onSurface)
-                    .accessibilityAddTraits(.isHeader)
-                    .padding(.bottom, 24)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    if let name = user.fullName { row(label: "Full Name", value: name, icon: "person.text.rectangle") }
-                    row(label: "Email Address", value: user.email ?? "—", icon: "envelope")
-                }
-                .padding(14)
-                .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                Button {
-                    confirmSignOut = true
-                } label: {
-                    HStack(spacing: 8) {
-                        if signingOut { ProgressView() } else { Image(systemName: "rectangle.portrait.and.arrow.right") }
-                        Text(signingOut ? "Signing out…" : "Sign Out")
-                    }
-                }
-                .buttonStyle(AuthSocialButtonStyle(background: AuthPalette.container, foreground: AuthPalette.onSurface))
-                .disabled(signingOut)
-                .padding(.top, 24)
-
-                if let failure {
-                    NoticeRow(tone: .caution, text: failure).padding(.top, 12)
-                }
-
-                Text("Your avatar stays on this iPhone when you sign out.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(AuthPalette.secondary)
-                    .frame(maxWidth: .infinity)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 12)
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 40)
-        }
-        .background(AuthPalette.surface.ignoresSafeArea())
-        .preferredColorScheme(.light)
-        .confirmationDialog("Sign out of FitMix?", isPresented: $confirmSignOut, titleVisibility: .visible) {
-            Button("Sign Out", role: .destructive, action: signOut)
-            Button("Cancel", role: .cancel) {}
-        }
-    }
-
-    private func row(label: String, value: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(AuthPalette.secondary).frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(AuthPalette.secondary)
-                Text(value).font(.system(size: 15)).foregroundStyle(AuthPalette.onSurface)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func signOut() {
-        signingOut = true
-        failure = nil
-        Task {
-            defer { signingOut = false }
-            do {
-                try await auth.signOut()
-                // AccountFlowView switches back to the sign-in form.
-            } catch {
-                failure = AuthFailure(error).message
-            }
         }
     }
 }

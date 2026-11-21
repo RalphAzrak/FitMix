@@ -15,6 +15,7 @@ struct HomeView: View {
     @Environment(StudioStore.self) private var studio
     @State private var confirmDelete = false
     @State private var authPreview: AuthView.Mode?
+    @State private var showCart = false
     /// Set when sign-in or sign-up finishes and avatar setup still needs doing; opens setup once Account closes.
     @State private var setupAfterAuth = false
     @Environment(AuthSession.self) private var auth
@@ -89,6 +90,7 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showMetricsEditor) { MetricsEditorSheet() }
+        .sheet(isPresented: $showCart) { ShoppingReviewView() }
         .sheet(item: $photoCandidate) { PhotoReplacementSheet(candidate: $0) }
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .rear) { image in
             photoCandidate = PhotoCandidate(image: image.normalized())
@@ -115,6 +117,8 @@ struct HomeView: View {
             case "metrics": showMetricsEditor = true
             case "auth": authPreview = .signIn
             case "auth-create": authPreview = .createAccount
+            case "profile": authPreview = .signIn
+            case "cart": showCart = true
             case "studio": placeholder = .studio
             case "camera": placeholder = .scanFits
             default: break
@@ -126,7 +130,8 @@ struct HomeView: View {
     /// presented here closes first (setup saves as it goes), since only one can show at a time.
     private func showRecovery() {
         guard authPreview == nil else { return }
-        let otherOpen = showSetup || showMetricsEditor || placeholder != nil || photoCandidate != nil || showPhotoSource
+        let otherOpen = showSetup || showMetricsEditor || placeholder != nil || photoCandidate != nil || showPhotoSource || showCart
+        showCart = false
         showSetup = false
         showMetricsEditor = false
         placeholder = nil
@@ -139,7 +144,7 @@ struct HomeView: View {
         }
     }
 
-    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | studio | camera | bottom.
+    /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | metrics | auth | auth-create | profile | cart | studio | camera | bottom.
     private static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -161,19 +166,39 @@ struct HomeView: View {
                     .foregroundStyle(Color.fmSecondary)
             }
             Spacer(minLength: 12)
-            Button { authPreview = .signIn } label: {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(Color.fmInk)
-                    .frame(width: 44, height: 44)
-                    .background(Color.fmCard, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.fmHairline))
+            HStack(spacing: 8) {
+                headerButton(label: "Cart", identifier: "cartButton") {
+                    Image(systemName: "bag").font(.system(size: 19, weight: .regular))
+                } action: { showCart = true }
+                // Opens Profile when signed in, otherwise Sign In (see AccountFlowView).
+                headerButton(label: auth.user == nil ? "Sign in" : "Profile", identifier: "accountButton") {
+                    if let user = auth.user {
+                        Text(user.initials)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.fmCobalt, in: Circle())
+                    } else {
+                        Image(systemName: "person.crop.circle").font(.system(size: 22, weight: .regular))
+                    }
+                } action: { authPreview = .signIn }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Account")
-            .accessibilityValue(auth.user == nil ? "Signed out" : "Signed in")
-            .accessibilityIdentifier("accountButton")
         }
+    }
+
+    private func headerButton<Icon: View>(label: String, identifier: String, @ViewBuilder icon: () -> Icon,
+                                          action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            icon()
+                .foregroundStyle(Color.fmInk)
+                .frame(width: 44, height: 44)
+                .background(Color.fmCard, in: Circle())
+                .overlay(Circle().strokeBorder(Color.fmHairline))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 
     @ViewBuilder
@@ -456,6 +481,7 @@ struct PhotoCandidate: Identifiable {
 /// Shows a replacement full-body photo before it is applied.
 struct PhotoReplacementSheet: View {
     var candidate: PhotoCandidate
+    var title = "New full-body photo"
     @Environment(AvatarStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var check: PhotoCheck = .checking
@@ -477,7 +503,7 @@ struct PhotoReplacementSheet: View {
                 .background(Color.fmBackground)
             }
             .background(Color.fmBackground)
-            .navigationTitle("New full-body photo")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

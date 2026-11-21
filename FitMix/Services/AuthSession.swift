@@ -9,6 +9,9 @@ enum SupabaseConfig {
     /// Where password-reset emails send people. Must be listed in Supabase → Authentication →
     /// URL Configuration → Redirect URLs, and matches the `fitmix` URL scheme in Config/Info.plist.
     static let passwordResetRedirect = URL(string: "fitmix://reset-password")!
+    /// Where email-change confirmation links send people. Add it to the same Redirect URLs list;
+    /// if it isn't listed, Supabase falls back to the Site URL and the change still completes.
+    static let emailChangeRedirect = URL(string: "fitmix://email-change")!
 }
 
 /// The signed-in FitMix account, as shown in the app.
@@ -16,12 +19,44 @@ struct AccountUser: Equatable {
     var id: UUID
     var email: String?
     var fullName: String?
+    /// A new email address waiting for its confirmation link to be opened.
+    var pendingEmail: String?
 
     init(_ user: User) {
         id = user.id
         email = user.email
         fullName = user.userMetadata["full_name"]?.stringValue
+        pendingEmail = user.newEmail.flatMap { $0.isEmpty || $0 == user.email ? nil : $0 }
     }
+
+    init(id: UUID, email: String?, fullName: String?, pendingEmail: String? = nil) {
+        self.id = id
+        self.email = email
+        self.fullName = fullName
+        self.pendingEmail = pendingEmail
+    }
+
+    /// The name to show: the saved full name, else the part of the email before the @.
+    var displayName: String {
+        if let fullName, !fullName.trimmingCharacters(in: .whitespaces).isEmpty { return fullName }
+        return email.map { String($0.prefix { $0 != "@" }) } ?? "FitMix member"
+    }
+
+    /// Up to two initials for the account badge, e.g. "AM" for "Alex Morgan".
+    var initials: String {
+        if let name = fullName?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
+            return String(name.split(separator: " ").prefix(2).compactMap(\.first)).uppercased()
+        }
+        return email?.first.map { String($0).uppercased() } ?? "?"
+    }
+}
+
+/// What happened after asking to change the account email.
+enum EmailChangeOutcome: Equatable {
+    /// The project doesn't require confirmation: the email is already changed.
+    case changed(String)
+    /// A confirmation link was sent. The sign-in email stays the same until it's opened.
+    case confirmationSent(String)
 }
 
 /// Owns the Supabase auth session. The SDK keeps the session in the Keychain and refreshes
@@ -59,6 +94,8 @@ final class AuthSession {
     private(set) var state: State = .restoring
     private(set) var recovery: Recovery?
     var signInNotice: SignInNotice?
+    /// Set after an email-change confirmation link is opened, for Account details to show.
+    var emailChangeNotice: String?
 
     var user: AccountUser? {
         if case .signedIn(let user) = state { return user }
@@ -77,6 +114,14 @@ final class AuthSession {
                 emitLocalSessionAsInitialSession: true
             ))
         )
+        #if DEBUG
+        // Debug builds only: FM_DEBUG_ACCOUNT_ID signs in a local stand-in account without Supabase,
+        // so Profile can be checked in the simulator. Requests that need the server will fail.
+        if let account = Self.debugAccount {
+            state = .signedIn(account)
+            return
+        }
+        #endif
         listener = Task { [weak self, client] in
             for await (event, session) in client.auth.authStateChanges {
                 guard let self else { return }
@@ -98,6 +143,47 @@ final class AuthSession {
         do {
             let session = try await client.auth.signIn(email: email, password: password)
             state = .signedIn(AccountUser(session.user))
+        } catch {
+            throw AuthFailure(error)
+        }
+    }
+
+    // MARK: Account details
+
+    /// Saves the display name to the account's `full_name` metadata, the same field sign-up sets.
+    func updateDisplayName(_ name: String) async throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let user = try await client.auth.update(user: UserAttributes(data: ["full_name": .string(name)]))
+            state = .signedIn(AccountUser(user))
+        } catch {
+            throw AuthFailure(error)
+        }
+    }
+
+    /// Starts an email change through Supabase Auth. When the project requires confirmation (the
+    /// default), Supabase emails a link and the sign-in email changes only once it's opened.
+    func changeEmail(to email: String) async throws -> EmailChangeOutcome {
+        let email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let user = try await client.auth.update(user: UserAttributes(email: email),
+                                                    redirectTo: SupabaseConfig.emailChangeRedirect)
+            state = .signedIn(AccountUser(user))
+            if user.email?.caseInsensitiveCompare(email) == .orderedSame { return .changed(email) }
+            return .confirmationSent(email)
+        } catch let error as AuthError where [.emailExists, .userAlreadyExists].contains(error.errorCode) {
+            throw AuthFailure(message: "Another account already uses this email.")
+        } catch {
+            throw AuthFailure(error)
+        }
+    }
+
+    /// Fetches the latest account details from Supabase, e.g. after an email change was confirmed
+    /// in a browser.
+    func refreshUser() async throws {
+        guard user != nil else { return }
+        do {
+            state = .signedIn(AccountUser(try await client.auth.user()))
         } catch {
             throw AuthFailure(error)
         }
@@ -139,6 +225,10 @@ final class AuthSession {
     /// Opens a link from a password-reset email. Returns false for URLs that aren't reset links.
     @discardableResult
     func handle(url: URL) -> Bool {
+        if url.scheme == SupabaseConfig.emailChangeRedirect.scheme, url.host == SupabaseConfig.emailChangeRedirect.host {
+            handleEmailChange(url: url)
+            return true
+        }
         guard url.scheme == SupabaseConfig.passwordResetRedirect.scheme,
               url.host == SupabaseConfig.passwordResetRedirect.host else { return false }
         recovery = .verifying
@@ -171,6 +261,28 @@ final class AuthSession {
         signInNotice = notice.map { SignInNotice(email: $0.email ?? email, message: $0.message) }
         recovery = nil
     }
+
+    private func handleEmailChange(url: URL) {
+        Task {
+            // The link may carry a new session (PKCE code or tokens). Either way, re-read the user.
+            _ = try? await client.auth.session(from: url)
+            try? await refreshUser()
+            if let user {
+                emailChangeNotice = user.pendingEmail == nil
+                    ? "Your email is now \(user.email ?? "updated")."
+                    : "Confirmation received. Open the link sent to your other address to finish changing your email."
+            }
+        }
+    }
+
+    #if DEBUG
+    private static var debugAccount: AccountUser? {
+        let env = ProcessInfo.processInfo.environment
+        guard let raw = env["FM_DEBUG_ACCOUNT_ID"], let id = UUID(uuidString: raw) else { return nil }
+        return AccountUser(id: id, email: env["FM_DEBUG_ACCOUNT_EMAIL"] ?? "test@example.com",
+                           fullName: env["FM_DEBUG_ACCOUNT_NAME"])
+    }
+    #endif
 
     private static func recoveryLinkMessage(for error: Error) -> String {
         guard let auth = error as? AuthError else {
