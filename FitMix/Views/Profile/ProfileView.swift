@@ -252,7 +252,7 @@ private struct AccountCard: View {
 private struct TryOnPhotoCard: View {
     @Environment(AvatarStore.self) private var avatar
     @State private var request: PhotoSourceKind?
-    @State private var candidate: PhotoCandidate?
+    @State private var candidate: AvatarStore.CheckedBodyPhoto?
     @State private var chooseReplacement = false
     @State private var confirmRemove = false
     @ScaledMetric(relativeTo: .body) private var previewWidth: CGFloat = 96
@@ -277,9 +277,14 @@ private struct TryOnPhotoCard: View {
         }
         .profileCard()
         .photoPicker(request: $request, camera: .rear) { image in
-            candidate = PhotoCandidate(image: image.normalized())
+            Task { candidate = await avatar.checkBodyPhoto(image) }
         }
-        .sheet(item: $candidate) { PhotoReplacementSheet(candidate: $0, title: "Try-on photo") }
+        .sheet(item: $candidate) { checked in
+            PhotoConfirmSheet(title: "Try-on photo", image: checked.image, label: "Your new try-on photo",
+                              notice: checked.analysis.notice, useLabel: "Use This Photo") {
+                avatar.saveBodyPhoto(checked.image, analysis: checked.analysis)
+            }
+        }
         .confirmationDialog("Replace your try-on photo", isPresented: $chooseReplacement, titleVisibility: .visible) {
             Button("Take Photo") { request = .camera }
             Button("Choose from Library") { request = .library }

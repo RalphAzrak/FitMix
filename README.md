@@ -1,40 +1,31 @@
 # FitMix
 
-**Spot a look. Make it yours.**
-
-FitMix is an iPhone app that turns real-world outfit inspiration into a look you can try on and shop. Tap someone’s outfit in the live camera, find similar pieces, and see how they look together on a personalized avatar.
-
 Built for McGill CodeJam 16.
 
-<!-- Add a short demo GIF here showing a live camera tap and an outfit swap. -->
+FitMix is a SwiftUI iPhone app for recreating outfits you spot in real life. Capture a look, pick out the pieces you like, and preview the full outfit on a photo of yourself before deciding what to shop for.
 
-## How it works
+## What works today
 
-1. **Create your avatar.** Upload a photo and enter your height and weight to create a personalized 2D style preview.
-2. **Spot an outfit.** Open the live camera and tap the person whose look caught your eye. FitMix captures the selected frame automatically.
-3. **Find similar pieces.** FitMix identifies visible garments and shows shoppable matches with product photos, prices, and retailer links.
-4. **Make the look yours.** Try on a similar jacket, then swap in jeans you spotted on someone else. Each piece can change independently on your avatar.
-5. **Shop the look.** Choose a size and add products to your cart. For supported stores, open the retailer’s checkout inside FitMix.
+| Branch | What you can try |
+| --- | --- |
+| `main` | Create a personalized 3D preview in **My Avatar** using your measurements and photos. On a compatible iPhone, you can also scan your face. Open **Account** to sign up, sign in, or reset your password with Supabase Auth. Avatar captures stay on your device. |
+| [`studio-fit`](https://github.com/RalphAzrak/FitMix/tree/studio-fit) | Open a sample outfit in **Studio**, inspect individual garments, swap in sample catalog items, and review sizes and retailer links. Sample scans demonstrate how an outfit goes from Camera to Studio. |
 
-## Style Studio
+## The outfit flow we're building
 
-Style Studio is where you can build a look from shopping results and clothes you already own. The planned features include:
+1. **Scan a look.** Use the camera to capture an outfit you want to recreate.
+2. **Isolate a garment.** Tap a piece in Studio to see it against a contrasting background, browse similar items, and choose what to keep.
+3. **Try the full look.** Take a photo of yourself and see all selected garments together on that photo. Studio keeps the original outfit visible as a reference.
 
-- **My Closet** — Upload and organize photos of your clothes by category.
-- **Manual styling** — Swap jackets, tops, pants, and shoes on your avatar.
-- **Outfit generation** — Build a Professional, Casual, or Sport look from your closet.
-- **Outfit suggestions** — Preview one suggested swap and save the looks you want to revisit.
-
-## CodeJam prototype
-
-The demo focuses on one interaction: **tap a jacket on one person, try a similar match on your avatar, then swap in jeans inspired by someone else while keeping the jacket in place.**
-
-The prototype targets a native SwiftUI experience, computer vision for live person selection and garment analysis, a curated product catalog, and checkout through one integrated retailer. The avatar previews how pieces look together using approximate proportions.
+Live garment detection, automated product matching, and photo-based try-on are planned. The current Studio prototype links to retailer pages for shopping.
 
 ## Run locally
 
-<!-- Add the Xcode project path, minimum iOS version, and any required configuration. -->
+1. Clone this repository and open [`FitMix.xcodeproj`](FitMix.xcodeproj) in Xcode. The project on `main` targets iOS **27.2**. Use an Xcode version and run destination that support it.
+2. Let Xcode resolve the Swift packages, select an iPhone simulator, and press **⌘R**. The app opens on **My Avatar**.
+3. For camera capture, run on a physical iPhone, configure signing if prompted, and grant camera access. Face scanning requires a TrueDepth camera.
+4. To test email authentication, open **Account**. The app includes the team's Supabase client configuration. To use a different Supabase project, update `SupabaseConfig` in [`AuthSession.swift`](FitMix/Services/AuthSession.swift) and add `fitmix://reset-password` to the project's allowed auth redirect URLs.
 
-## Team
+### Preview Studio with a sample scan
 
-<!-- Add team member names, GitHub profiles, and contributions. -->
+On `studio-fit`, open **Product → Scheme → Edit Scheme → Run → Arguments** in Xcode. Under **Environment Variables**, add `FM_DEBUG_SAMPLE_SCANS` with the value `1` and run the Debug build. From **My Avatar**, choose **Open Camera to Scan Fits**, then select **Finish with Sample Scan A** or **Finish with Sample Scan B**.

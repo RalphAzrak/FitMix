@@ -9,6 +9,8 @@ struct ZoomableImageView: View {
     /// Normalized region to start zoomed in on.
     var focus: CGRect?
     var focusLabel: String?
+    /// What the picture is, for VoiceOver.
+    var label = "Street capture"
     @Environment(\.dismiss) private var dismiss
 
     @State private var scale: CGFloat = 1
@@ -33,7 +35,7 @@ struct ZoomableImageView: View {
                     .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
                     .gesture(pinch(fitted: fitted.size).simultaneously(with: pan(fitted: fitted.size)))
                     .onTapGesture(count: 2) { toggleZoom(fitted: fitted.size) }
-                    .accessibilityLabel("Street capture")
+                    .accessibilityLabel(label)
                     .accessibilityAddTraits(.isImage)
                     .accessibilityHint("Pinch or double-tap to zoom")
             }

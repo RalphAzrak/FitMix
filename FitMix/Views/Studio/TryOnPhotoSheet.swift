@@ -10,7 +10,7 @@ struct TryOnPhotoSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showPhotoSource = false
     @State private var candidate: UIImage?
-    @State private var check: PhotoCheck = .checking
+    @State private var analysis: BodyPhotoAnalysis??   // outer nil: still checking
 
     var body: some View {
         NavigationStack {
@@ -24,7 +24,7 @@ struct TryOnPhotoSheet: View {
                         .foregroundStyle(AuthPalette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let candidate {
-                        BodyPhotoPreview(image: candidate, check: check)
+                        PhotoPreview(image: candidate, label: "Your full-body photo", notice: analysis.map { $0.notice })
                     } else {
                         VStack(alignment: .leading, spacing: 10) {
                             tip("figure.stand", "Stand upright facing the camera, arms slightly away from your body.")
@@ -43,14 +43,14 @@ struct TryOnPhotoSheet: View {
                 VStack(spacing: 10) {
                     if let candidate {
                         Button("Use This Photo") {
-                            guard case .done(let analysis) = check else { return }
+                            guard let analysis else { return }
                             avatar.saveBodyPhoto(candidate, analysis: analysis)
                             onUse(avatar.bodyPhoto ?? candidate)
                             dismiss()
                         }
                         .buttonStyle(AuthPrimaryButtonStyle())
-                        .disabled(check == .checking)
-                        .opacity(check == .checking ? 0.5 : 1)
+                        .disabled(analysis == nil)
+                        .opacity(analysis == nil ? 0.5 : 1)
                         Button("Retake") { showPhotoSource = true }
                             .buttonStyle(AuthSocialButtonStyle(background: AuthPalette.container, foreground: AuthPalette.onSurface))
                     } else {
@@ -69,10 +69,10 @@ struct TryOnPhotoSheet: View {
         .photoSource(isPresented: $showPhotoSource, title: "Full-body photo", camera: .front) { image in
             let normalized = image.normalized()
             candidate = normalized
-            check = .checking
+            analysis = nil
             Task {
-                let analysis: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
-                if candidate === normalized { check = .done(analysis) }
+                let result: BodyPhotoAnalysis? = if let cg = normalized.cgImage { await BodyPhotoAnalyzer.analyze(image: cg) } else { nil }
+                if candidate === normalized { analysis = .some(result) }
             }
         }
     }

@@ -14,5 +14,12 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Lets the app reach the FitMix backend running on a Mac on the same Wi-Fi (plain http to a .local address).
+	     Everything else still requires https. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

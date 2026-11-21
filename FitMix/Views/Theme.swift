@@ -112,9 +112,9 @@ struct NoticeRow: View {
 extension BodyPhotoAnalysis? {
     /// What the photo check found, in words. Only states what was actually checked.
     var notice: (tone: NoticeRow.Tone, text: String) {
-        guard let self else { return (.info, "The photo check couldn't run on this device. Body shape will use height and weight only.") }
-        if !self.personDetected { return (.caution, "No person found in this photo. Body shape will use height and weight only.") }
-        if !self.fullBodyVisible { return (.caution, "Your full body isn't visible from head to feet. Body shape will use height and weight only.") }
-        return (.good, "Full body found, head to feet.")
+        guard let self else { return (.info, "The photo check couldn't run on this device. Make sure your whole body is visible, head to shoes.") }
+        if !self.personDetected { return (.caution, "No person found in this photo. Choose one that shows your whole body, head to shoes.") }
+        if !self.fullBodyVisible { return (.caution, "Your whole body isn't visible from head to shoes, so the avatar may be less accurate.") }
+        return (.good, "Full body found, head to shoes.")
     }
 }
