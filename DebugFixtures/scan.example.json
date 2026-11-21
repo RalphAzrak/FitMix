@@ -1,0 +1,27 @@
+{
+  "photo": "photo.jpg",
+  "subject": [0.26, 0.12, 0.52, 0.81],
+  "garments": [
+    {
+      "category": "jacket",
+      "label": "Olive bomber",
+      "bounds": [0.27, 0.24, 0.50, 0.29],
+      "cutout": "jacket-cutout.png",
+      "matches": [
+        { "id": "jk-1", "name": "Olive Bomber", "brand": "Example", "match": "exact",
+          "price": 148, "currency": "USD", "sizes": ["S", "M", "L"], "image": "jacket-product.jpg",
+          "url": "https://example.com/olive-bomber" }
+      ]
+    },
+    {
+      "category": "pants",
+      "label": "Dark-wash straight jeans",
+      "bounds": [0.34, 0.44, 0.32, 0.43],
+      "matches": [
+        { "id": "pn-1", "name": "Indigo Straight Jean", "match": "similar", "price": 110, "currency": "USD" },
+        { "id": "pn-2", "name": "Raw Denim Straight", "match": "exact", "price": 125, "currency": "USD", "sizes": ["30×30", "32×30"] }
+      ]
+    },
+    { "category": "shoes", "bounds": [0.29, 0.85, 0.31, 0.07] }
+  ]
+}

@@ -56,7 +56,7 @@ struct DetectedGarment: Identifiable {
 }
 
 enum GarmentCategory: String, CaseIterable, Hashable {
-    case jacket, top, dress, pants, skirt, shorts, shoes, bag, hat, accessory, other
+    case jacket, top, dress, pants, skirt, shorts, bottoms, shoes, bag, hat, accessory, other
 
     var title: String {
         switch self {
@@ -66,6 +66,8 @@ enum GarmentCategory: String, CaseIterable, Hashable {
         case .pants: "Pants"
         case .skirt: "Skirt"
         case .shorts: "Shorts"
+        /// Lower-body garment whose exact type wasn't identified (pants, skirt, or shorts).
+        case .bottoms: "Bottoms"
         case .shoes: "Shoes"
         case .bag: "Bag"
         case .hat: "Hat"
@@ -78,7 +80,7 @@ enum GarmentCategory: String, CaseIterable, Hashable {
     var symbol: String {
         switch self {
         case .jacket, .top, .dress: "tshirt"
-        case .pants, .shorts, .skirt: "figure.stand"
+        case .pants, .shorts, .skirt, .bottoms: "figure.stand"
         case .shoes: "shoe"
         case .bag: "bag"
         case .hat: "graduationcap"
@@ -162,9 +164,10 @@ struct WorkingLook {
     let scanID: UUID
     var pieces: [Piece]
 
-    init(scan: OutfitScan) {
+    /// - Parameter selected: garments chosen in Outfit Review; nil keeps every detected garment.
+    init(scan: OutfitScan, selected: Set<UUID>? = nil) {
         scanID = scan.id
-        pieces = scan.garments.map { Piece(detected: $0) }
+        pieces = scan.garments.filter { selected?.contains($0.id) ?? true }.map { Piece(detected: $0) }
     }
 
     /// Prices of the pieces that have one, if they share a currency.
@@ -177,5 +180,61 @@ struct WorkingLook {
 
     var hasMixedCurrencies: Bool {
         Set(pieces.compactMap { $0.product?.price?.currencyCode }).count > 1
+    }
+}
+
+// MARK: - Studio hero frame
+
+/// What Studio's top image shows for a scan: a crop around the selected person that keeps every
+/// detected garment in view, or the whole captured frame when the scan has no subject region.
+/// Garment regions are converted into this image's coordinates so outlines and zoom line up.
+struct HeroFrame {
+    /// Image shown in Studio and in zoom.
+    let image: UIImage
+    /// The part of `OutfitScan.image` that `image` shows, normalized.
+    let region: CGRect
+
+    /// Room left around the person, as a fraction of the crop's own size.
+    private static let margin: CGFloat = 0.06
+
+    init(scan: OutfitScan) {
+        guard let subject = scan.subjectBounds?.standardized, subject.width > 0, subject.height > 0 else {
+            image = scan.image
+            region = CGRect(x: 0, y: 0, width: 1, height: 1)
+            return
+        }
+        let outfit = scan.garments.compactMap(\.bounds).reduce(subject) { $0.union($1) }
+        let padded = outfit.insetBy(dx: -outfit.width * Self.margin, dy: -outfit.height * Self.margin)
+        let clamped = padded.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clamped.isNull, clamped.width < 0.98 || clamped.height < 0.98 else {
+            image = scan.image
+            region = CGRect(x: 0, y: 0, width: 1, height: 1)
+            return
+        }
+        region = clamped
+        image = Self.crop(scan.image, to: clamped)
+    }
+
+    /// A region of the scan image, in this frame's coordinates. Nil if it falls outside the frame.
+    func convert(_ bounds: CGRect) -> CGRect? {
+        let visible = bounds.intersection(region)
+        guard !visible.isNull, visible.width > 0, visible.height > 0 else { return nil }
+        return CGRect(x: (visible.minX - region.minX) / region.width,
+                      y: (visible.minY - region.minY) / region.height,
+                      width: visible.width / region.width,
+                      height: visible.height / region.height)
+    }
+
+    /// Crops in display orientation (the way the photo looks), so EXIF-rotated camera images work.
+    private static func crop(_ image: UIImage, to region: CGRect) -> UIImage {
+        let size = image.size
+        let rect = CGRect(x: region.minX * size.width, y: region.minY * size.height,
+                          width: region.width * size.width, height: region.height * size.height).integral
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: rect.size, format: format).image { _ in
+            image.draw(at: CGPoint(x: -rect.minX, y: -rect.minY))
+        }
     }
 }

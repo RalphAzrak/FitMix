@@ -3,14 +3,21 @@ import SwiftUI
 import UIKit
 
 /// Debug-only stand-ins for the Camera's output, so Studio can be exercised before the real
-/// scanner lands. Drawn in code (no bundled assets) and compiled out of release builds.
-/// Reachable only from the Camera placeholder when FM_DEBUG_SAMPLE_SCANS=1 is set.
+/// scanner lands. Compiled out of release builds and reachable only from the Camera placeholder:
+/// - FM_DEBUG_SAMPLE_SCANS=1: two illustrated scans drawn in code (no bundled assets).
+/// - FM_DEBUG_SCAN_FIXTURE=/path/to/folder: a real photo with hand-entered garment data (scan.json).
 enum SampleScans {
-    private static var issued: Set<UUID> = []
+    enum Kind { case illustration, fixture }
+
+    private static var issued: [UUID: Kind] = [:]
 
     static var enabled: Bool { ProcessInfo.processInfo.environment["FM_DEBUG_SAMPLE_SCANS"] == "1" }
 
-    static func isSample(_ scan: OutfitScan) -> Bool { issued.contains(scan.id) }
+    static var fixtureFolder: URL? {
+        ProcessInfo.processInfo.environment["FM_DEBUG_SCAN_FIXTURE"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    static func kind(of scan: OutfitScan) -> Kind? { issued[scan.id] }
 
     private static let canvas = CGSize(width: 600, height: 900)
 
@@ -212,9 +219,102 @@ enum SampleScans {
                        sizes: sizes, retailerURL: nil)
     }
 
-    private static func issue(_ scan: OutfitScan) -> OutfitScan {
-        issued.insert(scan.id)
+    private static func issue(_ scan: OutfitScan, as kind: Kind = .illustration) -> OutfitScan {
+        issued[scan.id] = kind
         return scan
+    }
+
+    // MARK: Photo fixture
+
+    struct FixtureError: LocalizedError {
+        var message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Builds a scan from a real photo plus hand-entered garment data, the same shape the Camera
+    /// will produce. Regions are normalized to the photo as you see it (0–1, top-left origin).
+    static func fixtureScan(from folder: URL) throws -> OutfitScan {
+        let jsonURL = folder.appendingPathComponent("scan.json")
+        guard let data = try? Data(contentsOf: jsonURL) else {
+            throw FixtureError(message: "Couldn't read \(jsonURL.path).")
+        }
+        let spec: FixtureSpec
+        do { spec = try JSONDecoder().decode(FixtureSpec.self, from: data) } catch {
+            throw FixtureError(message: "scan.json isn't valid: \(error.localizedDescription)")
+        }
+        func load(_ name: String?) -> UIImage? {
+            name.flatMap { UIImage(contentsOfFile: folder.appendingPathComponent($0).path) }
+        }
+        guard let original = load(spec.photo) else {
+            throw FixtureError(message: "Couldn't open the photo \(spec.photo) in \(folder.path).")
+        }
+        // Upright, like a camera frame after orientation is applied.
+        let photo = original.normalized(maxDimension: 3000)
+
+        let garments = try spec.garments.enumerated().map { index, g -> DetectedGarment in
+            guard let category = GarmentCategory(rawValue: g.category) else {
+                throw FixtureError(message: "Garment \(index + 1): unknown category \"\(g.category)\". Use one of: \(GarmentCategory.allCases.map(\.rawValue).joined(separator: ", ")).")
+            }
+            let bounds = try g.bounds.map { try rect($0, "garment \(index + 1) bounds") }
+            let crop = load(g.crop) ?? bounds.map { cropPhoto(photo, $0) }
+            let matches = try (g.matches ?? []).map { m -> CatalogProduct in
+                CatalogProduct(id: m.id, name: m.name, brand: m.brand, category: category,
+                               match: m.match == "exact" ? .exact : .similar,
+                               image: load(m.image).map { .local($0) } ?? m.imageURL.flatMap(URL.init(string:)).map { .remote($0) },
+                               price: try m.price.map { amount in
+                                   guard let code = m.currency else { throw FixtureError(message: "\(m.name): price needs a currency, e.g. \"USD\".") }
+                                   return Price(amount: Decimal(amount), currencyCode: code)
+                               },
+                               sizes: m.sizes ?? [], retailerURL: m.url.flatMap(URL.init(string:)))
+            }
+            return DetectedGarment(category: category, label: g.label, bounds: bounds,
+                                   cutout: load(g.cutout), crop: crop, matches: matches)
+        }
+        let subject = try spec.subject.map { try rect($0, "subject") }
+        return issue(OutfitScan(image: photo, subjectBounds: subject, garments: garments), as: .fixture)
+    }
+
+    private static func rect(_ values: [Double], _ name: String) throws -> CGRect {
+        guard values.count == 4, values.allSatisfy({ (0...1).contains($0) }) else {
+            throw FixtureError(message: "\(name) must be [x, y, width, height] with values from 0 to 1.")
+        }
+        return CGRect(x: values[0], y: values[1], width: values[2], height: values[3])
+    }
+
+    /// Stand-in for the pipeline's crop: the garment's region cut from the photo.
+    private static func cropPhoto(_ photo: UIImage, _ bounds: CGRect) -> UIImage {
+        let px = CGRect(x: bounds.minX * photo.size.width * photo.scale, y: bounds.minY * photo.size.height * photo.scale,
+                        width: bounds.width * photo.size.width * photo.scale, height: bounds.height * photo.size.height * photo.scale).integral
+        guard let cg = photo.cgImage?.cropping(to: px) else { return photo }
+        return UIImage(cgImage: cg, scale: photo.scale, orientation: .up)
+    }
+
+    private struct FixtureSpec: Decodable {
+        var photo: String
+        var subject: [Double]?
+        var garments: [Garment]
+
+        struct Garment: Decodable {
+            var category: String
+            var label: String?
+            var bounds: [Double]?
+            var cutout: String?
+            var crop: String?
+            var matches: [Match]?
+        }
+
+        struct Match: Decodable {
+            var id: String
+            var name: String
+            var brand: String?
+            var match: String
+            var price: Double?
+            var currency: String?
+            var sizes: [String]?
+            var image: String?
+            var imageURL: String?
+            var url: String?
+        }
     }
 }
 #endif

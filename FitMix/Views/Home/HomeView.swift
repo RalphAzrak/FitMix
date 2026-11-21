@@ -10,6 +10,8 @@ struct HomeView: View {
     @State private var showPhotoSource = false
     @State private var photoCandidate: PhotoCandidate?
     @State private var placeholder: PlaceholderScreen?
+    /// True when Camera was opened from Studio, so closing Camera goes back there.
+    @State private var cameraReturnsToStudio = false
     @Environment(StudioStore.self) private var studio
     @State private var confirmDelete = false
     @State private var authPreview: AuthView.Mode?
@@ -42,12 +44,36 @@ struct HomeView: View {
         .fullScreenCover(item: $placeholder) { screen in
             switch screen {
             case .studio:
-                StudioView(openCamera: { placeholder = .scanFits })
+                StudioView(openCamera: {
+                    cameraReturnsToStudio = true
+                    placeholder = .scanFits
+                })
             case .scanFits:
-                // The Camera hands its confirmed scan to Studio here.
-                PlaceholderView(screen: screen) { scan in
-                    studio.open(scan)
-                    placeholder = .studio
+                CameraView(close: {
+                    // Back to where Camera was opened from; Studio keeps its previous look.
+                    placeholder = cameraReturnsToStudio ? .studio : nil
+                }, capture: { capture in
+                    // Camera → Outfit Review, which finds the garments. Studio's current look
+                    // stays until Try Full Look.
+                    studio.review(capture)
+                    placeholder = .review
+                }, confirm: { scan in
+                    studio.review(scan)
+                    placeholder = .review
+                })
+            case .review:
+                if let scan = studio.pendingScan {
+                    OutfitReviewView(scan: scan, retake: {
+                        studio.discardReview()
+                        placeholder = .scanFits
+                    }, close: {
+                        studio.discardReview()
+                        placeholder = cameraReturnsToStudio ? .studio : nil
+                    }, openStudio: {
+                        placeholder = .studio
+                    })
+                    // A finished analysis replaces the scan; start its selection fresh.
+                    .id(scan.id)
                 }
             }
         }
@@ -166,7 +192,10 @@ struct HomeView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
-            Button { placeholder = .scanFits } label: { Label("Open Camera to Scan Fits", systemImage: "camera") }
+            Button {
+                cameraReturnsToStudio = false
+                placeholder = .scanFits
+            } label: { Label("Open Camera to Scan Fits", systemImage: "camera") }
                 .buttonStyle(FMFilledButtonStyle())
             Button { placeholder = .studio } label: { Label("Jump to Studio", systemImage: "paintpalette") }
                 .buttonStyle(FMFilledButtonStyle(color: .fmCharcoal))
@@ -582,51 +611,10 @@ struct MetricsEditorSheet: View {
     }
 }
 
-// MARK: Placeholders
+// MARK: Full-screen destinations
 
+/// Camera and Studio, presented full screen from My Avatar. (Named before Camera existed.)
 enum PlaceholderScreen: String, Identifiable {
-    case scanFits, studio
+    case scanFits, review, studio
     var id: String { rawValue }
-
-    var title: String { "Scan Fits" }
-    var icon: String { "camera.viewfinder" }
-    var detail: String { "Scanning clothing with the camera isn't built yet. It comes after the avatar milestone." }
-}
-
-/// Stands in for the Camera until the scanner lands. `finishScan` is the hand-off the real
-/// Camera calls with its confirmed result.
-struct PlaceholderView: View {
-    var screen: PlaceholderScreen
-    var finishScan: (OutfitScan) -> Void = { _ in }
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: screen.icon).font(.system(size: 44)).foregroundStyle(Color.fmCobalt)
-            Eyebrow(text: "Placeholder")
-            Text(screen.title).font(.fmSerif(34)).foregroundStyle(Color.fmInk)
-            Text(screen.detail)
-                .font(.system(size: 16))
-                .foregroundStyle(Color.fmSecondary)
-                .multilineTextAlignment(.center)
-            Spacer()
-            #if DEBUG
-            if SampleScans.enabled {
-                VStack(spacing: 8) {
-                    Eyebrow(text: "Debug · sample Camera output")
-                    Button("Finish with Sample Scan A") { finishScan(SampleScans.scanA()) }
-                        .buttonStyle(FMOutlineButtonStyle())
-                    Button("Finish with Sample Scan B") { finishScan(SampleScans.scanB()) }
-                        .buttonStyle(FMOutlineButtonStyle())
-                }
-            }
-            #endif
-            Button("Back to My Avatar") { dismiss() }.buttonStyle(FMFilledButtonStyle(color: .fmCharcoal))
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.fmBackground.ignoresSafeArea())
-        .preferredColorScheme(.light)
-    }
 }
