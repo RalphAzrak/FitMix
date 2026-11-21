@@ -71,7 +71,39 @@ are ordered by label, then provider rank and shared clues; the app reorders with
 Errors use `{"error": {"code", "message"}}`. `not_configured` and `provider_auth` aren't worth retrying; the other
 codes are. When one provider fails, the others' results are still returned.
 
-## Retailer search setup
+## Product search: `POST /v1/lens-search` (what the app uses)
+
+When Studio Fit opens after a scan, the app sends each garment's crop (one request per garment, side by side) as
+multipart `crop` (JPEG, PNG or WebP, at most 2 MB) plus `category` (`jacket`, `tshirt`, `pants`, `shoes`) and the
+optional on-device clues `color`, `text`, `pattern`, `style`. The server asks Google Lens through Scrappa
+(`GET https://scrappa.co/api/google/lens?url=<crop URL>&type=visual_matches`, `X-API-KEY` header, from Scrappa's
+OpenAPI spec) and answers:
+
+    {"status": "matched", "source": "google_lens", "cached": false,
+     "result": {"title", "url", "image_url", "image_source", "retailer", "price", "match": "similar", ...}}
+    {"status": "no_match", "source": "google_lens", "cached": false, "result": null}
+
+`result` is the single best credible listing: a retail page (not Google, social or image sites) whose title fits the
+category (or whose page carries a price) and names no other category, with an http(s) product link and an https
+photo. The top 4 listing pages are read for the retailer's own product photo (`image_source: "listing_page"`);
+otherwise Lens's thumbnail of that listing is used (`"lens_thumbnail"`). It is always labeled `similar`.
+
+Spending guards, all server-side:
+
+- **Cache**: the same crop and category get the stored answer (match or no match) for `FITMIX_LENS_CACHE_HOURS`
+  (default 7 days), across restarts. Failures aren't cached.
+- **In-flight de-duplication**: identical requests at the same time share one Scrappa call.
+- **Monthly cap**: at most `FITMIX_LENS_MONTHLY_LIMIT` calls (default 100) per UTC month; Scrappa's free tier is
+  500 credits. Over the cap: `503 budget_exhausted`, no call.
+- **Quota**: Scrappa `402` (out of credits) → `503 provider_quota`, and no more calls this month.
+- **Refused key** (`401/403`) → `503 provider_auth`, no more calls until restart. **Rate limited** → 60 s cooldown
+  (`provider_cooling_down`). Three failures in a row → 60 s cooldown. **Timeout** → `504 provider_timeout`.
+- **Not configured** (no `SCRAPPA_API_KEY`, or `FITMIX_PUBLIC_BASE_URL` isn't https) → `503 not_configured`, no call.
+
+The counter and cache live in `Backend/.cache/lens_search.json` (ignored by Git): hashes and listing JSON, no images.
+`GET /health` reports `lens_search` readiness, calls this month and the cap, never the key.
+
+## Retailer search setup (`/v1/garment-match`, not used by the app any more)
 
 Providers receive only the selected garment crop, and only those listed in `FITMIX_VISUAL_PROVIDERS` run.
 

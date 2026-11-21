@@ -129,8 +129,11 @@ class ScrappaLensProvider:
     fixture = False
     endpoint = "https://scrappa.co/api/google/lens"
 
-    def __init__(self, api_key: str, public_base_url: str, crop_host: CropHost, http: httpx.AsyncClient | None = None):
+    def __init__(self, api_key: str, public_base_url: str, crop_host: CropHost, http: httpx.AsyncClient | None = None,
+                 search_type: str = "all"):
         self.api_key, self.public_base_url, self.crop_host = api_key, public_base_url.rstrip("/"), crop_host
+        # Scrappa's `type`: all | products | exact_matches | visual_matches (docs/api.json, GET /google/lens).
+        self.search_type = search_type
         # Scrappa says a visual search "can take several seconds, so use a client timeout of at least 45 seconds".
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0))
 
@@ -138,7 +141,7 @@ class ScrappaLensProvider:
         token = self.crop_host.publish(crop)
         image_url = f"{self.public_base_url}/v1/crops/{token}.jpg"
         try:
-            response = await self.http.get(self.endpoint, params={"url": image_url, "type": "all"},
+            response = await self.http.get(self.endpoint, params={"url": image_url, "type": self.search_type},
                                            headers={"X-API-KEY": self.api_key, "Accept": "application/json"})
         except httpx.TimeoutException:
             raise ProviderError("provider_timeout", "Google Lens took too long. Try again.")
@@ -148,13 +151,26 @@ class ScrappaLensProvider:
             self.crop_host.revoke(token)
         if response.status_code in (401, 403):
             raise ProviderError("provider_auth", "Scrappa refused the server's API key.", retryable=False)
+        if response.status_code == 402:
+            # "Your API key is valid, but the account has no free, subscription, or package credits available."
+            raise ProviderError("provider_quota", "The Google Lens allowance is used up.", retryable=False)
         if response.status_code != 200:
-            body = response.json() if response.content and "json" in response.headers.get("content-type", "") else {}
-            raise ProviderError(str(body.get("error_code") or "provider_error"), "Google Lens search failed.",
+            try:
+                body = response.json() if response.content and "json" in response.headers.get("content-type", "") else {}
+            except ValueError:
+                body = {}
+            body = body if isinstance(body, dict) else {}
+            raise ProviderError(str(body.get("error_code") or body.get("code") or "provider_error"), "Google Lens search failed.",
                                 retryable=bool(body.get("retryable", response.status_code >= 500 or response.status_code == 429)))
-        return self.parse(response.json())
+        try:
+            body = response.json()
+        except ValueError:
+            raise ProviderError("provider_invalid", "Google Lens sent back something FitMix couldn't read.")
+        return self.parse(body)
 
     def parse(self, body: dict) -> list[Candidate]:
+        if not isinstance(body, dict):  # the spec allows a bare string body; it has no matches in it
+            return []
         found = []
         for group, same_image in (("exact_matches", True), ("visual_matches", False)):
             for index, item in enumerate(body.get(group) or []):

@@ -5,6 +5,9 @@
 - `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
   server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
   labeled "exact", "brand" or "similar" (see visual_search.py).
+- `POST /v1/lens-search`: the app's product search. For each garment crop from a scan, this server asks Google
+  Lens (via Scrappa) for visual matches and returns the best credible retailer listing, labeled "similar"
+  (see lens_search.py). Cached, de-duplicated and capped per month.
 
 Provider keys live only in this process's environment. Images are held in memory for the length of one request:
 they are never written to disk and never logged.
@@ -29,12 +32,15 @@ from fastapi.responses import JSONResponse, Response
 
 from .mock import placeholder_png
 from .prompt import build_prompt
+from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
 from .providers import CropHost, EbayProvider, FixtureProvider, ScrappaLensProvider
 from .retail import EbayMatcher
 from .visual_search import CATEGORIES, Clues, Enricher, ProviderError, VisualProvider, search_all
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "visual.json"
+# Lens usage counter and cached answers (no images). Ignored by Git.
+LENS_STATE_PATH = Path(__file__).parent.parent / ".cache" / "lens_search.json"
 
 log = logging.getLogger("fitmix")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -69,6 +75,10 @@ class Settings:
     # Read listing pages for photo, price, currency, brand and codes.
     listing_enrichment: bool = True
     match_rate_limit_per_hour: int = 120
+    # Most Google Lens calls per calendar month (UTC). Scrappa's free tier is 500 credits a month.
+    lens_monthly_limit: int = 100
+    # How long a Lens answer for the same crop is reused, in hours.
+    lens_cache_hours: float = 168.0
 
     @staticmethod
     def from_environment() -> "Settings":
@@ -90,6 +100,8 @@ class Settings:
             public_base_url=env.get("FITMIX_PUBLIC_BASE_URL", "").strip(),
             listing_enrichment=env.get("FITMIX_LISTING_ENRICHMENT", "1").strip().lower() not in ("0", "false", "no"),
             match_rate_limit_per_hour=int(env.get("FITMIX_MATCH_RATE_LIMIT_PER_HOUR", "") or Settings.match_rate_limit_per_hour),
+            lens_monthly_limit=int(env.get("FITMIX_LENS_MONTHLY_LIMIT", "") or Settings.lens_monthly_limit),
+            lens_cache_hours=float(env.get("FITMIX_LENS_CACHE_HOURS", "") or Settings.lens_cache_hours),
         )
 
 
@@ -192,9 +204,24 @@ def default_providers(settings: Settings, crop_host: CropHost) -> tuple[list[Vis
     return ready, skipped
 
 
+def default_lens_search(settings: Settings, crop_host: CropHost, enricher: Enricher | None,
+                          state_path: Path | None = LENS_STATE_PATH) -> LensSearch:
+    """Google Lens product search. Independent of FITMIX_VISUAL_PROVIDERS: it only needs the key and an https
+    address Scrappa can fetch the crop from."""
+    missing = None
+    if not settings.scrappa_api_key:
+        missing = "SCRAPPA_API_KEY not set"
+    elif not settings.public_base_url.startswith("https://"):
+        missing = "FITMIX_PUBLIC_BASE_URL must be an https address Scrappa can reach"
+    provider = None if missing else ScrappaLensProvider(settings.scrappa_api_key, settings.public_base_url, crop_host,
+                                                        search_type="visual_matches")
+    return LensSearch(provider, enricher, not_configured=missing, monthly_limit=settings.lens_monthly_limit,
+                        cache_ttl=settings.lens_cache_hours * 3600, state_path=state_path)
+
+
 def create_app(settings: Settings | None = None, generator: Generator | None = None,
                providers: list[VisualProvider] | None = None, enricher: Enricher | None = None,
-               crop_host: CropHost | None = None) -> FastAPI:
+               crop_host: CropHost | None = None, lens: LensSearch | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
     if generator is None:
         if settings.mock:
@@ -207,6 +234,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         providers, skipped = default_providers(settings, crop_host)
     if enricher is None and settings.listing_enrichment:
         enricher = ListingEnricher()
+    lens = lens or default_lens_search(settings, crop_host, enricher)
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
     recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -244,7 +272,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     async def health():
         return {"status": "ok", "ready": generator is not None, "mock": settings.mock,
                 "match_ready": bool(providers), "match_providers": [p.name for p in providers],
-                "match_skipped": skipped}
+                "match_skipped": skipped, "lens_search": lens.status()}
 
     @app.get("/v1/crops/{token}.jpg")
     async def crop_for_provider(token: str):
@@ -297,6 +325,43 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
                              "fixture": any(r.candidate.fixture for r in outcome.results),
                              "providers": outcome.providers + skipped,
                              "results": [r.to_json() for r in outcome.results]}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/lens-search")
+    async def lens_search(
+        crop: UploadFile = File(...),
+        category: str = Form(...),
+        color: str | None = Form(None),
+        text: str | None = Form(None),
+        pattern: str | None = Form(None),
+        style: str | None = Form(None),
+        _: str = Depends(authorize_match),
+    ):
+        if category not in CATEGORIES:
+            raise ApiError(400, "invalid_category", "FitMix can search for a jacket, T-shirt, pants or shoes.")
+        data = await crop.read(MAX_CROP_BYTES + 1)
+        if len(data) > MAX_CROP_BYTES:
+            raise ApiError(413, "image_too_large", "The garment image is too large to send.")
+        if _media_type(data) is None:
+            raise ApiError(400, "invalid_image", "The garment image isn't a JPEG, PNG or WebP picture.")
+        clues = Clues(category=category, color=(color or "").strip().lower()[:20] or None,
+                      text=[w.strip().lower()[:40] for w in (text or "").split(",") if w.strip()][:12],
+                      pattern=(pattern or "").strip().lower()[:30] or None, style=(style or "").strip().lower()[:30] or None)
+        started = time.monotonic()
+        try:
+            answer = await lens.search(data, clues)
+        except LensUnavailable as error:
+            log.info("lens %s: not called (%s)", category, error.code)
+            raise ApiError(error.status, error.code, error.message)
+        except ProviderError as error:
+            log.info("lens %s: failed (%s) after %.1fs", category, error.code, time.monotonic() - started)
+            status = 504 if error.code == "provider_timeout" else 503 if error.code in ("provider_quota", "provider_auth") else 502
+            raise ApiError(status, error.code if error.code in ("provider_timeout", "provider_quota", "provider_auth")
+                           else "provider_error", error.message)
+        log.info("lens %s: %d KB crop, %s%s in %.1fs", category, len(data) // 1024,
+                 "match" if answer.result else "no close match", " (cached)" if answer.cached else "", time.monotonic() - started)
+        return JSONResponse({"status": "matched" if answer.result else "no_match", "category": category,
+                             "source": "google_lens", "cached": answer.cached, "result": answer.result},
+                            headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(

@@ -65,6 +65,10 @@ nonisolated enum RetailerSearchOutcome: Sendable, Equatable {
     case matches([RetailerListing])
     /// The provider answered, but nothing credible in this category.
     case noMatch
+    /// Google Lens: the best credible retailer listing ("Similar match").
+    case lensMatch(RetailerListing)
+    /// Google Lens answered, but nothing close and usable.
+    case lensNoMatch
 }
 
 nonisolated enum RetailerSearchError: LocalizedError, Equatable {
@@ -78,6 +82,11 @@ nonisolated enum RetailerSearchError: LocalizedError, Equatable {
     /// The provider refused (bad credentials, account not approved). Retrying won't help.
     case providerRejected(String)
     case invalidResponse
+    /// The Google Lens search failed (provider error, timeout, not configured, unreachable). The detail is for
+    /// Debug builds; people see "Couldn't search. Try again."
+    case lensFailed(String)
+    /// The monthly Google Lens allowance is used up (server cap or Scrappa credits).
+    case searchLimitReached
 
     var errorDescription: String? {
         switch self {
@@ -87,13 +96,15 @@ nonisolated enum RetailerSearchError: LocalizedError, Equatable {
         case .timedOut: "The product search took too long. Try again."
         case .providerBusy(let message), .providerRejected(let message): message
         case .invalidResponse: "The product search sent back something FitMix couldn't read. Try again."
+        case .lensFailed: "Couldn't search. Try again."
+        case .searchLimitReached: "FitMix has used this month's product searches."
         }
     }
 
     var isRetryable: Bool {
         switch self {
-        case .offline, .unreachable, .timedOut, .providerBusy, .invalidResponse: true
-        case .notConfigured, .providerRejected: false
+        case .offline, .unreachable, .timedOut, .providerBusy, .invalidResponse, .lensFailed: true
+        case .notConfigured, .providerRejected, .searchLimitReached: false
         }
     }
 }
@@ -103,15 +114,15 @@ nonisolated protocol RetailerSearching: Sendable {
 }
 
 enum RetailerSearchers {
-    /// The search Studio uses. Debug builds can swap in clearly labeled fixtures with
-    /// FM_DEBUG_MATCH_FIXTURE=match|nomatch|error|slow.
+    /// The search Studio uses: Google Lens through the FitMix backend (`/v1/lens-search`), in Debug and Release.
+    /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|nomatch|error|slow.
     static var current: RetailerSearching {
         #if DEBUG
         if let mode = ProcessInfo.processInfo.environment["FM_DEBUG_MATCH_FIXTURE"], let fixture = FixtureRetailerSearch(mode: mode) {
             return fixture
         }
         #endif
-        return BackendRetailerSearch(config: .current)
+        return LensRetailerSearch(config: .current)
     }
 }
 
