@@ -102,10 +102,7 @@ struct AuthView: View {
                 Color.clear.frame(width: 36, height: 36)
             }
             Spacer()
-            Text("FITMIX STUDIO")
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(1.6)
-                .foregroundStyle(AuthPalette.secondary)
+            FitMixWordmark()
                 .accessibilityAddTraits(.isHeader)
             Spacer()
             CircleIconButton(systemName: "questionmark.circle", label: "Help") {}
@@ -370,6 +367,20 @@ private extension Color {
 }
 
 // MARK: Components
+
+/// The FitMix logotype shown at the top of the auth and account screens.
+struct FitMixWordmark: View {
+    var height: CGFloat = 22
+
+    var body: some View {
+        Image("Wordmark")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(height: height)
+            .accessibilityLabel("FitMix")
+    }
+}
 
 struct CircleIconButton: View {
     var systemName: String
@@ -724,10 +735,7 @@ struct AccountView: View {
                 HStack {
                     CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
                     Spacer()
-                    Text("FITMIX STUDIO")
-                        .font(.system(size: 11, weight: .semibold))
-                        .tracking(1.6)
-                        .foregroundStyle(AuthPalette.secondary)
+                    FitMixWordmark()
                     Spacer()
                     Color.clear.frame(width: 36, height: 36)
                 }
