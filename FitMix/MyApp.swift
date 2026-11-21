@@ -11,6 +11,8 @@ import SwiftUI
                 .environment(store)
                 .environment(auth)
                 .preferredColorScheme(.light)
+                // Password-reset links (fitmix://reset-password), including when the app was closed.
+                .onOpenURL { auth.handle(url: $0) }
         }
     }
 }
