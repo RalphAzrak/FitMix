@@ -355,20 +355,3 @@ struct CartView: View {
         do { try change() } catch { failure = error.localizedDescription }
     }
 }
-
-/// Small count badge for cart buttons. Hidden when the cart is empty.
-struct CartBadge: View {
-    var count: Int
-
-    var body: some View {
-        if count > 0 {
-            Text(count > 99 ? "99+" : "\(count)")
-                .font(.system(size: 11, weight: .bold).monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .frame(minWidth: 18, minHeight: 18)
-                .background(Color.fmCobalt, in: Capsule())
-                .accessibilityHidden(true)
-        }
-    }
-}

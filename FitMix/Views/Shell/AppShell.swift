@@ -20,17 +20,13 @@ import SwiftUI
     var flow: SetupStep?
     var authPreview: AuthView.Mode?
     var showCart = false
+    var showShopLook = false
     var showMetricsEditor = false
     /// Set when sign-in or sign-up finishes and there is no avatar yet; opens the avatar flow once Account closes.
     var setupAfterAuth = false
 
     func openCamera() { capture = .camera }
     func openAccount() { authPreview = .signIn }
-}
-
-extension StudioStore {
-    /// Pieces in the current look that can be shopped; the bag badge shows this.
-    var bagCount: Int { look?.pieces.filter { $0.product != nil }.count ?? 0 }
 }
 
 /// The app's root: one screen per tab, the tab bar underneath, and the app-wide covers and sheets.
@@ -102,7 +98,8 @@ struct AppShell: View {
             }
         }
         .sheet(isPresented: $router.showMetricsEditor) { MetricsEditorSheet() }
-        .sheet(isPresented: $router.showCart) { ShoppingReviewView() }
+        .sheet(isPresented: $router.showCart) { NavigationStack { CartView() } }
+        .sheet(isPresented: $router.showShopLook) { ShoppingReviewView() }
         .alert("Couldn't save", isPresented: Binding(get: { store.storageErrorMessage != nil && router.flow == nil },
                                                     set: { if !$0 { store.storageErrorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -121,6 +118,7 @@ struct AppShell: View {
             case "auth", "profile": router.authPreview = .signIn
             case "auth-create": router.authPreview = .createAccount
             case "cart": router.showCart = true
+            case "shop": router.showShopLook = true
             case "studio": router.tab = .studio
             #if DEBUG
             case "studio-sample":
@@ -141,7 +139,7 @@ struct AppShell: View {
                         }
                     }
                     // Checkout proof of concept: select each scripted garment in turn (a new selection cancels
-                    // a search still running), wait for its match, then open the bag.
+                    // a search still running), wait for its match, then open Shop This Look.
                     if let script = DebugCheckoutScript.current {
                         Task {
                             for category in script.order {
@@ -151,7 +149,7 @@ struct AppShell: View {
                                     try? await Task.sleep(for: .milliseconds(250))
                                 }
                             }
-                            router.showCart = true
+                            router.showShopLook = true
                         }
                     }
                 }
@@ -176,11 +174,12 @@ struct AppShell: View {
     /// presented here closes first (the avatar flow saves as it goes), since only one can show at a time.
     private func showAuthLink() {
         guard router.authPreview == nil else { return }
-        let otherOpen = router.flow != nil || router.showMetricsEditor || router.capture != nil || router.showCart
+        let otherOpen = router.flow != nil || router.showMetricsEditor || router.capture != nil || router.showCart || router.showShopLook
         router.flow = nil
         router.showMetricsEditor = false
         router.capture = nil
         router.showCart = false
+        router.showShopLook = false
         router.setupAfterAuth = false
         Task {
             if otherOpen { try? await Task.sleep(for: .milliseconds(650)) }
@@ -189,7 +188,7 @@ struct AppShell: View {
     }
 
     /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | generate | avatar-profile |
-    /// metrics | auth | auth-create | profile | studio | studio-sample | closet | saved | camera | cart.
+    /// metrics | auth | auth-create | profile | studio | studio-sample | closet | saved | camera | cart | shop.
     static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]
@@ -309,11 +308,11 @@ private struct TabPlaceholder: View {
     var action: (AppRouter) -> Void
 
     @Environment(AppRouter.self) private var router
-    @Environment(StudioStore.self) private var studio
+    @Environment(CartStore.self) private var cart
 
     var body: some View {
         VStack(spacing: 0) {
-            FMTopBar { FMBagButton(count: studio.bagCount) { router.showCart = true } }
+            FMTopBar { FMBagButton(count: cart.count) { router.showCart = true } }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     FMTitleLine(title: title, caption: caption)

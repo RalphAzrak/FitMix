@@ -7,9 +7,9 @@ import UIKit
 /// Flows that cover the whole app (Camera, the avatar flow, Account) are opened through `AppRouter`.
 struct HomeView: View {
     @Environment(AvatarStore.self) private var store
-    @Environment(StudioStore.self) private var studio
     @Environment(AuthSession.self) private var auth
     @Environment(AppRouter.self) private var router
+    @Environment(CartStore.self) private var cart
     @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var showProfile = false
@@ -49,7 +49,7 @@ struct HomeView: View {
 
     private var header: some View {
         FMTopBar {
-            FMBagButton(count: studio.bagCount) { router.showCart = true }
+            FMBagButton(count: cart.count) { router.showCart = true }
             // Opens the account Profile when signed in, otherwise Sign In (see AccountFlowView).
             // The avatar's Profile opens from the avatar on Home.
             Button(action: router.openAccount) {
@@ -129,7 +129,7 @@ struct HomeView: View {
         var list = [
             HomeFeature(id: "studio", title: "Studio", detail: "Swap pieces and style a look", icon: "tshirt") { router.tab = .studio },
             HomeFeature(id: "scan", title: "Scan Fits", detail: "Capture an outfit with the camera", icon: "camera.viewfinder") { router.openCamera() },
-            HomeFeature(id: "shop", title: "Shop This Look", detail: "Review the pieces in your look", icon: "bag") { router.showCart = true },
+            HomeFeature(id: "shop", title: "Shop This Look", detail: "Review the pieces in your look", icon: "bag") { router.showShopLook = true },
             HomeFeature(id: "closet", title: "Closet", detail: "Coming soon", icon: "square.grid.2x2", isAvailable: false) {},
         ]
         // Try-on is offered only once something can actually render it.

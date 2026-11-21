@@ -15,6 +15,7 @@ struct StudioView: View {
     @Environment(AvatarStore.self) private var avatar
     @Environment(ProfileStore.self) private var profile
     @Environment(AppRouter.self) private var router
+    @Environment(CartStore.self) private var cart
 
     @State private var swapPiece: WorkingLook.Piece?
     @State private var showZoom = false
@@ -26,7 +27,7 @@ struct StudioView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            FMTopBar { FMBagButton(count: studio.bagCount) { router.showCart = true } }
+            FMTopBar { FMBagButton(count: cart.count) { router.showCart = true } }
             if let scan = studio.scan, let look = studio.look, let hero = studio.hero {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -315,7 +316,7 @@ struct StudioView: View {
                 }
                 .buttonStyle(FMOutlineButtonStyle())
                 .frame(maxWidth: 150)
-                Button { router.showCart = true } label: {
+                Button { router.showShopLook = true } label: {
                     Label("Shop This Look", systemImage: "bag")
                 }
                 .buttonStyle(FMFilledButtonStyle())
