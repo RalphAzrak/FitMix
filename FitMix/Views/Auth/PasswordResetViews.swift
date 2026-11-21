@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Shared frame for the password screens: wordmark header, eyebrow, serif title, subtitle.
-private struct AuthScreen<Content: View>: View {
+/// Shared frame for the password and email-confirmation screens: wordmark header, eyebrow, serif title, subtitle.
+struct AuthScreen<Content: View>: View {
     var eyebrow: String
     var title: String
     var subtitle: String

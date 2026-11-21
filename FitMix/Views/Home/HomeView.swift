@@ -83,6 +83,8 @@ struct HomeView: View {
             }
         }
         .fullScreenCover(item: $authPreview, onDismiss: {
+            // Cleared after the cover closes so it doesn't flash Profile on the way out.
+            auth.finishConfirmation()
             if setupAfterAuth {
                 setupAfterAuth = false
                 flow = store.resumeStep
@@ -101,11 +103,11 @@ struct HomeView: View {
         } message: {
             Text(store.storageErrorMessage ?? "")
         }
-        .onChange(of: auth.recovery != nil) { _, active in
-            if active { showRecovery() }
+        .onChange(of: auth.hasOpenAuthLink) { _, active in
+            if active { showAuthLink() }
         }
         .onAppear {
-            if auth.recovery != nil { showRecovery() }
+            if auth.hasOpenAuthLink { showAuthLink() }
             switch Self.debugScreen {
             case "setup": flow = store.resumeStep
             case "generate": flow = .generate
@@ -122,9 +124,9 @@ struct HomeView: View {
         }
     }
 
-    /// A reset link was opened: show "Set a new password" in the Account cover. Anything else
+    /// A reset or sign-up confirmation link was opened: show it in the Account cover. Anything else
     /// presented here closes first (the avatar flow saves as it goes), since only one can show at a time.
-    private func showRecovery() {
+    private func showAuthLink() {
         guard authPreview == nil else { return }
         let otherOpen = flow != nil || showMetricsEditor || placeholder != nil || showCart
         flow = nil
