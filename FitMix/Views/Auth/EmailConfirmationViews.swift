@@ -144,6 +144,78 @@ private struct ResendConfirmationForm: View {
     }
 }
 
+/// "Enter the code" under the "Check your email" card, so sign-up can finish without leaving
+/// FitMix when a mail app won't hand the link back.
+struct ConfirmationCodeForm: View {
+    var email: String
+    /// Called once Supabase has confirmed the email and signed the user in.
+    var onVerified: () -> Void
+    @Environment(AuthSession.self) private var auth
+    @State private var code = ""
+    @State private var verifying = false
+    @State private var failure: String?
+    @FocusState private var focused: Bool
+
+    /// Supabase's email code is 6 digits by default; the project can set up to 10.
+    private var digits: String { code.filter(\.isNumber) }
+    private var looksComplete: Bool { (6...10).contains(digits.count) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            AuthField(label: "Confirmation Code", icon: "number", error: failure) {
+                TextField("", text: $code, prompt: Text("Code from the email").foregroundStyle(AuthPalette.outline))
+                    .textContentType(.oneTimeCode)
+                    .keyboardType(.numberPad)
+                    .focused($focused)
+                    .accessibilityIdentifier("confirmCode")
+            }
+            .disabled(verifying)
+
+            Button(action: verify) {
+                HStack(spacing: 8) {
+                    if verifying {
+                        ProgressView().tint(.white)
+                        Text("Verifying…")
+                    } else {
+                        Text("Verify")
+                        Image(systemName: "arrow.right").font(.system(size: 15, weight: .semibold))
+                    }
+                }
+            }
+            .buttonStyle(AuthPrimaryButtonStyle())
+            .disabled(verifying || !looksComplete)
+            .opacity(looksComplete || verifying ? 1 : 0.5)
+            .accessibilityIdentifier("confirmCodeVerify")
+            .padding(.top, 16)
+        }
+        .onChange(of: code) {
+            failure = nil
+            if code != digits { code = digits }
+        }
+        .onChange(of: email) {
+            code = ""
+            failure = nil
+        }
+    }
+
+    private func verify() {
+        guard looksComplete, !verifying else { return }
+        focused = false
+        failure = nil
+        verifying = true
+        let token = digits
+        Task {
+            defer { verifying = false }
+            do {
+                try await auth.verifySignupCode(email: email, code: token)
+                onVerified()
+            } catch {
+                failure = AuthFailure(error).message
+            }
+        }
+    }
+}
+
 /// "Resend email" under the "Check your email" card on Sign In / Create Account.
 struct ResendConfirmationButton: View {
     var email: String

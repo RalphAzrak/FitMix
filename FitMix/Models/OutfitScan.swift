@@ -96,10 +96,21 @@ nonisolated enum GarmentCategory: String, CaseIterable, Hashable, Sendable {
 /// A product from the catalog that the Camera's matching step returned.
 struct CatalogProduct: Identifiable, Hashable {
     enum Match: Hashable {
-        /// The catalog has this exact item.
+        /// Corroborated as this exact item (product code, same image, or brand + model + colour).
         case exact
+        /// Only the brand is supported: "Likely from <brand>".
+        case brand
         /// Only visually similar to the detected garment.
         case similar
+    }
+
+    /// What the card calls this match.
+    var matchLabel: String {
+        switch match {
+        case .exact: "Exact match"
+        case .brand: brand.map { "Likely from \($0)" } ?? "Likely same brand"
+        case .similar: "Similar match"
+        }
     }
 
     let id: String
@@ -117,9 +128,12 @@ struct CatalogProduct: Identifiable, Hashable {
     let retailerURL: URL?
     /// Development/test data, not a real listing. Always labeled as such where shown.
     let isFixture: Bool
+    /// Why it got its match label, in words.
+    var evidence: [String] = []
 
     init(id: String, name: String, brand: String? = nil, retailer: String? = nil, category: GarmentCategory, match: Match,
-         image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil, isFixture: Bool = false) {
+         image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil, isFixture: Bool = false,
+         evidence: [String] = []) {
         self.id = id
         self.name = name
         self.brand = brand
@@ -131,6 +145,7 @@ struct CatalogProduct: Identifiable, Hashable {
         self.sizes = sizes
         self.retailerURL = retailerURL
         self.isFixture = isFixture
+        self.evidence = evidence
     }
 }
 

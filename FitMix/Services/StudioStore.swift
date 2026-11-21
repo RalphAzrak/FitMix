@@ -34,6 +34,12 @@ final class StudioStore {
 
     /// Retailer search per piece of a live look. Pieces without an entry haven't been searched.
     private(set) var matchStates: [UUID: RetailerMatchState] = [:]
+    /// Every ranked listing for a searched piece, best first. `.found` holds the one the user chose.
+    private(set) var matchLists: [UUID: [CatalogProduct]] = [:]
+    /// Listing photos downloaded for the on-device comparison, by listing id. Reused for try-on.
+    @ObservationIgnored private var listingPhotos: [String: CGImage] = [:]
+    /// The listing the user chose to try on their avatar, if any.
+    private(set) var avatarTryOn: AvatarTryOn?
     /// Crops used as search input only, never shown. Cut from the same frame as the scan image,
     /// with the colour measured on the garment there.
     @ObservationIgnored private var searchCrops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
@@ -94,6 +100,9 @@ final class StudioStore {
     func open(_ scan: OutfitScan, selected: Set<UUID>? = nil, tryOnSource: UIImage?) {
         cancelSearch()
         matchStates = [:]
+        matchLists = [:]
+        listingPhotos = [:]
+        avatarTryOn = nil
         searchCrops = [:]
         isLiveLook = false
         self.scan = scan
@@ -127,7 +136,8 @@ final class StudioStore {
         }
         let scan = OutfitScan(capturedAt: selection.capturedAt, image: frame, subjectBounds: nil, garments: garments)
         #if DEBUG
-        if selection.isSample { SampleScans.register(scan) }
+        if selection.isTestPhoto { SampleScans.register(scan, as: .fixture) }
+        else if selection.isSample { SampleScans.register(scan) }
         #endif
         open(scan, tryOnSource: tryOnSource)
         isLiveLook = true
@@ -151,13 +161,19 @@ final class StudioStore {
         let searcher = self.searcher
         searchTask = Task { [weak self] in
             let state: RetailerMatchState
+            var ranked: [CatalogProduct] = []
+            var photos: VisualReranker.Photos = [:]
             if let request = await GarmentSearchInput.make(category: category, crop: crop.image, measuredColor: crop.color) {
                 do {
                     switch try await searcher.search(request) {
                     case .noMatch: state = .noMatch
                     case .matches(let listings):
-                        // Only listings in the selected category reach the card.
-                        if let best = listings.first { state = .found(Self.product(from: best, category: category)) } else { state = .noMatch }
+                        // The backend already limited listings to this category; order within each label
+                        // by how the listing photos compare with the crop.
+                        let reranked = await VisualReranker.rerank(listings, crop: crop.image)
+                        photos = reranked.photos
+                        ranked = reranked.listings.map { Self.product(from: $0, category: category) }
+                        state = ranked.first.map(RetailerMatchState.found) ?? .noMatch
                     }
                 } catch is CancellationError {
                     return
@@ -170,8 +186,46 @@ final class StudioStore {
                 state = .failed("This garment's image couldn't be prepared for search.", retryable: false)
             }
             guard let self, !Task.isCancelled, self.activeSearch?.token == token, self.scan?.id == scanID else { return }
+            self.matchLists[pieceID] = ranked
+            self.listingPhotos.merge(photos) { new, _ in new }
             self.apply(state, to: pieceID)
         }
+    }
+
+    /// The user picked another listing from the ranked list for this piece.
+    func chooseListing(_ product: CatalogProduct, for pieceID: UUID) {
+        guard matchLists[pieceID]?.contains(product) == true else { return }
+        apply(.found(product), to: pieceID)
+        if avatarTryOn?.pieceID == pieceID { avatarTryOn = nil; refreshPreview() }
+    }
+
+    /// "Try on my avatar": hands the chosen listing (id, category, product photo) and the user's full-body
+    /// avatar to the try-on flow. Returns false when there's no avatar or no chosen listing.
+    @discardableResult
+    func tryOnAvatar(pieceID: UUID, avatar: UIImage?) -> Bool {
+        guard let avatar, case .found(let product)? = matchStates[pieceID],
+              let piece = look?.pieces.first(where: { $0.id == pieceID }) else { return false }
+        let url: URL? = if case .remote(let url) = product.image { url } else { nil }
+        var handoff = AvatarTryOn(pieceID: pieceID, listingID: product.id, category: piece.detected.category,
+                                  productName: product.name, productImageURL: url)
+        if let photo = listingPhotos[product.id] {
+            handoff.productImage = UIImage(cgImage: photo)
+        } else if case .local(let image) = product.image {
+            handoff.productImage = image
+        }
+        avatarTryOn = handoff
+        tryOnSource = avatar
+        refreshPreview()
+        if handoff.productImage == nil, let url {
+            Task { [weak self] in
+                guard let photo = await VisualReranker.download(url, session: .shared) else { return }
+                guard let self, self.avatarTryOn?.listingID == handoff.listingID else { return }
+                self.listingPhotos[handoff.listingID] = photo
+                self.avatarTryOn?.productImage = UIImage(cgImage: photo)
+                self.refreshPreview()
+            }
+        }
+        return true
     }
 
     private func apply(_ state: RetailerMatchState, to pieceID: UUID) {
@@ -192,11 +246,11 @@ final class StudioStore {
     }
 
     private static func product(from listing: RetailerListing, category: GarmentCategory) -> CatalogProduct {
-        CatalogProduct(id: listing.id, name: listing.title, retailer: listing.seller.map { "\(listing.retailer) · \($0)" } ?? listing.retailer,
-                       category: category, match: listing.exact ? .exact : .similar,
+        CatalogProduct(id: listing.id, name: listing.title, brand: listing.brand, retailer: listing.seller.map { "\(listing.retailer) · \($0)" } ?? listing.retailer,
+                       category: category, match: listing.tier == .exact ? .exact : listing.tier == .brand ? .brand : .similar,
                        image: listing.imageURL.map(ProductImage.remote),
                        price: listing.price.flatMap { amount in listing.currency.map { Price(amount: amount, currencyCode: $0) } },
-                       retailerURL: listing.listingURL, isFixture: listing.isFixture)
+                       retailerURL: listing.listingURL, isFixture: listing.isFixture, evidence: listing.evidence)
     }
 
     /// The user added their photo from Studio. Renders the current look on it.
@@ -249,6 +303,13 @@ final class StudioStore {
     /// The request for the current look, or nil when there's nothing to render.
     var currentRequest: TryOnRequest? {
         guard let tryOnSource, let look, !look.pieces.isEmpty else { return nil }
+        if let avatarTryOn {
+            // Only the chosen listing goes on the avatar, identified by its listing id.
+            let garment = TryOnGarment(pieceID: avatarTryOn.pieceID, category: avatarTryOn.category, productID: avatarTryOn.listingID,
+                                       image: avatarTryOn.productImage, sourceBounds: nil, productImageURL: avatarTryOn.productImageURL)
+            return TryOnRequest(person: tryOnSource, garments: [garment],
+                                signature: "avatar:\(avatarTryOn.listingID):\(avatarTryOn.productImage == nil ? "pending" : "photo")")
+        }
         let garments = look.pieces.map { piece in
             TryOnGarment(pieceID: piece.id, category: piece.detected.category,
                          productID: piece.replacement?.id,
@@ -285,7 +346,7 @@ final class StudioStore {
     }
 
     private func isCurrent(_ signature: String) -> Bool {
-        look.map(Self.signature(of:)) == signature
+        currentRequest?.signature == signature
     }
 }
 

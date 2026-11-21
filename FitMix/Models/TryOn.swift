@@ -17,6 +17,20 @@ struct TryOnGarment {
     let image: UIImage?
     /// Where the garment is in the street capture (normalized), when the scan provided it.
     let sourceBounds: CGRect?
+    /// The listing's own product photo, for a renderer that fetches full resolution itself.
+    var productImageURL: URL? = nil
+}
+
+/// "Try on my avatar": the one retailer listing the user chose, handed to the try-on flow with their
+/// full-body avatar. Only this listing is applied; nothing from the street capture is.
+struct AvatarTryOn: Equatable {
+    let pieceID: UUID
+    let listingID: String
+    let category: GarmentCategory
+    let productName: String
+    let productImageURL: URL?
+    /// The listing photo, once downloaded (the renderer's garment input).
+    var productImage: UIImage?
 }
 
 struct TryOnRequest {

@@ -145,7 +145,7 @@ struct PhotoPreview: View {
                 .resizable()
                 .scaledToFit()
                 .frame(maxWidth: .infinity, maxHeight: 380)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .accessibilityLabel(label)
             if let notice {
                 NoticeRow(tone: notice.tone, text: notice.text)
@@ -470,7 +470,7 @@ struct ReviewStepView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: 400)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .accessibilityLabel("Your new avatar: a full-body animated-style portrait")
             } else {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 300)

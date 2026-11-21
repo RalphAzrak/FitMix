@@ -91,8 +91,8 @@ struct MetricsForm: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 56)
-        .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.black.opacity(0.1)))
+        .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.fmHairline))
     }
 
     private func errorText(_ message: String) -> some View {

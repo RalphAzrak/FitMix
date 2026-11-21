@@ -102,7 +102,7 @@ struct PrivacyDataView: View {
     private func block<Extra: View>(title: String, icon: String, paragraphs: [String], @ViewBuilder extra: () -> Extra) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label {
-                Text(title).font(.system(.headline, design: .serif))
+                Text(title).font(.fmDisplay(18, semibold: true, relativeTo: .headline))
             } icon: {
                 Image(systemName: icon).foregroundStyle(AuthPalette.primaryContainer)
             }

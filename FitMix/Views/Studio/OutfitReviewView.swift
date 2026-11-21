@@ -35,7 +35,7 @@ struct OutfitReviewView: View {
             HStack(spacing: 10) {
                 CircleIconButton(systemName: "xmark", label: "Close Outfit Review", action: close)
                 Text("Outfit Review")
-                    .font(.system(size: 22, weight: .medium, design: .serif))
+                    .font(.fmDisplay(22))
                     .foregroundStyle(AuthPalette.onSurface)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
@@ -60,8 +60,8 @@ struct OutfitReviewView: View {
                         if let problem = analysis?.problem { NoticeRow(tone: .info, text: problem) }
                         HStack {
                             Text("CHOOSE PIECES TO TRY")
-                                .font(.system(size: 11, weight: .semibold)).tracking(0.9)
-                                .foregroundStyle(AuthPalette.secondary)
+                                .font(.system(size: 13, weight: .bold)).tracking(0.7)
+                                .foregroundStyle(Color.fmInk)
                             Spacer()
                             Text("\(selected.count) of \(scan.garments.count)")
                                 .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
@@ -168,8 +168,8 @@ struct OutfitReviewView: View {
                     .foregroundStyle(isOn ? AuthPalette.primaryContainer : AuthPalette.outline)
             }
             .padding(10)
-            .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(isOn ? AuthPalette.primaryContainer : AuthPalette.containerHigh, lineWidth: isOn ? 2 : 1))
         }
         .buttonStyle(.plain)

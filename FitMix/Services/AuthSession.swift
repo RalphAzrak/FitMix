@@ -15,6 +15,13 @@ enum SupabaseConfig {
     /// Where sign-up confirmation links (and resent ones) send people. Add it to the same Redirect
     /// URLs list; if it isn't listed, Supabase sends the link to the Site URL instead.
     static let signupRedirect = URL(string: "fitmix://confirm-email")!
+
+    /// HTTPS host for the "Verify email" Universal Link. The confirmation email links to
+    /// `https://<host>/auth/confirm?token_hash=…&type=email`. Must match the `applinks:` entry in
+    /// Config/FitMix.entitlements and the host that serves Web/.well-known/apple-app-site-association.
+    /// TODO(config): replace with the domain FitMix controls. example.com is reserved and never resolves.
+    static let universalLinkHost = "links.fitmix.example.com"
+    static let confirmLinkPath = "/auth/confirm"
 }
 
 /// The signed-in FitMix account, as shown in the app.
@@ -258,6 +265,30 @@ final class AuthSession {
         }
     }
 
+    /// Confirms a sign-up with the code from the confirmation email ({{ .Token }} in the template),
+    /// so the user never leaves FitMix. Signs in only when Supabase returns a session for a user
+    /// whose email it has marked confirmed. Never logs the code or the email.
+    func verifySignupCode(email: String, code: String) async throws {
+        AuthDebugLog.log("signup code verify started type=email")
+        let response: AuthResponse
+        do {
+            response = try await client.auth.verifyOTP(email: email, token: code, type: .email)
+        } catch let error as AuthError where [.otpExpired, .validationFailed].contains(error.errorCode) {
+            AuthDebugLog.log("signup code verify result=failed \(AuthDebugLog.category(error))")
+            throw AuthFailure(message: "That code didn't work. Check the newest email, or send a new code.")
+        } catch {
+            AuthDebugLog.log("signup code verify result=failed \(AuthDebugLog.category(error))")
+            throw AuthFailure(error)
+        }
+        guard case .session(let session) = response, session.user.emailConfirmedAt != nil else {
+            AuthDebugLog.log("signup code verify result=no_verified_session")
+            throw AuthFailure(message: "FitMix couldn't confirm your email. Try signing in, or send a new code.")
+        }
+        AuthDebugLog.log("signup code verify result=ok session_established email_confirmed=true")
+        state = .signedIn(AccountUser(session.user))
+        pendingConfirmationEmail = nil
+    }
+
     /// The address that most recently signed up or was told to confirm, kept on this device so the
     /// confirmation screens can fill it in after a relaunch. Cleared once that account signs in.
     private(set) var pendingConfirmationEmail: String? {
@@ -286,6 +317,10 @@ final class AuthSession {
     @discardableResult
     func handle(url: URL) -> Bool {
         Self.logCallback(url)
+        if Self.isConfirmLink(url) {
+            handleConfirmLink(url: url)
+            return true
+        }
         if Self.matches(url, SupabaseConfig.emailChangeRedirect) {
             handleEmailChange(url: url)
             return true
@@ -367,12 +402,59 @@ final class AuthSession {
     private static func logCallback(_ url: URL) {
         #if DEBUG
         let params = linkParameters(url)
-        let route = matches(url, SupabaseConfig.signupRedirect) ? "confirm-email"
+        let route = isConfirmLink(url) ? "confirm-link"
+            : matches(url, SupabaseConfig.signupRedirect) ? "confirm-email"
             : matches(url, SupabaseConfig.passwordResetRedirect) ? "reset-password"
             : matches(url, SupabaseConfig.emailChangeRedirect) ? "email-change" : "unhandled"
         let errorCode = params["error_code"].map(AuthDebugLog.clean) ?? "-"
-        AuthDebugLog.log("callback received origin=\(AuthDebugLog.origin(url)) route=\(route) has_code=\(params["code"] != nil) has_error=\(params["error"] != nil || params["error_code"] != nil) error_code=\(errorCode)")
+        AuthDebugLog.log("callback received origin=\(AuthDebugLog.origin(url)) route=\(route) has_code=\(params["code"] != nil) has_token_hash=\(params["token_hash"] != nil) has_error=\(params["error"] != nil || params["error_code"] != nil) error_code=\(errorCode)")
         #endif
+    }
+
+    /// `https://<universalLinkHost>/auth/confirm…`, delivered as a Universal Link.
+    private static func isConfirmLink(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == SupabaseConfig.universalLinkHost
+            && url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == SupabaseConfig.confirmLinkPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// Opens the sign-up Universal Link. The token is checked by `POST /verify` from the app only;
+    /// FitMix continues only when Supabase returns a session for a user whose email is confirmed.
+    private func handleConfirmLink(url: URL) {
+        // iOS can hand over the same link twice (e.g. a cold launch and a scene activation).
+        guard confirmation != .verifying else {
+            AuthDebugLog.log("confirm-link ignored reason=already_verifying")
+            return
+        }
+        let params = Self.linkParameters(url)
+        let email = pendingConfirmationEmail
+        // The template sends type=email; older Supabase docs used type=signup. Both mean sign-up here.
+        guard let tokenHash = params["token_hash"], !tokenHash.isEmpty,
+              let type = params["type"].flatMap(EmailOTPType.init(rawValue:)), [.email, .signup].contains(type) else {
+            AuthDebugLog.log("confirm-link verify skipped reason=missing_or_unsupported_params")
+            confirmation = .unconfirmed(email: email, reason: .linkRejected)
+            return
+        }
+        confirmation = .verifying
+        AuthDebugLog.log("confirm-link verify started type=\(type.rawValue)")
+        Task {
+            do {
+                let response = try await client.auth.verifyOTP(tokenHash: tokenHash, type: type)
+                guard case .session(let session) = response, session.user.emailConfirmedAt != nil else {
+                    AuthDebugLog.log("confirm-link verify result=no_verified_session")
+                    confirmation = .unconfirmed(email: email, reason: .notConfirmedHere)
+                    return
+                }
+                AuthDebugLog.log("confirm-link verify result=ok session_established email_confirmed=true")
+                state = .signedIn(AccountUser(session.user))
+                pendingConfirmationEmail = nil
+                confirmation = .verified(email: session.user.email)
+            } catch {
+                AuthDebugLog.log("confirm-link verify result=failed \(AuthDebugLog.category(error))")
+                let rejected = (error as? AuthError).map { [.otpExpired, .otpDisabled, .validationFailed].contains($0.errorCode) } ?? false
+                confirmation = .unconfirmed(email: email, reason: rejected ? .linkRejected : .notConfirmedHere)
+            }
+        }
     }
 
     private static func matches(_ url: URL, _ redirect: URL) -> Bool {

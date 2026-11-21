@@ -17,7 +17,7 @@ struct TryOnPhotoSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Take a full-body photo of yourself")
-                        .font(.system(size: 26, weight: .medium, design: .serif))
+                        .font(.fmDisplay(26))
                         .foregroundStyle(AuthPalette.onSurface)
                     Text("Try-on starts from this photo. Pieces you didn't choose stay as you're wearing them here. It's saved only on this iPhone and is also your avatar's full-body photo.")
                         .font(.system(size: 14))
@@ -33,7 +33,7 @@ struct TryOnPhotoSheet: View {
                             tip("sun.max", "Use even light and a plain background.")
                         }
                         .padding(14)
-                        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                 }
                 .padding(16)

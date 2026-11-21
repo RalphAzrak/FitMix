@@ -114,7 +114,7 @@ struct AvatarProfileView: View {
                     Image(uiImage: portrait)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .frame(maxHeight: 420)
                         .id(record?.createdAt)
                         .transition(.opacity)
@@ -133,7 +133,7 @@ struct AvatarProfileView: View {
                         }
                     }
                     .frame(height: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }
             .frame(maxWidth: .infinity)
@@ -191,7 +191,7 @@ struct AvatarProfileView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: 360)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
                 .buttonStyle(PressableCardStyle())
                 .accessibilityLabel("Your full-body photo")
@@ -262,7 +262,7 @@ struct AvatarProfileView: View {
             }
         }
         .padding(10)
-        .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .photoSource(isPresented: $showSelfieSource, title: "Selfie", camera: .front) { picked in
             checking = true
             Task {
@@ -333,13 +333,14 @@ private struct AvatarProfileSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
+            Text(title.uppercased())
+                .font(.system(size: 13, weight: .bold))
+                .tracking(0.7)
                 .foregroundStyle(Color.fmInk)
                 .accessibilityAddTraits(.isHeader)
             content
         }
-        .fmCard(padding: 14)
+        .fmCard(padding: 16)
     }
 }
 
@@ -422,7 +423,7 @@ struct BodyMetricsCard: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color.fmTile, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)

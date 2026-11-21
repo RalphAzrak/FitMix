@@ -46,11 +46,21 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         case includeUpperBody
     }
 
+    /// Where one frame's analysis time went, in milliseconds.
+    struct Timings: Sendable, Equatable {
+        /// Body pose + person segmentation (or the garment model).
+        var vision = 0.0
+        /// Vision's image classifier on body areas (cached, so often 0).
+        var classify = 0.0
+        var total = 0.0
+    }
+
     struct Result: Sendable {
         var detections: [LiveDetection] = []
         var hint: Hint?
         /// Vision couldn't run at all (the iOS simulator can't run body pose).
         var failed = false
+        var timings = Timings()
     }
 
     let engine: Engine
@@ -62,6 +72,8 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
     /// Classifier scores per body area, reused for a short time so each frame runs at most a few
     /// classifications.
     private var classified: [String: (time: Double, box: CGRect, scores: [String: Float])] = [:]
+    /// Classifier time spent on the frame being analyzed.
+    private var classifyTime = 0.0
     private let log = Logger(subsystem: "app.fitmix", category: "LiveGarmentDetector")
 
     init(bundle: Bundle = .main) {
@@ -75,18 +87,27 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         }
     }
 
-    /// `time` is seconds on any monotonic clock; it only paces the classifier cache.
-    func detect(_ image: CGImage, time: Double) -> Result {
-        if let model { return detectWithModel(model, image) }
-        return detectWithVision(image, time: time)
+    /// `time` is seconds on any monotonic clock; it only paces the classifier cache. When the
+    /// camera's own `pixelBuffer` (upright, same pixels as `image`) is given, Vision reads it
+    /// directly, which is faster than going through `image`.
+    func detect(_ image: CGImage, pixelBuffer: CVPixelBuffer? = nil, time: Double) -> Result {
+        let start = DispatchTime.now().uptimeNanoseconds
+        classifyTime = 0
+        let handler = pixelBuffer.map { VNImageRequestHandler(cvPixelBuffer: $0, orientation: .up) }
+            ?? VNImageRequestHandler(cgImage: image, orientation: .up)
+        var result = model.map { detectWithModel($0, handler) } ?? detectWithVision(image, handler: handler, time: time)
+        result.timings.total = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        result.timings.classify = classifyTime
+        result.timings.vision = max(0, result.timings.total - classifyTime)  // pose, segmentation, sampling
+        return result
     }
 
     // MARK: Core ML model
 
-    private func detectWithModel(_ model: VNCoreMLModel, _ image: CGImage) -> Result {
+    private func detectWithModel(_ model: VNCoreMLModel, _ handler: VNImageRequestHandler) -> Result {
         let request = VNCoreMLRequest(model: model)
         request.imageCropAndScaleOption = .scaleFit
-        do { try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request]) } catch {
+        do { try handler.perform([request]) } catch {
             log.error("Garment model failed: \(error.localizedDescription, privacy: .public)")
             return Result(failed: true)
         }
@@ -115,12 +136,14 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
 
     // MARK: Vision fallback
 
-    private func detectWithVision(_ image: CGImage, time: Double) -> Result {
+    private func detectWithVision(_ image: CGImage, handler: VNImageRequestHandler, time: Double) -> Result {
         let pose = VNDetectHumanBodyPoseRequest()
         let segmentation = VNGeneratePersonSegmentationRequest()
-        segmentation.qualityLevel = .balanced
+        // .fast is ~3× cheaper than .balanced; the mask only trims boxes and picks person pixels
+        // for colour, and gave the same detections on the test frames.
+        segmentation.qualityLevel = .fast
         segmentation.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        do { try VNImageRequestHandler(cgImage: image, orientation: .up).perform([pose, segmentation]) } catch {
+        do { try handler.perform([pose, segmentation]) } catch {
             log.error("Vision failed: \(error.localizedDescription, privacy: .public)")
             return Result(failed: true)
         }
@@ -179,6 +202,14 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         let eyeGap = eyes.count == 2 ? abs(eyes[0].x - eyes[1].x) / s.aspect : 0.02
         let size = max(0.008, eyeGap * 0.5)
         return s.sample(at: CGPoint(x: nose.x, y: nose.y + size * 0.6), size: size)
+    }
+
+    /// Centre-vs-panel colour differences that mean an open outer layer over another garment.
+    static func isOpenFront(_ differences: [Float], jacketSeen: Bool) -> Bool {
+        guard let low = differences.min(), !differences.isEmpty else { return false }
+        if !jacketSeen { return low > 20 }
+        let mean = differences.reduce(0, +) / Float(differences.count)
+        return mean >= 6.5 && low >= 4
     }
 
     private func isSkin(_ color: SIMD3<Float>?, _ skin: SIMD3<Float>?) -> Bool {
@@ -242,12 +273,12 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         }
         #endif
 
-        // With the classifier already seeing a jacket, a smaller contrast (dark tee, black jacket) counts.
-        // A single garment measures 0–4 here, so 6 still keeps one closed top from splitting in two.
-        let contrast: Float = jacketScore >= 0.2 ? 6 : 20
+        // The centre strip (high and low) must differ from both side panels. With the classifier
+        // already seeing a jacket, a smaller contrast counts (dark tee under a black jacket measures
+        // 5–11); a single closed top measures 0–4, averaging ≤ 2, so it never splits in two.
         if let ch = centreHigh, let cl = centreLow, let a = panelA, let b = panelB,
-           deltaE(ch, a) > contrast, deltaE(ch, b) > contrast, deltaE(cl, a) > contrast, deltaE(cl, b) > contrast,
-           deltaE(ch, cl) < 16, deltaE(a, b) < 14 {
+           deltaE(ch, cl) < 16, deltaE(a, b) < 14,
+           Self.isOpenFront([deltaE(ch, a), deltaE(ch, b), deltaE(cl, a), deltaE(cl, b)], jacketSeen: jacketScore >= 0.2) {
             let sleevesMatch = upperArms.contains { deltaE($0, a) < 16 || deltaE($0, b) < 16 }
             if sleevesMatch || jacketScore >= 0.08 {
                 // Open jacket over an inner top: the inner strip runs from the neckline to the hem.
@@ -294,9 +325,16 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
             let thigh = s.sample(at: lerp(hp, kn, 0.5), size: span * 0.06)
             let shin = s.sample(at: lerp(kn, an, 0.55), size: span * 0.05)
             if isSkin(shin, skin) { bareShin = true }
-            if let thigh, let shin, deltaE(thigh, shin) < 16 { covered = true }
+            // Same garment top to bottom: the same colour, allowing for shading down the leg.
+            if let thigh, let shin, deltaE(thigh, shin) < 16 || chromaDelta(thigh, shin) < 10 { covered = true }
+            #if DEBUG
+            if let thigh, let shin { Self.trace?(String(format: "pants leg: ΔE %.0f, chroma Δ %.0f", deltaE(thigh, shin), chromaDelta(thigh, shin))) }
+            #endif
             thighColor = thighColor ?? thigh
         }
+        #if DEBUG
+        Self.trace?("pants: covered \(covered), bare shin \(bareShin), face skin \(skin != nil)")
+        #endif
         guard covered, !bareShin else { return nil }
 
         let xs = j.xs([.leftHip, .rightHip, .leftKnee, .rightKnee, .leftAnkle, .rightAnkle])
@@ -304,6 +342,9 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         guard let box = s.tighten(CGRect(x: (xs.min() ?? hip.x) - pad, y: hip.y - span * 0.04,
                                          width: (xs.max() ?? hip.x) - (xs.min() ?? hip.x) + pad * 2, height: span * 1.03)) else { return nil }
         let jeans = score(["jeans"], key: "legs", box: box, s, time: time)
+        #if DEBUG
+        Self.trace?(String(format: "pants: jeans %.2f", jeans))
+        #endif
         // Without a face to compare skin against, bare legs look "covered", so ask the classifier too.
         guard skin != nil || jeans >= 0.15 else { return nil }
         return LiveDetection(category: .pants, bounds: box, confidence: min(1, 0.55 + Double(jeans)), color: thighColor)
@@ -354,6 +395,8 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         let pixels = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h).integral
         guard pixels.width >= 16, pixels.height >= 16, let crop = s.image.cropping(to: pixels) else { return 0 }
         let request = VNClassifyImageRequest()
+        let start = DispatchTime.now().uptimeNanoseconds
+        defer { classifyTime += Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6 }
         guard (try? VNImageRequestHandler(cgImage: crop, orientation: .up).perform([request])) != nil else { return 0 }
         var scores: [String: Float] = [:]
         for observation in request.results ?? [] where observation.confidence > 0.01 {
@@ -376,6 +419,13 @@ nonisolated func iou(_ a: CGRect, _ b: CGRect) -> Double {
 
 nonisolated private func lerp(_ a: CGPoint, _ b: CGPoint, _ t: Double) -> CGPoint {
     CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+}
+
+/// Difference in hue and saturation only (Lab a*b*), ignoring lightness, so shading doesn't count.
+nonisolated func chromaDelta(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
+    let la = lab(a), lb = lab(b)
+    let da = la.y - lb.y, db = la.z - lb.z
+    return (da * da + db * db).squareRoot()
 }
 
 /// CIE76 colour difference between two sRGB colours (0–1 components).
@@ -435,7 +485,7 @@ nonisolated struct ColorGrid {
     let height: Int
     private let rgb: [Float]
 
-    init?(_ image: CGImage, maxWidth: Int = 160) {
+    init?(_ image: CGImage, maxWidth: Int = 240) {
         let w = min(maxWidth, image.width)
         let h = max(1, Int((Double(image.height) * Double(w) / Double(image.width)).rounded()))
         var bytes = [UInt8](repeating: 0, count: w * h * 4)

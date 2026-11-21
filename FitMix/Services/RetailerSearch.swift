@@ -1,3 +1,5 @@
+import CoreImage
+import CoreVideo
 import Foundation
 import ImageIO
 import UIKit
@@ -6,20 +8,33 @@ import Vision
 
 // MARK: - Retailer match for one selected garment
 //
-// The iPhone sends the FitMix backend only the selected garment's crop, its category, and a few
-// attributes read on-device (dominant colour, visible brand text). The backend holds the retailer
-// provider's credentials (eBay Browse API today) and returns real listings. The full outfit frame
-// never leaves the iPhone. See Docs/LiveGarmentMatch.md and Backend/README.md.
+// After a tap, the iPhone sends the FitMix backend only the selected garment's crop, its category, and the
+// clues read on-device (`GarmentClues`: printed text and codes, colour, pattern, style). The backend asks
+// every enabled visual search provider, reads the listing pages, and returns ranked listings labeled
+// exact / brand / similar. The phone then compares the top listing photos with the crop on-device
+// (`VisualReranker`) to order listings within each label. The full outfit frame, profile photos and avatar
+// images never leave the iPhone for search. See Docs/LiveGarmentMatch.md and Backend/README.md.
 
 /// Exactly what leaves the phone for one search.
 nonisolated struct GarmentSearchRequest: Sendable {
     var category: GarmentCategory
     /// JPEG of the garment crop only, long edge ≤ 640 px.
     var crop: Data
-    /// e.g. "navy". Nil when the colour isn't clear.
-    var colorName: String?
-    /// Words read on the garment (e.g. a logo), at most three.
-    var brandHints: [String]
+    /// What the phone read on the crop.
+    var clues: GarmentClueSet
+}
+
+/// How sure FitMix is that a listing is the garment the user tapped.
+nonisolated enum MatchTier: String, Sendable, Equatable, Comparable {
+    /// Corroborated: a product code, the same image, or brand + model + colour.
+    case exact
+    /// Only the brand is supported.
+    case brand
+    /// The closest real alternative.
+    case similar
+
+    private var order: Int { self == .exact ? 0 : self == .brand ? 1 : 2 }
+    static func < (a: MatchTier, b: MatchTier) -> Bool { a.order < b.order }
 }
 
 /// One retailer listing, exactly as the provider returned it.
@@ -33,8 +48,15 @@ nonisolated struct RetailerListing: Sendable, Equatable {
     var listingURL: URL?
     var price: Decimal?
     var currency: String?
-    /// True only with evidence the listing is the very same product. FitMix has none yet.
-    var exact: Bool
+    var tier: MatchTier
+    /// The brand the evidence supports, for "Likely from <brand>".
+    var brand: String?
+    /// Why the listing got its label, in words ("brand Converse read on the garment matches").
+    var evidence: [String] = []
+    /// Which search found it (e.g. "google_lens", "ebay").
+    var provider: String = ""
+    /// The backend's score; the phone adds photo similarity within a tier.
+    var score: Double = 0
     /// Development data, not a real listing.
     var isFixture: Bool
 }
@@ -102,8 +124,9 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
 
     static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral  // nothing cached on disk
-        configuration.timeoutIntervalForRequest = 25
-        configuration.timeoutIntervalForResource = 35
+        // Visual search providers can take tens of seconds (Scrappa advises a 45 s client timeout).
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 70
         configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }
@@ -119,6 +142,11 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
             var url: String?
             var price: Amount?
             var match: String
+            var brand: String?
+            var evidence: [String]?
+            var provider: String?
+            var fixture: Bool?
+            var score: Double?
         }
         var status: String
         var fixture: Bool?
@@ -137,8 +165,12 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
         var form = MultipartForm()
         form.add(file: request.crop, name: "crop", fileName: "garment.jpg", type: "image/jpeg")
         form.add(value: request.category.rawValue, name: "category")
-        if let color = request.colorName { form.add(value: color, name: "color") }
-        if !request.brandHints.isEmpty { form.add(value: request.brandHints.joined(separator: ","), name: "brand_hints") }
+        let clues = request.clues
+        if let color = clues.color { form.add(value: color, name: "color") }
+        if !clues.brandHints.isEmpty { form.add(value: clues.brandHints.joined(separator: ","), name: "brand_hints") }
+        if !clues.text.isEmpty { form.add(value: clues.text.joined(separator: ","), name: "text") }
+        if let pattern = clues.pattern { form.add(value: pattern, name: "pattern") }
+        if let style = clues.style { form.add(value: style, name: "style") }
 
         var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent("v1/garment-match"))
         urlRequest.httpMethod = "POST"
@@ -176,24 +208,24 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
                             listingURL: item.url.flatMap(URL.init(string:)),
                             price: item.price.flatMap { Decimal(string: $0.value, locale: Locale(identifier: "en_US_POSIX")) },
                             currency: item.price?.currency,
-                            exact: item.match == "exact",
-                            isFixture: body.fixture ?? false)
+                            tier: MatchTier(rawValue: item.match) ?? .similar,
+                            brand: item.brand, evidence: item.evidence ?? [], provider: item.provider ?? "",
+                            score: item.score ?? 0,
+                            isFixture: item.fixture ?? body.fixture ?? false)
         }
         return listings.isEmpty || body.status == "no_match" ? .noMatch : .matches(listings)
     }
 }
 
-// MARK: - On-device attributes
+// MARK: - Request from the tapped crop
 
 nonisolated enum GarmentSearchInput {
-    /// Builds the request from the crop: downscales it to JPEG and reads any text on it. The
-    /// colour is the one measured on the garment at detection; without it, the crop's own colour
-    /// is used only if one colour clearly dominates (background often fills a garment's box).
+    /// Downscales the crop to JPEG (no metadata) and reads its clues, on-device.
     @concurrent
     static func make(category: GarmentCategory, crop: CGImage, measuredColor: SIMD3<Float>?) async -> GarmentSearchRequest? {
         guard let jpeg = jpegData(crop, maxDimension: 640) else { return nil }
-        let color = measuredColor.flatMap(colorName(of:)) ?? dominantColorName(of: crop)
-        return GarmentSearchRequest(category: category, crop: jpeg, colorName: color, brandHints: brandHints(in: crop))
+        return GarmentSearchRequest(category: category, crop: jpeg,
+                                    clues: GarmentClues.read(category: category, crop: crop, measuredColor: measuredColor))
     }
 
     static func jpegData(_ image: CGImage, maxDimension: Int) -> Data? {
@@ -210,64 +242,115 @@ nonisolated enum GarmentSearchInput {
         CGImageDestinationAddImage(destination, scaled, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
+}
 
-    /// The crop's central colour, only when most of the centre is that one colour.
-    static func dominantColorName(of image: CGImage) -> String? {
-        guard let grid = ColorGrid(image, maxWidth: 48) else { return nil }
-        let centre = CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
-        guard let mean = grid.mean(in: centre, mask: nil) else { return nil }
-        var near = 0, total = 0
-        for y in stride(from: centre.minY, to: centre.maxY, by: 1 / Double(grid.height)) {
-            for x in stride(from: centre.minX, to: centre.maxX, by: 1 / Double(grid.width)) {
-                let cell = CGRect(x: x, y: y, width: 0.5 / Double(grid.width), height: 0.5 / Double(grid.height))
-                guard let c = grid.mean(in: cell, mask: nil) else { continue }
-                total += 1
-                if deltaE(c, mean) < 15 { near += 1 }
+// MARK: - On-device photo comparison
+
+/// Orders listings within each match label by how much their photo looks like the tapped crop. Labels
+/// never change here, and the backend's order (provider visual rank + evidence) stays the main signal:
+/// Vision's generic feature prints tell colour and shape apart but not one shoe model from another, so the
+/// photo comparison only nudges.
+nonisolated enum VisualReranker {
+    /// Listing photos downloaded here, by listing id, for the try-on handoff.
+    typealias Photos = [String: CGImage]
+
+    @concurrent
+    static func rerank(_ listings: [RetailerListing], crop: CGImage, session: URLSession = .shared,
+                       limit: Int = 6) async -> (listings: [RetailerListing], photos: Photos) {
+        guard let query = SubjectPhoto(crop) else { return (listings, [:]) }
+        let top = Array(listings.prefix(limit))
+        var photos: Photos = [:]
+        await withTaskGroup(of: (String, CGImage?).self) { group in
+            for listing in top {
+                guard let url = listing.imageURL else { continue }
+                group.addTask { (listing.id, await download(url, session: session)) }
             }
+            for await (id, image) in group { if let image { photos[id] = image } }
         }
-        guard total > 0, Double(near) / Double(total) >= 0.6 else { return nil }
-        return colorName(of: mean)
+        var adjusted = listings
+        for index in adjusted.indices.prefix(limit) {
+            guard let photo = photos[adjusted[index].id], let candidate = SubjectPhoto(photo) else { continue }
+            adjusted[index].score += 0.15 * query.likeness(to: candidate)
+        }
+        // Stable within tier: label first, then score.
+        let ordered = adjusted.enumerated().sorted { a, b in
+            if a.element.tier != b.element.tier { return a.element.tier < b.element.tier }
+            if a.element.score != b.element.score { return a.element.score > b.element.score }
+            return a.offset < b.offset
+        }.map(\.element)
+        return (ordered, photos)
     }
 
-    /// The nearest name from a small fixed palette, or nil if none is close.
-    static func colorName(of mean: SIMD3<Float>) -> String? {
-        let palette: [(String, SIMD3<Float>)] = [
-            ("black", [0.08, 0.08, 0.08]), ("white", [0.95, 0.95, 0.95]), ("gray", [0.55, 0.55, 0.55]),
-            ("navy", [0.10, 0.14, 0.32]), ("blue", [0.20, 0.40, 0.80]), ("light blue", [0.60, 0.75, 0.90]),
-            ("red", [0.80, 0.12, 0.12]), ("burgundy", [0.45, 0.08, 0.15]), ("pink", [0.95, 0.65, 0.75]),
-            ("orange", [0.95, 0.50, 0.10]), ("yellow", [0.95, 0.85, 0.20]), ("beige", [0.85, 0.78, 0.65]),
-            ("brown", [0.45, 0.30, 0.18]), ("olive", [0.40, 0.42, 0.20]), ("green", [0.15, 0.55, 0.25]),
-            ("purple", [0.45, 0.25, 0.60]),
-        ]
-        guard let best = palette.min(by: { deltaE(mean, $0.1) < deltaE(mean, $1.1) }), deltaE(mean, best.1) < 25 else { return nil }
-        return best.0
+    static func download(_ url: URL, session: URLSession) async -> CGImage? {
+        guard url.scheme == "https" || url.scheme == "http" else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 6)
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await session.data(for: request), data.count < 4_000_000,
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                               kCGImageSourceThumbnailMaxPixelSize: 600,
+                                                               kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+    }
+}
+
+/// A photo's main subject (garment or product) lifted onto neutral grey, with its own colour.
+nonisolated struct SubjectPhoto {
+    let print: VNFeaturePrintObservation
+    let color: SIMD3<Float>
+
+    init?(_ image: CGImage) {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
+        let lifted: CGImage
+        let color: SIMD3<Float>
+        if (try? handler.perform([request])) != nil, let result = request.results?.first,
+           let mask = try? result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler),
+           let made = Self.composite(image, mask: mask) {
+            (lifted, color) = made
+        } else {
+            // No separable subject: compare the whole photo.
+            guard let mean = ColorGrid(image, maxWidth: 48)?.mean(in: CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6), mask: nil) else { return nil }
+            (lifted, color) = (image, mean)
+        }
+        guard let print = VisualSimilarity.featurePrint(lifted) else { return nil }
+        self.print = print
+        self.color = color
     }
 
-    /// Up to three confident words printed on the garment, like a logo. Read on-device.
-    static func brandHints(in image: CGImage) -> [String] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        guard (try? VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])) != nil else { return [] }
-        var words: [String] = []
-        for observation in request.results ?? [] {
-            guard let candidate = observation.topCandidates(1).first, candidate.confidence >= 0.5 else { continue }
-            for word in candidate.string.split(whereSeparator: { !$0.isLetter }) where word.count >= 3 {
-                let token = String(word).lowercased()
-                if !words.contains(token) { words.append(token) }
-            }
-        }
-        return Array(words.prefix(3))
+    /// 0…1, higher is more alike: mostly the subject's colour, partly its feature print.
+    func likeness(to other: SubjectPhoto) -> Double {
+        let colour = 1 - min(Double(deltaE(color, other.color)), 60) / 60
+        let shape = 1 - min(Double(VisualSimilarity.distance(print, other.print) ?? 1.5), 1.5) / 1.5
+        return 0.7 * colour + 0.3 * shape
+    }
+
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+
+    private static func composite(_ image: CGImage, mask: CVPixelBuffer) -> (CGImage, SIMD3<Float>)? {
+        let photo = CIImage(cgImage: image)
+        let maskImage = CIImage(cvPixelBuffer: mask)
+        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: photo.extent)
+        let onGrey = photo.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: grey, kCIInputMaskImageKey: maskImage])
+        let alone = photo.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: CIImage(color: .clear).cropped(to: photo.extent),
+                                                                          kCIInputMaskImageKey: maskImage])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let average = alone.applyingFilter("CIAreaAverage", parameters: [kCIInputExtentKey: CIVector(cgRect: photo.extent)])
+        context.render(average, toBitmap: &pixel, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                       format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        let coverage = max(Float(pixel[3]) / 255, 0.01)
+        guard coverage > 0.02, let lifted = context.createCGImage(onGrey, from: photo.extent) else { return nil }
+        return (lifted, SIMD3(Float(pixel[0]) / 255 / coverage, Float(pixel[1]) / 255 / coverage, Float(pixel[2]) / 255 / coverage))
     }
 }
 
 // MARK: - Debug fixtures
 
 #if DEBUG
-/// Development-only stand-in for the backend. Every listing is marked as a fixture and Studio
-/// labels it "Test fixture"; none of its names, prices or links are real.
+/// Development-only stand-in for the backend. Every listing is marked as a fixture and Studio labels it
+/// "Test fixture"; none of its names, prices or links are real.
 nonisolated struct FixtureRetailerSearch: RetailerSearching {
-    enum Mode: String { case match, nomatch, error, slow }
+    enum Mode: String { case match, branded, nomatch, error, slow }
     let mode: Mode
 
     init?(mode: String) {
@@ -277,17 +360,27 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
 
     func search(_ request: GarmentSearchRequest) async throws -> RetailerSearchOutcome {
         try await Task.sleep(for: mode == .slow ? .seconds(6) : .seconds(1.2))
+        let name = request.category.title.lowercased()
+        func listing(_ id: String, _ title: String, _ tier: MatchTier, brand: String? = nil, price: Decimal? = 42,
+                     evidence: [String] = []) -> RetailerListing {
+            RetailerListing(id: "fixture-\(request.category.rawValue)-\(id)", title: "Test fixture \(title) (not a real listing)",
+                            retailer: "FitMix test fixture", seller: nil, imageURL: nil, listingURL: nil,
+                            price: price, currency: price == nil ? nil : "USD", tier: tier, brand: brand,
+                            evidence: evidence, provider: "fixture", score: 0, isFixture: true)
+        }
         switch mode {
         case .nomatch: return .noMatch
         case .error: throw RetailerSearchError.providerBusy("Test fixture: the product search is temporarily unavailable.")
-        case .match, .slow:
-            let name = request.category.title
+        case .branded:
             return .matches([
-                RetailerListing(id: "fixture-\(request.category.rawValue)", title: "Test fixture \(name.lowercased()) (not a real listing)",
-                                retailer: "FitMix test fixture", seller: nil, imageURL: nil, listingURL: nil,
-                                price: request.category == .shoes ? nil : 42, currency: request.category == .shoes ? nil : "USD",
-                                exact: false, isFixture: true),
+                listing("1", "Example Brand \(name), exact model", .exact, brand: "Example Brand",
+                        evidence: ["test fixture: product code matches"]),
+                listing("2", "Example Brand \(name), other model", .brand, brand: "Example Brand", price: nil,
+                        evidence: ["test fixture: brand matches"]),
+                listing("3", "similar \(name)", .similar),
             ])
+        case .match, .slow:
+            return .matches([listing("1", name, .similar, price: request.category == .shoes ? nil : 42), listing("2", "\(name) B", .similar)])
         }
     }
 }

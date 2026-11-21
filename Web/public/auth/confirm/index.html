@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Never send this page's URL (which carries the one-time token) to anyone else. -->
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Open FitMix to verify</title>
+  <style>
+    :root {
+      --surface: #FBF9F5; --card: #FFFFFF; --ink: #1B1C1A; --secondary: #625D5B;
+      --primary: #003FB1; --line: #E5E2DC;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --surface: #141413; --card: #1F1F1D; --ink: #F2F0EB; --secondary: #B5AFAA;
+              --primary: #8DB0FF; --line: #34322F; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--surface); color: var(--ink);
+           font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 480px; margin: 0 auto; padding: 48px 16px; }
+    .wordmark { font: 600 28px/1 ui-serif, Georgia, serif; letter-spacing: -0.3px; margin: 0 0 32px; }
+    .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.9px; color: var(--primary); margin: 0 0 4px; }
+    h1 { font: 500 28px/1.2 ui-serif, Georgia, serif; letter-spacing: -0.3px; margin: 0 0 12px; }
+    p { color: var(--secondary); margin: 0 0 16px; }
+    ol { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+         margin: 24px 0 0; padding: 16px 16px 16px 36px; }
+    li { margin: 0 0 8px; } li:last-child { margin: 0; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="wordmark">FitMix</p>
+    <p class="eyebrow">EMAIL CONFIRMATION</p>
+
+    <section id="ios" hidden>
+      <h1>Open this link in FitMix</h1>
+      <p>Your email isn't verified yet. FitMix verifies it when the link opens in the app.</p>
+      <ol>
+        <li>Go back to the email.</li>
+        <li>Touch and hold <strong>Verify email</strong>, then choose <strong>Open in “FitMix”</strong>.</li>
+        <li>If that option isn't there, install FitMix on this iPhone first.</li>
+      </ol>
+    </section>
+
+    <section id="other">
+      <h1>Open this email on your iPhone</h1>
+      <p>Your email isn't verified yet. To finish signing up, open the email on the iPhone where FitMix
+         is installed and tap <strong>Verify email</strong> there.</p>
+      <p>Opening this page doesn't use up the link, so it still works on your iPhone.</p>
+    </section>
+  </main>
+  <script>
+    // No network requests: this page never sends the token anywhere, so loading it (by a person or
+    // a mail scanner) can't verify or use up the link. Remove the token from the address bar and history.
+    if (location.search) history.replaceState(null, "", location.pathname);
+    var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+              (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (ios) {
+      document.getElementById("ios").hidden = false;
+      document.getElementById("other").hidden = true;
+    }
+  </script>
+</body>
+</html>

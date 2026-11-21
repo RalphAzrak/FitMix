@@ -6,7 +6,8 @@ variables. They are never in the app or in Git.
 - **Avatars:** the app sends the user's full-body photo, optional selfie, height and weight. The server adds the
   drawing instruction, calls OpenAI's Image Edits API, and returns the finished portrait.
 - **Retailer match:** the app sends the crop of one garment the user tapped in the live camera, with its
-  category. The server searches eBay's catalog and returns real listings in that category. See
+  category and the clues read on the phone. The server asks each enabled visual search provider, reads the
+  listing pages, and returns ranked real listings labeled exact / brand / similar. See
   [Retailer search setup](#retailer-search-setup).
 
 ## Run it on your Mac
@@ -45,45 +46,62 @@ The instruction sent with the photos is in `app/prompt.py`. Model, quality and l
 
 | Field | |
 |---|---|
-| `crop` | Required. JPEG, PNG or WebP of the selected garment only, up to 2 MB. The full outfit frame is never sent. |
-| `category` | Required. `jacket`, `tshirt`, `pants` or `shoes`. Only this category is searched. |
-| `color` | Optional, e.g. `navy`. Measured on the phone. |
-| `brand_hints` | Optional, comma-separated words read on the garment on the phone (at most three are used). |
+| `crop` | Required. JPEG, PNG or WebP of the selected garment only, up to 2 MB. Full camera frames, profile photos and avatar images are never sent. |
+| `category` | Required. `jacket`, `tshirt`, `pants` or `shoes`. Only this category is returned. |
+| `color`, `pattern`, `style` | Optional clues read on the phone, e.g. `black`, `polka dots`, `sneaker`. |
+| `brand_hints`, `text` | Optional, comma-separated words and codes printed on the garment (Vision text recognition on the phone). |
 
-Returns `{"status": "matched" | "no_match", "category", "provider", "fixture", "results": [...]}`. Each result has
-`id`, `title`, `retailer`, `seller`, `image_url`, `url`, `price` (`{"value", "currency"}` exactly as listed, or
-`null`) and `match` (always `"similar"`; image search is no evidence of the exact product). Errors use the same
-`{"error": {"code", "message"}}` shape. `not_configured` and `provider_auth` aren't worth retrying. The other
-codes (`provider_busy`, `provider_timeout`, `provider_unreachable`, `provider_error`, `provider_rejected`) are.
+Returns `{"status": "matched" | "no_match", "category", "fixture", "providers": [...], "results": [...]}`. Each result has
+`id`, `title`, `retailer`, `seller`, `image_url`, `url`, `price` (`{"value", "currency"}` exactly as listed, or `null`),
+`match`, `brand`, `evidence` (why it got its label, in words), `provider`, `fixture` and `score`. `providers` says which
+provider answered, failed, or was skipped and why.
+
+How results are labeled (`app/visual_search.py`):
+
+- `exact`: a product code read on the garment matches the listing (title, URL, or the page's SKU/MPN/GTIN); or the
+  brand, a two-word model name and the colour read on the garment all match; or the provider found the same image on
+  the listing *and* the brand is supported. The app shows **Exact match**.
+- `brand`: only the brand is supported, either read on the garment or agreed on by at least 4 of the top 6 visual
+  matches. The app shows **Likely from [brand]**.
+- `similar`: the closest real alternative. The app shows **Similar match**.
+
+Social and media pages (Instagram, Pinterest, …) and listings that name another garment category are dropped. Results
+are ordered by label, then provider rank and shared clues; the app reorders within each label by photo likeness.
+
+Errors use `{"error": {"code", "message"}}`. `not_configured` and `provider_auth` aren't worth retrying; the other
+codes are. When one provider fails, the others' results are still returned.
 
 ## Retailer search setup
 
-The provider is the **eBay Browse API** (`item_summary/search_by_image`), eBay's official, authorized API for
-finding listings by image. It returns each listing's image, title, price, currency and link.
+Providers receive only the selected garment crop, and only those listed in `FITMIX_VISUAL_PROVIDERS` run.
 
-1. Create a free account at [developer.eBay.com](https://developer.ebay.com/) and create a **Production** keyset.
-   eBay asks every production keyset to handle *Marketplace Account Deletion* notifications, or to apply for
-   an exemption. FitMix stores no eBay user data, so the exemption applies.
-2. In `Backend/.env`, set `EBAY_CLIENT_ID` (the keyset's App ID) and `EBAY_CLIENT_SECRET` (its Cert ID).
-   Optionally set `EBAY_MARKETPLACE_ID` (default `EBAY_US`; prices come back in that site's currency).
-3. Restart `./run.sh`. `GET /health` should say `"match_ready": true, "match_provider": "ebay"`.
+| Provider | Status | What it needs |
+|---|---|---|
+| `ebay`: eBay Browse API `search_by_image` | Official API, free. On by default once keys are set. | `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` from a Production keyset at [developer.ebay.com](https://developer.ebay.com/) (eBay asks for Marketplace Account Deletion handling or an exemption; FitMix stores no eBay user data). |
+| `google_lens`: Google Lens via [Scrappa](https://scrappa.co/apis/google-lens-api) | Built and tested with fixtures. **Off until you decide to send garment photos to Scrappa.** | `SCRAPPA_API_KEY`, and `FITMIX_PUBLIC_BASE_URL`: an https address of this server Scrappa can reach. |
+| `fixture` | Labeled development data. Sends nothing. | Nothing. |
 
-Cost: the API is free. eBay applies a daily call limit per keyset, shown on the developer portal. Each FitMix
-search makes two calls (men's and women's category), plus a token request about every two hours.
+Scrappa's documented Lens search is `GET /api/google/lens?url=<public image URL>&type=…` with an `X-API-KEY` header.
+FitMix therefore publishes the crop at `/v1/crops/<random token>.jpg` for at most 90 seconds and 3 fetches, sends that
+URL, and revokes it when the search returns. Scrappa's page also lists an upload endpoint, but its own FAQ says
+uploads aren't supported and the upload docs couldn't be read, so FitMix doesn't use it. Lens results carry `title`,
+`link`, `source`, `thumbnail`, `price` (display text, no currency field) and `position`. A price whose currency isn't
+unambiguous (a bare "$") is dropped and taken from the listing page instead, or shown as "Price unavailable".
 
-To try the app without keys: `FITMIX_MATCH_PROVIDER=fixture ./run.sh` returns one listing marked as a fixture
-("Test fixture … (not a real listing)", no link) without contacting eBay.
+Listing pages: with `FITMIX_LISTING_ENRICHMENT=1` (default) the server reads the top 6 listings' pages for the
+schema.org Product photo, price, currency, brand and codes. Only public http(s) hosts are fetched (private, loopback and
+link-local addresses are refused, on every redirect too), and nothing about the user is sent.
 
-The eBay category IDs searched for each garment are in `app/retail.py` (`EBAY_CATEGORY_IDS`). Any listing whose
-eBay category doesn't name that garment is dropped. If eBay renumbers a category, searches for it show
-"No match found" rather than listings from another category.
+To try the app without keys: `FITMIX_VISUAL_PROVIDERS=fixture ./run.sh`. The older `FITMIX_MATCH_PROVIDER=ebay|fixture`
+still works when `FITMIX_VISUAL_PROVIDERS` isn't set.
 
 ## What happens to the photos
 
 The server keeps each photo in memory only while its request runs. It writes nothing to disk and logs only the
 number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the avatar
 photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For retailer
-search, eBay receives only the garment crop; its API terms govern what eBay does with it.
+search, each enabled provider receives only the garment crop; that provider's terms govern what it does with it.
+Crops published for Scrappa live only in this server's memory, under an unguessable token, for at most 90 seconds.
 
 ## Tests
 

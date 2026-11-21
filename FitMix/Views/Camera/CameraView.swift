@@ -14,6 +14,7 @@ struct CameraView: View {
     var confirm: (OutfitScan) -> Void
 
     @State private var camera = CameraController()
+    @Environment(StudioStore.self) private var studio
     @Environment(\.scenePhase) private var scenePhase
     @State private var showAccount = false
     @State private var showBag = false
@@ -74,6 +75,10 @@ struct CameraView: View {
         camera.select(target) { selection in
             guard !confirmed else { return }
             confirmed = true
+            #if DEBUG
+            var selection = selection
+            selection.isTestPhoto = camera.stillFrame != nil
+            #endif
             select(selection)
         }
     }
@@ -85,16 +90,10 @@ struct CameraView: View {
             CircleIconButton(systemName: "xmark", label: "Close Camera", action: close)
                 .accessibilityIdentifier("closeCamera")
             Text("FitMix")
-                .font(.system(size: 24, weight: .medium, design: .serif))
+                .font(.fmDisplay(26))
                 .foregroundStyle(AuthPalette.onSurface)
             Spacer()
-            Button { showBag = true } label: {
-                Image(systemName: "bag")
-                    .font(.system(size: 19))
-                    .foregroundStyle(AuthPalette.onSurface)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Shopping bag")
+            FMBagButton(count: studio.bagCount) { showBag = true }
             Button { showAccount = true } label: {
                 Image(systemName: "person.crop.circle")
                     .font(.system(size: 20))
@@ -171,6 +170,9 @@ struct CameraView: View {
                     if !camera.scan.targets.isEmpty, let hint = hintText(camera.scan.hint) {
                         OverlayPill(text: hint, systemImage: "info.circle")
                     }
+                    #if DEBUG
+                    if let perf = camera.scan.perf { PerfReadout(perf: perf) }
+                    #endif
                 }
                 .animation(.easeOut(duration: 0.2), value: camera.scan.targets.isEmpty)
             }
@@ -190,7 +192,8 @@ struct CameraView: View {
             OverlayPill(text: "Live garment detection needs an iPhone", systemImage: "exclamationmark.triangle.fill")
                 .accessibilityIdentifier("detectionUnavailable")
         } else if !scan.targets.isEmpty {
-            OverlayPill(text: "Tap to Isolate", systemImage: "hand.tap.fill")
+            OverlayPill(text: camera.stillFrame == nil ? "Tap to Isolate" : "Test photo · Tap to Isolate",
+                        systemImage: "hand.tap.fill")
                 .accessibilityIdentifier("tapToIsolate")
         } else {
             OverlayPill(text: hintText(scan.hint) ?? "Looking for garments…", systemImage: "viewfinder")
@@ -284,7 +287,7 @@ struct CameraView: View {
             VStack(spacing: 12) {
                 Image(systemName: content.icon).font(.system(size: 40)).foregroundStyle(.white.opacity(0.9))
                 Text(content.title)
-                    .font(.system(size: 24, weight: .medium, design: .serif))
+                    .font(.fmDisplay(24))
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
                 Text(content.message)
@@ -389,7 +392,7 @@ struct CameraView: View {
                 Eyebrow(text: "Debug · stand-in Camera output", color: .white.opacity(0.6))
                 if ProcessInfo.processInfo.environment["FM_DEBUG_CAPTURE_PHOTO"] != nil {
                     Button("Analyze Test Photo as Live Frame") {
-                        if let photo = Self.debugCapturePhoto { camera.analyzeStill(photo) } else { fixtureError = "FM_DEBUG_CAPTURE_PHOTO couldn't be opened." }
+                        if let photo = Self.debugCapturePhoto { camera.analyzeStill(photo, replay: Self.debugReplay) } else { fixtureError = "FM_DEBUG_CAPTURE_PHOTO couldn't be opened." }
                     }
                     .buttonStyle(AuthSocialButtonStyle(background: .white, foreground: AuthPalette.onSurface))
                     .accessibilityIdentifier("captureTestPhoto")
@@ -434,7 +437,7 @@ struct CameraView: View {
                     Button("Finish with Test Photo") { finishWithSample { try SampleScans.fixtureScan(from: folder) } }
                 }
                 if let photo = Self.debugCapturePhoto {
-                    Button("Analyze Test Photo as Live Frame") { camera.analyzeStill(photo) }
+                    Button("Analyze Test Photo as Live Frame") { camera.analyzeStill(photo, replay: Self.debugReplay) }
                 }
                 if SampleScans.enabled {
                     ForEach(GarmentCategory.liveScannable, id: \.self) { category in
@@ -458,6 +461,29 @@ struct CameraView: View {
 }
 
 // MARK: - Pieces
+
+#if DEBUG
+/// FM_DEBUG_PERF_HUD=1: what the last frame cost and how long each garment took to become tappable
+/// after the person appeared. The same numbers go to Instruments as "app.fitmix" signposts.
+private struct PerfReadout: View {
+    var perf: LivePerf
+
+    var body: some View {
+        let order = GarmentCategory.liveScannable.filter { perf.tappableAfter[$0] != nil }
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(format: "frame %.0f ms · vision %.0f · classify %.0f", perf.frame.total, perf.frame.vision, perf.frame.classify))
+            if !order.isEmpty {
+                Text(order.map { String(format: "%@ %.2f s", $0.title, perf.tappableAfter[$0] ?? 0) }.joined(separator: " · "))
+            }
+        }
+        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .foregroundStyle(.white)
+        .padding(8)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("perfHUD")
+    }
+}
+#endif
 
 /// Short label over the viewfinder.
 private struct OverlayPill: View {

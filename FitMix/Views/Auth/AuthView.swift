@@ -43,6 +43,14 @@ struct AuthView: View {
         _mode = State(initialValue: mode)
         self.showsClose = showsClose
         self.onAuthenticated = onAuthenticated
+        #if DEBUG
+        // Debug builds only: FM_DEBUG_CHECK_EMAIL=<address> opens on the "Check your email" state
+        // (code entry and resend) without creating an account.
+        if let address = ProcessInfo.processInfo.environment["FM_DEBUG_CHECK_EMAIL"] {
+            _banner = State(initialValue: .checkEmail(address))
+            _form = State(initialValue: AuthForm(email: address))
+        }
+        #endif
     }
 
     private var errors: AuthForm.Errors { form.errors(for: mode) }
@@ -59,6 +67,8 @@ struct AuthView: View {
                 if let banner {
                     BannerView(banner: banner).padding(.top, 12)
                     if case .checkEmail(let address) = banner {
+                        ConfirmationCodeForm(email: address) { onAuthenticated(.createAccount) }
+                            .padding(.top, 16)
                         ResendConfirmationButton(email: address).padding(.top, 4)
                     }
                 }
@@ -123,7 +133,7 @@ struct AuthView: View {
                 .foregroundStyle(AuthPalette.primary)
                 .padding(.bottom, 4)
             Text("Your Style Twin Awaits.")
-                .font(.system(size: 28, weight: .medium, design: .serif))
+                .font(.fmDisplay(28))
                 .kerning(-0.3)
                 .foregroundStyle(AuthPalette.onSurface)
                 .accessibilityAddTraits(.isHeader)
@@ -348,27 +358,6 @@ struct AuthForm: Equatable {
 // MARK: Palette
 
 /// Surface and accent tokens from the Stitch project's theme, used only on this screen.
-enum AuthPalette {
-    static let surface = Color(hex: 0xFBF9F5)
-    static let containerLowest = Color.white
-    static let containerLow = Color(hex: 0xF5F3EF)
-    static let container = Color(hex: 0xEFEEEA)
-    static let containerHigh = Color(hex: 0xEAE8E4)
-    static let onSurface = Color(hex: 0x1B1C1A)
-    static let secondary = Color(hex: 0x625D5B)
-    static let outline = Color(hex: 0x737686)
-    static let primary = Color(hex: 0x003FB1)
-    static let primaryContainer = Color(hex: 0x1A56DB)
-}
-
-private extension Color {
-    init(hex: UInt32) {
-        self.init(red: Double((hex >> 16) & 0xFF) / 255,
-                  green: Double((hex >> 8) & 0xFF) / 255,
-                  blue: Double(hex & 0xFF) / 255)
-    }
-}
-
 // MARK: Components
 
 /// The FitMix logotype shown at the top of the auth and account screens.
@@ -389,21 +378,9 @@ struct CircleIconButton: View {
     var systemName: String
     var label: String
     var action: () -> Void
-    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(AuthPalette.onSurface.opacity(isEnabled ? 1 : 0.6))
-                .frame(width: 36, height: 36)
-                .background(AuthPalette.container, in: Circle())
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, -4)
-        .accessibilityLabel(label)
+        FMRoundIconButton(systemName: systemName, label: label, action: action)
     }
 }
 
@@ -450,7 +427,7 @@ private struct FeatureCard: View {
                 .accessibilityHidden(true)
         }
         .padding(12)
-        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
         .accessibilityElement(children: .combine)
     }
@@ -474,9 +451,9 @@ private struct ModeSwitch: View {
                         .frame(maxWidth: .infinity, minHeight: 36)
                         .background {
                             if selected {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                Capsule()
                                     .fill(AuthPalette.containerLowest)
-                                    .shadow(color: .black.opacity(0.06), radius: 1.5, y: 1)
+                                    .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
                                     .matchedGeometryEffect(id: "pill", in: pill)
                             }
                         }
@@ -487,7 +464,8 @@ private struct ModeSwitch: View {
             }
         }
         .padding(4)
-        .background(AuthPalette.container, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(AuthPalette.container, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.fmHairline))
     }
 }
 
@@ -525,12 +503,11 @@ struct AuthField<Input: View, Accessory: View, Trailing: View>: View {
             }
             .padding(.leading, 14)
             .padding(.trailing, Trailing.self == EmptyView.self ? 14 : 4)
-            .frame(height: 52)
-            .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(height: 54)
+            .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay {
-                if error != nil {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.fmError, lineWidth: 1.5)
-                }
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(error != nil ? Color.fmError : Color.fmHairline, lineWidth: error != nil ? 1.5 : 1)
             }
             if let error {
                 Text(error)
@@ -549,19 +526,11 @@ extension AuthField where Accessory == EmptyView, Trailing == EmptyView {
 
 struct AuthPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 15, weight: .semibold))
-            .kerning(-0.15)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 52)
-            .background(AuthPalette.primaryContainer.opacity(configuration.isPressed ? 0.85 : 1),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: AuthPalette.primaryContainer.opacity(0.25), radius: 6, y: 3)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+        FMFilledButtonStyle().makeBody(configuration: configuration)
     }
 }
 
-/// Full-width row for a sign-in provider. Dimmed while the provider isn't connected.
+/// Full-width capsule for a secondary choice or a sign-in provider. Dimmed while the provider isn't connected.
 struct AuthSocialButtonStyle: ButtonStyle {
     var background: Color
     var foreground: Color
@@ -569,12 +538,13 @@ struct AuthSocialButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 15, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(foreground)
-            .frame(maxWidth: .infinity, minHeight: 52)
-            .background(background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
-            .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1) : 0.72)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .background(background, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.fmHairline))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.6)
     }
 }
 
@@ -651,7 +621,7 @@ struct BannerView: View {
                 .accessibilityIdentifier("authError")
         case .checkEmail(let address):
             NoticeCard(icon: "envelope.badge", title: "Check your email",
-                       message: "We sent a confirmation link to \(address). Open it on this iPhone to finish signing up. If you confirm on another device, come back and sign in here.")
+                       message: "We sent an email to \(address). Tap Verify email in it on this iPhone, or enter the code from it below.")
                 .accessibilityIdentifier("checkEmail")
         case .info(let message):
             NoticeCard(icon: "checkmark.circle", title: message, message: nil)
@@ -686,8 +656,8 @@ struct NoticeCard: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.primary.opacity(0.25)))
+        .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(AuthPalette.primary.opacity(0.25)))
         .accessibilityElement(children: .combine)
     }
 }
