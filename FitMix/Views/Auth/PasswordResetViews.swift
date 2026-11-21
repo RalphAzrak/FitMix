@@ -15,10 +15,7 @@ private struct AuthScreen<Content: View>: View {
                 HStack {
                     CircleIconButton(systemName: "xmark", label: closeLabel, action: close)
                     Spacer()
-                    Text("FITMIX STUDIO")
-                        .font(.system(size: 11, weight: .semibold))
-                        .tracking(1.6)
-                        .foregroundStyle(AuthPalette.secondary)
+                    FitMixWordmark()
                     Spacer()
                     Color.clear.frame(width: 36, height: 36)
                 }
