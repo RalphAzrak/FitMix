@@ -6,6 +6,8 @@ import SwiftUI
     @State private var auth = AuthSession()
     /// The current Studio look; survives leaving and reopening Studio during the session.
     @State private var studio = StudioStore()
+    /// The signed-in account's sizes and addresses. Follows whoever is signed in.
+    @State private var profile = ProfileStore()
 
     var body: some Scene {
         WindowGroup {
@@ -13,9 +15,14 @@ import SwiftUI
                 .environment(store)
                 .environment(auth)
                 .environment(studio)
+                .environment(profile)
                 .preferredColorScheme(.light)
                 // Password-reset links (fitmix://reset-password), including when the app was closed.
                 .onOpenURL { auth.handle(url: $0) }
+                // Only the signed-in account's saved data is ever loaded; signing out clears it from memory.
+                .onChange(of: auth.user?.id, initial: true) { _, id in profile.activate(accountID: id) }
+                // Studio always renders from the current try-on photo, including after it's replaced or removed.
+                .onChange(of: store.bodyPhoto) { _, photo in studio.useTryOnPhoto(photo) }
         }
     }
 }

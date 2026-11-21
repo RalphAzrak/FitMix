@@ -91,6 +91,14 @@ final class StudioStore {
         refreshPreview()
     }
 
+    /// Keeps Studio on the user's current try-on photo: a replaced photo re-renders the look, and a
+    /// removed one is dropped so nothing renders from it.
+    func useTryOnPhoto(_ image: UIImage?) {
+        guard image !== tryOnSource else { return }
+        tryOnSource = image
+        refreshPreview()
+    }
+
     // MARK: Editing
 
     var selectedPiece: WorkingLook.Piece? {
