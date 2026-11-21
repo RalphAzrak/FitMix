@@ -75,15 +75,29 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Eyebrow(text: "Fitting Room Suite")
-            Text("My Avatar")
-                .font(.fmSerif(42))
-                .foregroundStyle(Color.fmInk)
-                .accessibilityAddTraits(.isHeader)
-            Text("Your virtual fitting room.")
-                .font(.system(size: 15))
-                .foregroundStyle(Color.fmSecondary)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Eyebrow(text: "Fitting Room Suite")
+                Text("My Avatar")
+                    .font(.fmSerif(42))
+                    .foregroundStyle(Color.fmInk)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Your virtual fitting room.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color.fmSecondary)
+            }
+            Spacer(minLength: 12)
+            Button { authPreview = .signIn } label: {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundStyle(Color.fmInk)
+                    .frame(width: 44, height: 44)
+                    .background(Color.fmCard, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.fmHairline))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Account")
+            .accessibilityIdentifier("accountButton")
         }
     }
 
