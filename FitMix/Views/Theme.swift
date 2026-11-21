@@ -12,6 +12,7 @@ extension Color {
     static let fmHairline = Color.black.opacity(0.07)
     static let fmGreen = Color(red: 0.13, green: 0.55, blue: 0.33)
     static let fmAmber = Color(red: 0.72, green: 0.45, blue: 0.05)
+    static let fmError = Color(red: 0.72, green: 0.15, blue: 0.12)
 }
 
 extension Font {
