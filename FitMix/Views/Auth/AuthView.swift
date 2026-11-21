@@ -2,10 +2,10 @@ import SwiftUI
 
 /// Sign in / create account. Layout follows the Stitch frame "Sign In & Onboarding".
 ///
-/// FitMix has no account service yet, so this screen is UI and validation only: submitting a
-/// valid form says accounts aren't connected and sends nothing anywhere. Apple, Google, password
-/// reset, help, and the legal links sit where the design puts them but stay disabled until they
-/// are wired up. It is not part of the launch flow. Debug builds can open it with FM_DEBUG_SCREEN=auth.
+/// Email and password go to Supabase Auth through `AuthSession`. Apple, Google, password reset,
+/// help, and the legal links sit where the design puts them but stay disabled until they are
+/// wired up. It is not part of the launch flow: it opens from Account on My Avatar.
+/// Debug builds can open it with FM_DEBUG_SCREEN=auth or auth-create.
 struct AuthView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case signIn, createAccount
@@ -16,20 +16,31 @@ struct AuthView: View {
 
     enum Field: Hashable { case name, email, password }
 
+    /// A message under the main button after a request comes back.
+    enum Banner: Equatable {
+        case failure(String)
+        case checkEmail(String)
+    }
+
     @Environment(\.dismiss) private var dismiss
+    @Environment(AuthSession.self) private var auth
     @State private var mode: Mode
     @State private var form = AuthForm()
     @State private var showPassword = false
     /// Errors appear only after the first submit attempt, then update as the user types.
     @State private var attempted = false
-    @State private var notConnected = false
+    @State private var submitting = false
+    @State private var banner: Banner?
     @FocusState private var focus: Field?
 
     var showsClose: Bool
+    /// Called once the user has a session, with the mode they used to get it.
+    var onAuthenticated: (Mode) -> Void
 
-    init(mode: Mode = .signIn, showsClose: Bool = true) {
+    init(mode: Mode = .signIn, showsClose: Bool = true, onAuthenticated: @escaping (Mode) -> Void = { _ in }) {
         _mode = State(initialValue: mode)
         self.showsClose = showsClose
+        self.onAuthenticated = onAuthenticated
     }
 
     private var errors: AuthForm.Errors { form.errors(for: mode) }
@@ -40,12 +51,11 @@ struct AuthView: View {
                 topBar.padding(.bottom, 8)
                 headline.padding(.top, 8).padding(.bottom, 24)
                 FeatureCard().padding(.bottom, 24)
-                ModeSwitch(mode: $mode).padding(.bottom, 24)
-                fields
+                ModeSwitch(mode: $mode).padding(.bottom, 24).disabled(submitting)
+                fields.disabled(submitting)
                 submit.padding(.top, 24)
-                if notConnected {
-                    NoticeRow(tone: .info, text: "Accounts aren't connected yet. Nothing was sent or saved.")
-                        .padding(.top, 12)
+                if let banner {
+                    BannerView(banner: banner).padding(.top, 12)
                 }
                 LegalLine().padding(.top, 12)
                 FastConnectDivider().padding(.vertical, 24)
@@ -62,10 +72,12 @@ struct AuthView: View {
         .preferredColorScheme(.light)
         .onChange(of: mode) {
             attempted = false
-            notConnected = false
+            // Keep "Check your email" visible after switching to Sign In; clear errors.
+            if case .failure = banner { banner = nil }
             if mode == .signIn, focus == .name { focus = .email }
         }
-        .onChange(of: form) { notConnected = false }
+        .onChange(of: form) { if case .failure = banner { banner = nil } }
+        .interactiveDismissDisabled(submitting)
     }
 
     // MARK: Sections
@@ -188,11 +200,17 @@ struct AuthView: View {
     private var submit: some View {
         Button(action: submitTapped) {
             HStack(spacing: 8) {
-                Text(mode.action)
-                Image(systemName: "arrow.right").font(.system(size: 15, weight: .semibold))
+                if submitting {
+                    ProgressView().tint(.white)
+                    Text(mode == .signIn ? "Signing in…" : "Creating account…")
+                } else {
+                    Text(mode.action)
+                    Image(systemName: "arrow.right").font(.system(size: 15, weight: .semibold))
+                }
             }
         }
         .buttonStyle(AuthPrimaryButtonStyle())
+        .disabled(submitting)
     }
 
     private var socialButtons: some View {
@@ -228,9 +246,38 @@ struct AuthView: View {
             focus = errors.firstField
             return
         }
-        // No account service exists yet. Say so instead of pretending to sign in.
+        guard !submitting else { return }
         focus = nil
-        notConnected = true
+        banner = nil
+        submitting = true
+        let mode = mode
+        let email = form.email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = form.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = form.password
+        Task {
+            defer { submitting = false }
+            do {
+                switch mode {
+                case .signIn:
+                    try await auth.signIn(email: email, password: password)
+                    onAuthenticated(.signIn)
+                case .createAccount:
+                    switch try await auth.signUp(fullName: name, email: email, password: password) {
+                    case .signedIn:
+                        onAuthenticated(.createAccount)
+                    case .confirmEmail(let address):
+                        // No session until the link is confirmed: move to Sign In with the email filled.
+                        form.password = ""
+                        form.email = address
+                        self.mode = .signIn
+                        banner = .checkEmail(address)
+                    }
+                }
+            } catch {
+                let failure = AuthFailure(error)
+                banner = failure.needsConfirmation ? .checkEmail(email) : .failure(failure.message)
+            }
+        }
     }
 }
 
@@ -566,10 +613,169 @@ private struct FooterPill: View {
     }
 }
 
+/// Result of the last request, shown under the main button.
+private struct BannerView: View {
+    var banner: AuthView.Banner
+
+    var body: some View {
+        switch banner {
+        case .failure(let message):
+            NoticeRow(tone: .caution, text: message)
+                .accessibilityIdentifier("authError")
+        case .checkEmail(let address):
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "envelope.badge")
+                    .font(.system(size: 18))
+                    .foregroundStyle(AuthPalette.primary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Check your email")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(AuthPalette.onSurface)
+                    Text("We sent a confirmation link to \(address). Open it, then sign in here.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(AuthPalette.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AuthPalette.primary.opacity(0.25)))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("checkEmail")
+        }
+    }
+}
+
+// MARK: Account
+
+/// What Account opens: the signed-in account, or the sign-in forms.
+struct AccountFlowView: View {
+    var mode: AuthView.Mode = .signIn
+    var onAuthenticated: (AuthView.Mode) -> Void = { _ in }
+    @Environment(AuthSession.self) private var auth
+
+    var body: some View {
+        switch auth.state {
+        case .signedIn(let user):
+            AccountView(user: user)
+        case .signedOut:
+            AuthView(mode: mode, onAuthenticated: onAuthenticated)
+        case .restoring:
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(AuthPalette.surface.ignoresSafeArea())
+        }
+    }
+}
+
+/// The signed-in account, in the same visual system as the sign-in screen.
+struct AccountView: View {
+    var user: AccountUser
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AuthSession.self) private var auth
+    @State private var confirmSignOut = false
+    @State private var signingOut = false
+    @State private var failure: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
+                    Spacer()
+                    Text("FITMIX STUDIO")
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(1.6)
+                        .foregroundStyle(AuthPalette.secondary)
+                    Spacer()
+                    Color.clear.frame(width: 36, height: 36)
+                }
+                .frame(height: 44)
+                .padding(.bottom, 16)
+
+                Text("ACCOUNT")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.9)
+                    .foregroundStyle(AuthPalette.primary)
+                    .padding(.bottom, 4)
+                Text(user.fullName.map { "Hi, \($0.split(separator: " ").first.map(String.init) ?? $0)." } ?? "You're signed in.")
+                    .font(.system(size: 28, weight: .medium, design: .serif))
+                    .foregroundStyle(AuthPalette.onSurface)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.bottom, 24)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    if let name = user.fullName { row(label: "Full Name", value: name, icon: "person.text.rectangle") }
+                    row(label: "Email Address", value: user.email ?? "—", icon: "envelope")
+                }
+                .padding(14)
+                .background(AuthPalette.containerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                Button {
+                    confirmSignOut = true
+                } label: {
+                    HStack(spacing: 8) {
+                        if signingOut { ProgressView() } else { Image(systemName: "rectangle.portrait.and.arrow.right") }
+                        Text(signingOut ? "Signing out…" : "Sign Out")
+                    }
+                }
+                .buttonStyle(AuthSocialButtonStyle(background: AuthPalette.container, foreground: AuthPalette.onSurface))
+                .disabled(signingOut)
+                .padding(.top, 24)
+
+                if let failure {
+                    NoticeRow(tone: .caution, text: failure).padding(.top, 12)
+                }
+
+                Text("Your avatar stays on this iPhone when you sign out.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AuthPalette.secondary)
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 12)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 40)
+        }
+        .background(AuthPalette.surface.ignoresSafeArea())
+        .preferredColorScheme(.light)
+        .confirmationDialog("Sign out of FitMix?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            Button("Sign Out", role: .destructive, action: signOut)
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func row(label: String, value: String, icon: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(AuthPalette.secondary).frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(AuthPalette.secondary)
+                Text(value).font(.system(size: 15)).foregroundStyle(AuthPalette.onSurface)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func signOut() {
+        signingOut = true
+        failure = nil
+        Task {
+            defer { signingOut = false }
+            do {
+                try await auth.signOut()
+                // AccountFlowView switches back to the sign-in form.
+            } catch {
+                failure = AuthFailure(error).message
+            }
+        }
+    }
+}
+
 #Preview("Sign In") {
-    AuthView(mode: .signIn)
+    AuthView(mode: .signIn).environment(AuthSession())
 }
 
 #Preview("Create Account") {
-    AuthView(mode: .createAccount)
+    AuthView(mode: .createAccount).environment(AuthSession())
 }
