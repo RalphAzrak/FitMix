@@ -92,7 +92,24 @@ matching chroma, and a dark T-shirt under a black jacket is still separated, by 
 
 ## Product match
 
-Studio asks the backend for listings, then shows the best one on the garment's card with its label:
+**Google Lens via Scrappa is the product search** (Debug and Release). When Studio Fit opens after a scan, every
+garment with a usable crop (jacket, T-shirt, pants or shoes, at least 48 px a side) gets its own
+`POST /v1/lens-search`, all side by side (`StudioStore.openLive` → `findMatch`, `LensRetailerSearch`). Each card:
+
+- shows that garment's original crop with a **Finding a match…** badge while its search runs;
+- then the best credible listing: the retailer's product photo (with the crop kept as a small inset), name, retailer,
+  price or **Price unavailable**, **View listing** (opens the listing), labeled **Similar match**;
+- or **No close match found** when Lens returns nothing usable for that category;
+- or **Couldn't search. Try again.** with **Retry** when the request fails (Debug builds also show the server's code);
+- or **Search limit reached** when the server's monthly cap or Scrappa's credits are used up (no Retry).
+
+One garment's failure doesn't affect the others, and a garment already answered isn't searched again for that look.
+The server caches answers per crop, joins duplicate in-flight requests and caps monthly calls (see Backend/README.md),
+so reopening Studio or retrying doesn't spend extra credits. Release builds find the backend through Info.plist
+`FitMixBackendURL` (and optional `FitMixBackendToken`); Debug builds use `FITMIX_BACKEND_URL` or the
+`Backend.local.json` that `Backend/run.sh` writes.
+
+The labels below come from the older `/v1/garment-match` search (eBay and others), which the app no longer calls:
 
 - **Exact match**: corroborated. A product code read on the garment matches the listing, or the brand, model name and
   colour read on the garment all match, or the visual search found the same image on the listing and the brand is
@@ -120,7 +137,7 @@ and it has no stripes, plaid or logo detection. Those depend on the visual searc
 | Provider | State |
 | --- | --- |
 | eBay Browse API (official) | As before; one provider among several. Needs keys. |
-| Google Lens via Scrappa | Implemented and tested with fixtures; **off until approved** (it would receive garment crops). |
+| Google Lens via Scrappa | **The app's product search** (`/v1/lens-search`). Needs `SCRAPPA_API_KEY` and an https `FITMIX_PUBLIC_BASE_URL` on the backend. |
 | Fixtures | Labeled test data for development. |
 
 **Scrappa evaluation.** Sources: scrappa.co Lens API page, pricing, privacy policy and terms, read 21 Nov 2026.
@@ -159,4 +176,5 @@ fetched images, and whether images are passed to Google or others.
 - Physical taps on targets (in the simulator, selection is checked through the same `select` path a tap uses).
 - On-device clues and photo comparison: in the simulator, Vision's classifier and foreground mask return nothing, so
   clues came back empty there and the re-ranker kept the backend order. Both were checked on a Mac.
-- A live provider result, which needs eBay keys or an approved Scrappa setup.
+- A live Scrappa result: needs `SCRAPPA_API_KEY`, an https `FITMIX_PUBLIC_BASE_URL` that reaches the backend, and
+  an approved garment-only photo.
