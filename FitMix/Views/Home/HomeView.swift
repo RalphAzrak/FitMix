@@ -57,11 +57,11 @@ struct HomeView: View {
                 CameraView(close: {
                     // Back to where Camera was opened from; Studio keeps its previous look.
                     placeholder = cameraReturnsToStudio ? .studio : nil
-                }, capture: { capture in
-                    // Camera → Outfit Review, which finds the garments. Studio's current look
-                    // stays until Try Full Look.
-                    studio.review(capture)
-                    placeholder = .review
+                }, select: { selection in
+                    // Camera → Studio: the tapped garment opens on its outfit frame and its
+                    // retailer search starts right away.
+                    studio.openLive(selection, tryOnSource: nil)
+                    placeholder = .studio
                 }, confirm: { scan in
                     studio.review(scan)
                     placeholder = .review
@@ -119,6 +119,22 @@ struct HomeView: View {
             case "cart": showCart = true
             case "studio": placeholder = .studio
             case "camera": placeholder = .scanFits
+            #if DEBUG
+            case let screen? where screen.hasPrefix("live-sample-"):
+                // e.g. live-sample-shoes: Studio as if Shoes were tapped in Sample Scan A.
+                if let category = GarmentCategory(rawValue: String(screen.dropFirst("live-sample-".count))),
+                   let selection = SampleScans.liveSelection(category) {
+                    studio.openLive(selection, tryOnSource: nil)
+                    placeholder = .studio
+                    // FM_DEBUG_THEN_SELECT=pants: switch garments 1 s later, while the first search runs.
+                    if let next = ProcessInfo.processInfo.environment["FM_DEBUG_THEN_SELECT"].flatMap(GarmentCategory.init(rawValue:)) {
+                        Task {
+                            try? await Task.sleep(for: .seconds(1))
+                            if let piece = studio.look?.pieces.first(where: { $0.detected.category == next }) { studio.select(piece.id) }
+                        }
+                    }
+                }
+            #endif
             default: break
             }
         }

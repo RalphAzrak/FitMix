@@ -17,7 +17,7 @@ FitMix is a SwiftUI iPhone app for recreating outfits you spot in real life. Cap
 2. **Isolate a garment.** Tap a piece in Studio to see it against a contrasting background, browse similar items, and choose what to keep.
 3. **Try the full look.** Take a photo of yourself and see all selected garments together on that photo. Studio keeps the original outfit visible as a reference.
 
-Live garment detection, automated product matching, and photo-based try-on are planned. The current Studio prototype links to retailer pages for shopping.
+**Live garment match** (branch `feature/live-garment-retailer-match`): point the Camera at an outfit and tap the jacket, T-shirt, pants or shoes. There's no shutter. Studio opens on that frame and finds a similar retailer listing for that one garment, showing its photo, price and a link. Detection runs on the iPhone; only the selected garment's crop is sent for search. Retailer search needs eBay API keys on the backend ([setup](Backend/README.md#retailer-search-setup)). Details are in [Docs/LiveGarmentMatch.md](Docs/LiveGarmentMatch.md). Photo-based try-on is still planned.
 
 ## Run locally
 

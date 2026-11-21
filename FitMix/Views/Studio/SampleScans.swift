@@ -224,6 +224,30 @@ enum SampleScans {
         return scan
     }
 
+    /// Labels a scan built elsewhere (from `liveSelection`) as sample data.
+    static func register(_ scan: OutfitScan, as kind: Kind = .illustration) {
+        issued[scan.id] = kind
+    }
+
+    // MARK: Live selection stand-in
+
+    /// Sample Scan A's illustration as if its `category` had been tapped in the live camera, for
+    /// testing Studio's retailer search without a camera. The "Top" is treated as the T-shirt.
+    static func liveSelection(_ category: GarmentCategory) -> LiveGarmentSelection? {
+        let scan = scanA()
+        guard let frame = scan.image.cgImage else { return nil }
+        let garments = scan.garments.compactMap { garment -> LiveGarmentSelection.Garment? in
+            let live: GarmentCategory = garment.category == .top ? .tshirt : garment.category
+            guard GarmentCategory.liveScannable.contains(live), let bounds = garment.bounds,
+                  let crop = LiveGarmentSelection.crop(frame, to: bounds) else { return nil }
+            return LiveGarmentSelection.Garment(category: live, bounds: bounds, crop: crop)
+        }
+        guard garments.contains(where: { $0.category == category }) else { return nil }
+        var selection = LiveGarmentSelection(frame: frame, capturedAt: .now, garments: garments, selected: category)
+        selection.isSample = true
+        return selection
+    }
+
     // MARK: Photo fixture
 
     struct FixtureError: LocalizedError {

@@ -1,7 +1,11 @@
-"""FitMix backend: turns a user's photos and measurements into an animated-style avatar portrait.
+"""FitMix backend: avatar portraits, and retailer matches for a garment selected in the live camera.
 
-The iPhone app posts the photos here; this server adds the instruction and calls OpenAI's Image Edits API.
-The OpenAI key lives only in this process's environment. Photos are held in memory for the length of one request:
+- `POST /v1/avatar`: the app posts the user's photos; this server adds the instruction and calls OpenAI's Image
+  Edits API.
+- `POST /v1/garment-match`: the app posts one garment's crop and category; this server searches a retailer
+  catalog (eBay Browse API) and returns real listings in that category.
+
+Provider keys live only in this process's environment. Images are held in memory for the length of one request:
 they are never written to disk and never logged.
 """
 
@@ -23,11 +27,13 @@ from fastapi.responses import JSONResponse, Response
 
 from .mock import placeholder_png
 from .prompt import build_prompt
+from .retail import CATEGORIES, EbayMatcher, FixtureMatcher, Matcher, MatchError
 
 log = logging.getLogger("fitmix")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_CROP_BYTES = 2 * 1024 * 1024
 HEIGHT_RANGE_CM = (100.0, 250.0)
 WEIGHT_RANGE_KG = (30.0, 300.0)
 # Used when the configured model is not available to this OpenAI account.
@@ -44,6 +50,12 @@ class Settings:
     app_token: str = field(default="", repr=False)
     mock: bool = False
     rate_limit_per_hour: int = 20
+    ebay_client_id: str = field(default="", repr=False)
+    ebay_client_secret: str = field(default="", repr=False)
+    ebay_marketplace: str = "EBAY_US"
+    # "ebay" (real listings, needs the keys above) or "fixture" (labeled test data, no keys, nothing sent).
+    match_provider: str = "ebay"
+    match_rate_limit_per_hour: int = 120
 
     @staticmethod
     def from_environment() -> "Settings":
@@ -57,6 +69,11 @@ class Settings:
             app_token=env.get("FITMIX_APP_TOKEN", "").strip(),
             mock=env.get("FITMIX_MOCK", "").strip().lower() in ("1", "true", "yes"),
             rate_limit_per_hour=int(env.get("FITMIX_RATE_LIMIT_PER_HOUR", "") or Settings.rate_limit_per_hour),
+            ebay_client_id=env.get("EBAY_CLIENT_ID", "").strip(),
+            ebay_client_secret=env.get("EBAY_CLIENT_SECRET", "").strip(),
+            ebay_marketplace=env.get("EBAY_MARKETPLACE_ID", "").strip() or Settings.ebay_marketplace,
+            match_provider=env.get("FITMIX_MATCH_PROVIDER", "").strip().lower() or Settings.match_provider,
+            match_rate_limit_per_hour=int(env.get("FITMIX_MATCH_RATE_LIMIT_PER_HOUR", "") or Settings.match_rate_limit_per_hour),
         )
 
 
@@ -128,15 +145,26 @@ class OpenAIGenerator:
                                              quality=self.settings.quality, n=1, **options)
 
 
-def create_app(settings: Settings | None = None, generator: Generator | None = None) -> FastAPI:
+def default_matcher(settings: Settings) -> Matcher | None:
+    if settings.match_provider == "fixture":
+        return FixtureMatcher()
+    if settings.match_provider == "ebay" and settings.ebay_client_id and settings.ebay_client_secret:
+        return EbayMatcher(settings.ebay_client_id, settings.ebay_client_secret, settings.ebay_marketplace)
+    return None
+
+
+def create_app(settings: Settings | None = None, generator: Generator | None = None,
+               matcher: Matcher | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
     if generator is None:
         if settings.mock:
             generator = MockGenerator()
         elif settings.api_key:
             generator = OpenAIGenerator(settings)
+    if matcher is None:
+        matcher = default_matcher(settings)
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
-    recent: dict[str, deque[float]] = defaultdict(deque)
+    recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
     @app.exception_handler(ApiError)
     async def api_error(_: Request, error: ApiError):
@@ -146,24 +174,65 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     async def invalid(_: Request, error: RequestValidationError):
         return JSONResponse(status_code=400, content={"error": {"code": "invalid_request", "message": "The request was incomplete."}})
 
-    def authorize(request: Request) -> str:
-        if settings.app_token:
-            sent = request.headers.get("authorization", "")
-            if not hmac.compare_digest(sent, f"Bearer {settings.app_token}"):
-                raise ApiError(401, "unauthorized", "This copy of FitMix isn't allowed to use the avatar service.")
-        client = request.client.host if request.client else "unknown"
-        now = time.monotonic()
-        window = recent[client]
-        while window and now - window[0] > 3600:
-            window.popleft()
-        if len(window) >= settings.rate_limit_per_hour:
-            raise ApiError(429, "rate_limited", "You've made a lot of avatars in the last hour. Try again later.")
-        window.append(now)
-        return client
+    def limiter(bucket: str, limit: int, service: str, too_many: str):
+        def authorize(request: Request) -> str:
+            if settings.app_token:
+                sent = request.headers.get("authorization", "")
+                if not hmac.compare_digest(sent, f"Bearer {settings.app_token}"):
+                    raise ApiError(401, "unauthorized", f"This copy of FitMix isn't allowed to use the {service}.")
+            client = request.client.host if request.client else "unknown"
+            now = time.monotonic()
+            window = recent[(bucket, client)]
+            while window and now - window[0] > 3600:
+                window.popleft()
+            if len(window) >= limit:
+                raise ApiError(429, "rate_limited", too_many)
+            window.append(now)
+            return client
+        return authorize
+
+    authorize = limiter("avatar", settings.rate_limit_per_hour, "avatar service",
+                        "You've made a lot of avatars in the last hour. Try again later.")
+    authorize_match = limiter("match", settings.match_rate_limit_per_hour, "product search",
+                              "You've searched a lot in the last hour. Try again later.")
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "ready": generator is not None, "mock": settings.mock}
+        return {"status": "ok", "ready": generator is not None, "mock": settings.mock,
+                "match_ready": matcher is not None, "match_provider": matcher.name if matcher else None}
+
+    @app.post("/v1/garment-match")
+    async def garment_match(
+        crop: UploadFile = File(...),
+        category: str = Form(...),
+        color: str | None = Form(None),
+        brand_hints: str | None = Form(None),
+        _: str = Depends(authorize_match),
+    ):
+        if category not in CATEGORIES:
+            raise ApiError(400, "invalid_category", "FitMix can search for a jacket, T-shirt, pants or shoes.")
+        if matcher is None:
+            raise ApiError(503, "not_configured",
+                           "Retailer search isn't set up yet: the server has no eBay API keys (EBAY_CLIENT_ID, EBAY_CLIENT_SECRET).")
+        data = await crop.read(MAX_CROP_BYTES + 1)
+        if len(data) > MAX_CROP_BYTES:
+            raise ApiError(413, "image_too_large", "The garment image is too large to send.")
+        if _media_type(data) is None:
+            raise ApiError(400, "invalid_image", "The garment image isn't a JPEG, PNG or WebP picture.")
+        hints = [h.strip().lower() for h in (brand_hints or "").split(",") if h.strip()][:3]
+        color = (color or "").strip().lower()[:20] or None
+
+        started = time.monotonic()
+        try:
+            results = await matcher.search(category, data, color, hints)
+        except MatchError as error:
+            log.info("match %s: failed (%s) after %.1fs", category, error.code, time.monotonic() - started)
+            raise ApiError(error.status, error.code, error.message)
+        log.info("match %s: %d KB crop, %d result(s) in %.1fs", category, len(data) // 1024, len(results),
+                 time.monotonic() - started)
+        return JSONResponse({"status": "matched" if results else "no_match", "category": category,
+                             "provider": matcher.name, "fixture": matcher.fixture,
+                             "results": [r.to_json() for r in results]}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(

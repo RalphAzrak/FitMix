@@ -1,6 +1,11 @@
 # Camera → garments handoff
 
-The flow is Camera → Use Photo → Outfit Review (garments found, **Tap to Isolate**, choose pieces)
+> **The Camera no longer takes photos.** Garments are detected live and tapped one at a time, then Studio
+> opens on that frame and searches retailers for the tapped garment. See [LiveGarmentMatch.md](LiveGarmentMatch.md).
+> The still-photo path below (`CaptureHandoff`, `GarmentIsolator`, Outfit Review) is still in the code and is
+> reached from the debug sample scans. The Camera no longer feeds it.
+
+The still-photo flow was Camera → Use Photo → Outfit Review (garments found, **Tap to Isolate**, choose pieces)
 → Try Full Look → Studio.
 
 ## Garment isolation (on-device)
@@ -31,24 +36,17 @@ analysis finishes, it replaces `pendingScan` with the same photo plus its garmen
 To replace the heuristic with a clothing-parsing model, keep `GarmentIsolator.Output` and
 change `analyze`. Nothing in Camera, Outfit Review, or Studio needs to change.
 
-## Live tracking (not built)
+## Live detection
 
-| What | Where |
-| --- | --- |
-| Live frames for people tracking | `CameraSession.configureIfNeeded()`, at the `HANDOFF (issue 07)` comment: add an `AVCaptureVideoDataOutput` on the session queue. |
-| Tracking overlay / tap-to-select in the viewfinder | `CameraView.viewfinder`, in the `.live` case. The preview uses `.resizeAspect`; convert boxes with `layerRectConverted(fromMetadataOutputRect:)`. |
-| Product matching | `CaptureHandoff.analyze`, at the `HANDOFF` comment: fill `label` and `matches`. |
+Live frames, the tap targets, and retailer matching are built. See [LiveGarmentMatch.md](LiveGarmentMatch.md).
 
 ## Guarantees
 
-- `ConfirmedCapture.image` is upright, has a long edge of at most 3000 px, and is the exact still
-  the user reviewed.
-- Closing or retaking in Camera or Outfit Review leaves Studio's current look unchanged.
+- Closing Camera or Outfit Review leaves Studio's current look unchanged.
 
 ## Debug testing
 
-- `FM_DEBUG_CAPTURE_PHOTO=/path/photo.jpg` adds a **Capture Test Photo** button to the simulator's
-  "Camera unavailable" screen. The photo goes through review → Use Photo → analysis exactly like
-  a capture. In the simulator, analysis stops at the body-pose step.
+- `FM_DEBUG_CAPTURE_PHOTO=/path/photo.jpg` now adds **Analyze Test Photo as Live Frame**: the photo
+  is analyzed like a live camera frame (see LiveGarmentMatch.md).
 - `FM_DEBUG_SCAN_FIXTURE` and `FM_DEBUG_SAMPLE_SCANS=1` still work. They're labeled as fixture or
   sample data.

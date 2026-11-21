@@ -3,10 +3,11 @@ import UIKit
 
 // MARK: - Camera session (AVFoundation, off the main thread)
 //
-// `CameraSession` owns the AVCaptureSession and does every configuration, start/stop, zoom, torch,
-// and capture call on its own serial queue. `CameraController` (below) is the main-actor face the
-// Camera screen observes. Neither knows anything about people tracking or garment recognition;
-// see Docs/CameraHandoff.md for where that plugs in.
+// `CameraSession` owns the AVCaptureSession and does every configuration, start/stop, zoom and
+// torch call on its own serial queue. Its video data output delivers upright frames (rotated like
+// the preview) to `LiveGarmentAnalyzer`. `CameraController` (below) is the main-actor face the
+// Camera screen observes. There is no shutter: garments are picked from the live feed.
+// See Docs/LiveGarmentMatch.md.
 
 /// A zoom stop the current camera can actually reach, e.g. "0.5×" on a device with an ultra-wide.
 struct ZoomPreset: Hashable, Sendable {
@@ -28,17 +29,16 @@ struct CameraCapabilities: Sendable {
 enum CameraSessionError: Error {
     case noRearCamera
     case cannotUseCamera(String)
-    case captureFailed(String)
 }
 
 nonisolated final class CameraSession: @unchecked Sendable {
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "app.fitmix.camera.session", qos: .userInitiated)
-    private let photoOutput = AVCapturePhotoOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
     private var configured = false
-    /// Delegates for captures in flight, kept alive until each photo is delivered.
-    private var inFlight: [Int64: PhotoCaptureProcessor] = [:]
+    /// Rotation applied to delivered frames, kept in step with the preview's.
+    private var videoRotationAngle: CGFloat = 90
 
     /// Rear cameras in preference order. Virtual devices first, so 0.5× and 2× switch lenses
     /// automatically where the hardware has them.
@@ -111,31 +111,26 @@ nonisolated final class CameraSession: @unchecked Sendable {
         }
     }
 
-    /// Takes one still. `rotationAngle` comes from the rotation coordinator so the photo is upright.
-    /// The image is redrawn upright (orientation baked in) before it is delivered on the main queue.
-    func capture(rotationAngle: CGFloat, completion: @escaping @MainActor @Sendable (Result<UIImage, CameraSessionError>) -> Void) {
-        queue.async { [self] in
-            guard session.isRunning, let connection = photoOutput.connection(with: .video), connection.isEnabled else {
-                DispatchQueue.main.async { completion(.failure(.captureFailed("The camera isn't running."))) }
-                return
-            }
-            if connection.isVideoRotationAngleSupported(rotationAngle) { connection.videoRotationAngle = rotationAngle }
+    /// Where frames go. The delegate is called on `queue`, and frames that arrive while it is busy
+    /// are dropped, so analysis never slows the preview.
+    func setFrameDelegate(_ delegate: LiveGarmentAnalyzer, queue delegateQueue: DispatchQueue) {
+        queue.async { [self] in videoOutput.setSampleBufferDelegate(delegate, queue: delegateQueue) }
+    }
 
-            let settings = photoOutput.availablePhotoCodecTypes.contains(.hevc)
-                ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-                : AVCapturePhotoSettings()
-            settings.photoQualityPrioritization = .balanced
-            let id = settings.uniqueID
-            let processor = PhotoCaptureProcessor { [weak self] result in
-                self?.queue.async { self?.inFlight[id] = nil }
-                DispatchQueue.main.async { completion(result) }
-            }
-            inFlight[id] = processor
-            photoOutput.capturePhoto(with: settings, delegate: processor)
+    /// Rotates delivered frames like the preview, so a frame looks exactly like what's on screen.
+    func setVideoRotation(_ angle: CGFloat) {
+        queue.async { [self] in
+            videoRotationAngle = angle
+            applyVideoRotationLocked()
         }
     }
 
     // MARK: Queue-only
+
+    private func applyVideoRotationLocked() {
+        guard let connection = videoOutput.connection(with: .video), connection.isVideoRotationAngleSupported(videoRotationAngle) else { return }
+        connection.videoRotationAngle = videoRotationAngle
+    }
 
     @discardableResult
     private func setTorchLocked(_ on: Bool) -> Bool {
@@ -161,16 +156,18 @@ nonisolated final class CameraSession: @unchecked Sendable {
 
         session.beginConfiguration()
         defer { session.commitConfiguration() }
-        session.sessionPreset = .photo
+        // 1080p frames: sharp enough for garment crops and Studio's photo, light enough to analyze live.
+        session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .high
         guard session.canAddInput(input) else { throw CameraSessionError.cannotUseCamera("The camera input couldn't be added.") }
         session.addInput(input)
-        guard session.canAddOutput(photoOutput) else {
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        guard session.canAddOutput(videoOutput) else {
             session.removeInput(input)
-            throw CameraSessionError.cannotUseCamera("The photo output couldn't be added.")
+            throw CameraSessionError.cannotUseCamera("The video output couldn't be added.")
         }
-        session.addOutput(photoOutput)
-        photoOutput.maxPhotoQualityPrioritization = .balanced
-        // HANDOFF (issue 07): add an AVCaptureVideoDataOutput here for live people tracking.
+        session.addOutput(videoOutput)
+        applyVideoRotationLocked()
 
         let capabilities = Self.capabilities(of: camera)
         // Virtual devices start on their widest lens; open at 1× like the system Camera.
@@ -198,38 +195,6 @@ nonisolated final class CameraSession: @unchecked Sendable {
     }
 }
 
-/// Receives one photo and turns it into an upright UIImage.
-nonisolated private final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
-    private let completion: (Result<UIImage, CameraSessionError>) -> Void
-
-    init(completion: @escaping (Result<UIImage, CameraSessionError>) -> Void) {
-        self.completion = completion
-    }
-
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        if let error { return completion(.failure(.captureFailed(error.localizedDescription))) }
-        guard let data = photo.fileDataRepresentation(), let image = UIImage(data: data) else {
-            return completion(.failure(.captureFailed("The photo couldn't be read.")))
-        }
-        completion(.success(Self.upright(image, maxDimension: 3000)))
-    }
-
-    /// Redraws with the EXIF orientation applied, so `cgImage`, crops, and Studio all see the
-    /// photo the way the user did. Same idea as `UIImage.normalized`, but safe off the main actor.
-    private static func upright(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
-        let longest = max(image.size.width, image.size.height)
-        guard longest > 0 else { return image }
-        let scale = min(1, maxDimension / longest)
-        let target = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        return UIGraphicsImageRenderer(size: target, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: target))
-        }
-    }
-}
-
 // MARK: - Controller (main actor)
 
 /// State the Camera screen shows, plus the actions it calls. Owns one `CameraSession`.
@@ -248,17 +213,18 @@ final class CameraController {
     }
 
     private(set) var phase: Phase = .starting
-    /// The captured still, frozen for review. This exact image is what Use Photo hands on.
-    private(set) var frozen: UIImage?
-    /// When the shutter was pressed for `frozen`.
-    private(set) var frozenAt: Date?
-    private(set) var isCapturing = false
-    private(set) var captureError: String?
+    /// Garments detected in the live feed, ready to tap.
+    private(set) var scan = LiveScanState()
+    /// Set once a garment is tapped: the camera stops and Studio opens.
+    private(set) var isSelecting = false
+    /// Debug builds: a photo analyzed as if it were the live feed (a recorded frame).
+    private(set) var stillFrame: UIImage?
     private(set) var capabilities = CameraCapabilities(zoomPresets: [], defaultZoom: nil, hasTorch: false)
     private(set) var zoom: ZoomPreset?
     private(set) var torchOn = false
 
     @ObservationIgnored let camera = CameraSession()
+    @ObservationIgnored private var analyzer: LiveGarmentAnalyzer!
     @ObservationIgnored private var rotation: AVCaptureDevice.RotationCoordinator?
     @ObservationIgnored private var previewRotationObservation: NSKeyValueObservation?
     @ObservationIgnored private weak var previewLayer: AVCaptureVideoPreviewLayer?
@@ -268,13 +234,18 @@ final class CameraController {
 
     var session: AVCaptureSession { camera.session }
 
+    init() {
+        analyzer = LiveGarmentAnalyzer { [weak self] state in self?.scan = state }
+        camera.setFrameDelegate(analyzer, queue: analyzer.queue)
+    }
+
     // MARK: Lifecycle
 
     /// Camera screen appeared, or the app came back to the foreground.
     func activate() async {
         active = true
         observeSession()
-        guard frozen == nil else { return }  // Reviewing a still: leave the camera off.
+        guard !isSelecting, stillFrame == nil else { return }  // Studio is opening, or a recorded frame is shown.
         guard CameraSession.hasRearCamera else { phase = .unavailable; return }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -293,6 +264,7 @@ final class CameraController {
     func deactivate(release: Bool) {
         active = false
         torchOn = false
+        analyzer.setPaused(true)
         camera.stop(release: release)
         if release {
             observers.forEach(NotificationCenter.default.removeObserver)
@@ -322,6 +294,7 @@ final class CameraController {
                 }
                 self.phase = self.session.isInterrupted ? .interrupted(Self.message(for: nil)) : .live
                 self.attachRotation()
+                self.analyzer.setPaused(false)
             case .failure(.noRearCamera):
                 self.phase = .unavailable
             case .failure(let error):
@@ -330,45 +303,36 @@ final class CameraController {
         }
     }
 
-    // MARK: Capture and review
+    // MARK: Selecting a garment
 
-    #if DEBUG
-    /// Debug builds without a camera (simulator): treat a photo file as the captured still, so it
-    /// goes through the same review → Use Photo → garment analysis path as a real capture.
-    func debugFreeze(_ image: UIImage) {
-        frozen = image
-        frozenAt = .now
-    }
-    #endif
-
-    func capture() {
-        guard phase == .live, !isCapturing, frozen == nil else { return }
-        isCapturing = true
-        captureError = nil
-        let pressedAt = Date()
-        let angle = rotation?.videoRotationAngleForHorizonLevelCapture ?? 90
-        camera.capture(rotationAngle: angle) { [weak self] result in
+    /// The user tapped a live target. Stops the camera and hands back the garment, cut from the
+    /// frame it was detected in, plus that whole frame. If the garment left the view in the
+    /// meantime, nothing happens and the camera keeps going.
+    func select(_ target: LiveTarget, completion: @escaping (LiveGarmentSelection) -> Void) {
+        guard !isSelecting else { return }
+        isSelecting = true
+        analyzer.selection(of: target.category) { [weak self] selection in
             guard let self else { return }
-            self.isCapturing = false
-            switch result {
-            case .success(let image):
-                guard self.active else { return }
-                self.frozen = image
-                self.frozenAt = pressedAt
-                self.torchOn = false
-                self.camera.stop()  // Nothing to preview while reviewing; Retake starts it again.
-            case .failure(let error):
-                self.captureError = Self.describe(error)
+            guard let selection else {
+                self.isSelecting = false
+                return
             }
+            self.analyzer.setPaused(true)
+            self.torchOn = false
+            self.camera.stop()
+            completion(selection)
         }
     }
 
-    func retake() {
-        frozen = nil
-        frozenAt = nil
-        captureError = nil
-        Task { await activate() }
+    #if DEBUG
+    /// Debug builds: show a photo in place of the preview and analyze it like a live frame.
+    func analyzeStill(_ image: UIImage, replay: [LiveDetection]? = nil) {
+        guard let cgImage = image.cgImage else { return }
+        stillFrame = image
+        camera.stop()
+        analyzer.analyzeStill(cgImage, replay: replay)
     }
+    #endif
 
     // MARK: Controls
 
@@ -396,8 +360,10 @@ final class CameraController {
         guard rotation == nil, let previewLayer, let device = camera.currentDevice else { return }
         let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
         rotation = coordinator
-        previewRotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) { [weak previewLayer] coordinator, _ in
+        previewRotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) { [weak previewLayer, camera] coordinator, _ in
             let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+            // Frames follow the preview's rotation, so detections map straight onto the screen.
+            camera.setVideoRotation(angle)
             DispatchQueue.main.async {
                 guard let connection = previewLayer?.connection, connection.isVideoRotationAngleSupported(angle) else { return }
                 connection.videoRotationAngle = angle
@@ -415,7 +381,7 @@ final class CameraController {
                 let raw = note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int
                 let reason = raw.flatMap(AVCaptureSession.InterruptionReason.init(rawValue:))
                 MainActor.assumeIsolated {
-                    guard let self, self.frozen == nil, self.phase == .live || self.phase == .starting else { return }
+                    guard let self, self.phase == .live || self.phase == .starting else { return }
                     // Backgrounding is handled by the screen; don't flash a message on the way out.
                     if reason == .videoDeviceNotAvailableInBackground { return }
                     self.torchOn = false
@@ -432,7 +398,7 @@ final class CameraController {
                 let error = note.userInfo?[AVCaptureSessionErrorKey] as? AVError
                 MainActor.assumeIsolated {
                     guard let self, self.active else { return }
-                    if error?.code == .mediaServicesWereReset, self.frozen == nil {
+                    if error?.code == .mediaServicesWereReset, !self.isSelecting {
                         self.startSession()
                     } else {
                         self.phase = .failed(error?.localizedDescription ?? "The camera stopped unexpectedly.")
@@ -455,7 +421,6 @@ final class CameraController {
         switch error {
         case .noRearCamera: "This device has no rear camera."
         case .cannotUseCamera(let detail): "The camera couldn't start. \(detail)"
-        case .captureFailed(let detail): "The photo couldn't be taken. \(detail)"
         }
     }
 }

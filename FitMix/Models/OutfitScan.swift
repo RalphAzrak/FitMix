@@ -55,12 +55,16 @@ struct DetectedGarment: Identifiable {
     }
 }
 
-enum GarmentCategory: String, CaseIterable, Hashable {
-    case jacket, top, dress, pants, skirt, shorts, bottoms, shoes, bag, hat, accessory, other
+nonisolated enum GarmentCategory: String, CaseIterable, Hashable, Sendable {
+    case jacket, tshirt, top, dress, pants, skirt, shorts, bottoms, shoes, bag, hat, accessory, other
+
+    /// The four categories the live scanner can tell apart and search for.
+    static let liveScannable: [GarmentCategory] = [.jacket, .tshirt, .pants, .shoes]
 
     var title: String {
         switch self {
         case .jacket: "Jacket"
+        case .tshirt: "T-shirt"
         case .top: "Top"
         case .dress: "Dress"
         case .pants: "Pants"
@@ -79,7 +83,7 @@ enum GarmentCategory: String, CaseIterable, Hashable {
     /// Shown when the scan has no image for the garment.
     var symbol: String {
         switch self {
-        case .jacket, .top, .dress: "tshirt"
+        case .jacket, .tshirt, .top, .dress: "tshirt"
         case .pants, .shorts, .skirt, .bottoms: "figure.stand"
         case .shoes: "shoe"
         case .bag: "bag"
@@ -101,6 +105,8 @@ struct CatalogProduct: Identifiable, Hashable {
     let id: String
     let name: String
     let brand: String?
+    /// Where the listing is sold, e.g. "eBay · sellername". Nil for the sample catalog.
+    let retailer: String?
     let category: GarmentCategory
     let match: Match
     let image: ProductImage?
@@ -109,18 +115,22 @@ struct CatalogProduct: Identifiable, Hashable {
     /// Sizes in stock. Empty means unknown, not "one size".
     let sizes: [String]
     let retailerURL: URL?
+    /// Development/test data, not a real listing. Always labeled as such where shown.
+    let isFixture: Bool
 
-    init(id: String, name: String, brand: String? = nil, category: GarmentCategory, match: Match,
-         image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil) {
+    init(id: String, name: String, brand: String? = nil, retailer: String? = nil, category: GarmentCategory, match: Match,
+         image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil, isFixture: Bool = false) {
         self.id = id
         self.name = name
         self.brand = brand
+        self.retailer = retailer
         self.category = category
         self.match = match
         self.image = image
         self.price = price
         self.sizes = sizes
         self.retailerURL = retailerURL
+        self.isFixture = isFixture
     }
 }
 
@@ -146,19 +156,22 @@ struct WorkingLook {
         let detected: DetectedGarment
         /// Set after the user confirms a swap.
         var replacement: CatalogProduct?
+        /// The live retailer search's best listing for this garment, once one has arrived.
+        var retailerMatch: CatalogProduct?
 
         var id: UUID { detected.id }
         var isSwapped: Bool { replacement != nil }
 
-        /// What this piece would be bought as: the confirmed replacement, or the scan's best match.
-        var product: CatalogProduct? { replacement ?? detected.matches.first }
+        /// What this piece would be bought as: the confirmed replacement, the retailer match, or
+        /// the scan's best match.
+        var product: CatalogProduct? { replacement ?? retailerMatch ?? detected.matches.first }
 
         /// Alternatives the user can swap to, limited to this garment's category.
         var alternatives: [CatalogProduct] {
             detected.matches.filter { $0.category == detected.category }
         }
 
-        var displayName: String? { replacement?.name ?? detected.label ?? detected.matches.first?.name }
+        var displayName: String? { replacement?.name ?? retailerMatch?.name ?? detected.label ?? detected.matches.first?.name }
     }
 
     let scanID: UUID

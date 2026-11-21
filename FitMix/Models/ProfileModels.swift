@@ -155,7 +155,7 @@ nonisolated struct SizingPreferences: Codable, Equatable, Sendable {
     /// sizes that state the same system are matched (e.g. a saved "EU 41" never matches a bare "41").
     func preferredSize(among sizes: [String], for category: GarmentCategory) -> String? {
         switch category {
-        case .jacket, .top, .dress:
+        case .jacket, .tshirt, .top, .dress:
             guard let top else { return nil }
             return sizes.first { top.aliases.contains(Self.normalize($0)) }
         case .pants, .skirt, .shorts, .bottoms:

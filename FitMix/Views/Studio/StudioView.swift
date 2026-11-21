@@ -38,7 +38,8 @@ struct StudioView: View {
                                       zoom: { showZoom = true })
                         case .street:
                             HeroCapture(scan: scan, hero: hero, look: look, selectedID: studio.selectedPieceID,
-                                        lastSwap: studio.lastSwap, zoom: { showZoom = true })
+                                        lastSwap: studio.lastSwap, reserve: studio.isLiveLook ? 450 : 330,
+                                        zoom: { showZoom = true })
                         }
                         garments(look).padding(.top, 20)
                     }
@@ -66,10 +67,11 @@ struct StudioView: View {
         .sheet(isPresented: $addPhoto) {
             TryOnPhotoSheet { studio.setTryOnSource($0) }
         }
-        .onAppear { if studio.look?.pieces.isEmpty ?? true { mode = .street } }
+        .onAppear { if studio.isLiveLook || studio.look?.pieces.isEmpty ?? true { mode = .street } }
         .onChange(of: studio.lookNumber) {
-            // A new look opens on the try-on view when there's something to try on.
-            mode = (studio.look?.pieces.isEmpty ?? true) ? .street : .tryOn
+            // A new look opens on the try-on view when there's something to try on. A garment picked
+            // live opens on the outfit it came from.
+            mode = (studio.isLiveLook || studio.look?.pieces.isEmpty ?? true) ? .street : .tryOn
         }
         .alert("Live Twin isn't available yet", isPresented: $showLiveTwinInfo) {
             Button("OK", role: .cancel) {}
@@ -185,7 +187,7 @@ struct StudioView: View {
                     .tracking(0.9)
                     .foregroundStyle(AuthPalette.secondary)
                 Spacer()
-                if !look.pieces.isEmpty {
+                if !look.pieces.isEmpty, !studio.isLiveLook {
                     let selected = studio.selectedPiece
                     Button("Swap item") { swapPiece = selected }
                         .font(.system(size: 13, weight: .semibold))
@@ -205,6 +207,23 @@ struct StudioView: View {
             #endif
             if look.pieces.isEmpty {
                 NoGarmentsCard()
+            } else if studio.isLiveLook {
+                ScrollViewReader { reader in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(alignment: .top, spacing: 10) {
+                            ForEach(look.pieces) { piece in
+                                RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
+                                                  state: studio.matchStates[piece.id],
+                                                  select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
+                                                  retry: { studio.findMatch(for: piece.id) })
+                                    .containerRelativeFrame(.horizontal, count: 5, span: 3, spacing: 10)
+                                    .id(piece.id)
+                            }
+                        }
+                    }
+                    .scrollClipDisabled()
+                    .onAppear { if let id = studio.selectedPieceID { reader.scrollTo(id, anchor: .center) } }
+                }
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
@@ -285,6 +304,8 @@ private struct HeroCapture: View {
     var look: WorkingLook
     var selectedID: UUID?
     var lastSwap: (pieceID: UUID, category: GarmentCategory)?
+    /// Height kept free below the photo so the garment cards show without scrolling.
+    var reserve: CGFloat = 330
     var zoom: () -> Void
 
     private var selected: WorkingLook.Piece? { look.pieces.first { $0.id == selectedID } }
@@ -328,7 +349,7 @@ private struct HeroCapture: View {
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
         // Leave room for the look header and the garment row so they show without scrolling.
-        .containerRelativeFrame(.vertical) { length, _ in min(max(length - 330, 180), 520) }
+        .containerRelativeFrame(.vertical) { length, _ in min(max(length - reserve, 180), 520) }
         .background(AuthPalette.containerHigh)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(alignment: .topLeading) {
@@ -477,6 +498,164 @@ private struct GarmentCard: View {
         if let tag { parts.append(tag) }
         if case .none = piece.tileSource { parts.append("no image") }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// A garment from a live selection, with its retailer search. The card shows the retailer's own
+/// product photo once a listing arrives; the camera crop is search input only and isn't shown.
+private struct RetailerMatchCard: View {
+    var piece: WorkingLook.Piece
+    var selected: Bool
+    var state: RetailerMatchState?
+    var select: () -> Void
+    var retry: () -> Void
+
+    @Environment(\.openURL) private var openURL
+
+    private var category: GarmentCategory { piece.detected.category }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GarmentTile(source: tileSource, category: category)
+                .frame(maxWidth: .infinity)
+                .frame(height: 112)
+                .overlay {
+                    if state == .searching {
+                        ZStack {
+                            Color.white.opacity(0.55)
+                            VStack(spacing: 8) {
+                                ProgressView()
+                                Text("Finding a retailer match…")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(AuthPalette.onSurface)
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .accessibilityIdentifier("matchLoading")
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if let product, product.isFixture { TagPill(text: "Test fixture").padding(6) }
+                }
+            HStack(spacing: 6) {
+                Text(category.title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(selected ? AuthPalette.primary : AuthPalette.onSurface)
+                if let product {
+                    TagPill(text: product.match == .exact ? "Exact match" : "Similar match")
+                }
+                Spacer(minLength: 0)
+            }
+            details
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(selected ? AuthPalette.primaryContainer : AuthPalette.containerHigh, lineWidth: selected ? 2.5 : 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .onTapGesture(perform: select)
+        // Contain, not combine, so View listing and Retry stay their own buttons for VoiceOver.
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityAction(named: "Select \(category.title)", select)
+        .accessibilityIdentifier("garment-\(category.rawValue)")
+    }
+
+    private var product: CatalogProduct? {
+        if case .found(let product) = state { return product }
+        return nil
+    }
+
+    private var tileSource: GarmentTile.Source {
+        product.map { $0.image.tileSource } ?? .none
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        switch state {
+        case .found(let product):
+            VStack(alignment: .leading, spacing: 3) {
+                Text(product.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AuthPalette.onSurface)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("matchName")
+                if let retailer = product.retailer {
+                    Text(retailer).font(.system(size: 12)).foregroundStyle(AuthPalette.secondary).lineLimit(1)
+                }
+                if let price = product.price {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(price.formatted).font(.system(size: 15, weight: .bold)).foregroundStyle(AuthPalette.onSurface)
+                        Text(price.currencyCode).font(.system(size: 11, weight: .semibold)).foregroundStyle(AuthPalette.secondary)
+                    }
+                    .accessibilityIdentifier("matchPrice")
+                } else {
+                    Text("Price unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
+                        .accessibilityIdentifier("matchPrice")
+                }
+                if let url = product.retailerURL {
+                    Button { openURL(url) } label: {
+                        Label("View listing", systemImage: "arrow.up.right.square")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(minHeight: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AuthPalette.primary)
+                    .accessibilityHint("Opens the listing at \(product.retailer ?? "the retailer")")
+                    .accessibilityIdentifier("viewListing")
+                }
+            }
+        case .searching:
+            Text("Searching retailers for \(category.searchNoun) only.")
+                .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .noMatch:
+            VStack(alignment: .leading, spacing: 3) {
+                Text("No match found").font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                Text("No retailer listing looked like \(category.searchNoun). Try scanning again closer up.")
+                    .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityIdentifier("noMatch")
+        case .failed(let message, let retryable):
+            VStack(alignment: .leading, spacing: 4) {
+                Label(retryable ? "Search failed" : "Search unavailable", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AuthPalette.onSurface)
+                Text(message).font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if retryable {
+                    Button(action: retry) {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(minHeight: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AuthPalette.primary)
+                    .accessibilityIdentifier("retryMatch")
+                }
+            }
+            .accessibilityIdentifier("matchError")
+        case nil:
+            Text("Tap to find \(category.searchNoun) at retailers.")
+                .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private extension GarmentCategory {
+    /// "this jacket", "these pants".
+    var searchNoun: String {
+        switch self {
+        case .pants, .shoes, .shorts: "these \(title.lowercased())"
+        case .tshirt: "this T-shirt"
+        default: "this \(title.lowercased())"
+        }
     }
 }
 
