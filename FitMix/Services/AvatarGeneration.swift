@@ -7,9 +7,15 @@ nonisolated struct BackendConfig: Sendable, Equatable {
     /// A shared secret the backend may ask for. It is not the OpenAI key.
     var token: String?
 
-    /// The hosted backend. Set this once the backend is deployed; until then only builds made on a Mac running
-    /// `Backend/run.sh` can generate avatars.
-    static let production: BackendConfig? = nil
+    /// The hosted backend, from Info.plist: `FitMixBackendURL` (and optional `FitMixBackendToken`). Release builds use
+    /// only this. Until it's set, only Debug builds made on a Mac running `Backend/run.sh` reach a backend.
+    static let production: BackendConfig? = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        guard let text = (info["FitMixBackendURL"] as? String)?.trimmingCharacters(in: .whitespaces), !text.isEmpty,
+              let url = URL(string: text), url.scheme == "https" || url.scheme == "http" else { return nil }
+        let token = (info["FitMixBackendToken"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return BackendConfig(baseURL: url, token: token)
+    }()
 
     /// Debug builds made after `Backend/run.sh` carry `Backend.local.json` (ignored by Git), which points at
     /// the backend on the developer's Mac. Release builds only ever use `production`.

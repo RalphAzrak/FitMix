@@ -266,6 +266,7 @@ struct StudioView: View {
                             ForEach(look.pieces) { piece in
                                 RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
                                                   state: studio.matchStates[piece.id],
+                                                  crop: studio.cropPreviews[piece.id],
                                                   moreCount: max(0, (studio.matchLists[piece.id]?.count ?? 0) - 1),
                                                   select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
                                                   retry: { studio.findMatch(for: piece.id) },
@@ -512,12 +513,14 @@ private struct GarmentCard: View {
     }
 }
 
-/// A garment from a live selection, with its retailer search. The card shows the retailer's own
-/// product photo once a listing arrives; the camera crop is search input only and isn't shown.
+/// A garment from a live selection, with its retailer search. The card shows the garment the user tapped
+/// while it searches, then the retailer's own product photo with the tapped garment kept beside it.
 private struct RetailerMatchCard: View {
     var piece: WorkingLook.Piece
     var selected: Bool
     var state: RetailerMatchState?
+    /// The garment crop the user tapped (the search input).
+    var crop: UIImage?
     /// How many other ranked listings there are.
     var moreCount: Int = 0
     var select: () -> Void
@@ -534,19 +537,33 @@ private struct RetailerMatchCard: View {
             GarmentTile(source: tileSource, category: category)
                 .frame(maxWidth: .infinity)
                 .frame(height: 112)
-                .overlay {
+                .overlay(alignment: .bottom) {
+                    // The tapped garment stays fully visible while searching: only a small badge on top.
                     if state == .searching {
-                        ZStack {
-                            Color.white.opacity(0.55)
-                            VStack(spacing: 8) {
-                                ProgressView()
-                                Text("Finding a retailer match…")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(AuthPalette.onSurface)
-                            }
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("Finding a match…")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(AuthPalette.onSurface)
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .padding(.horizontal, 8).frame(minHeight: 24)
+                        .background(.white.opacity(0.92), in: Capsule())
+                        .padding(6)
+                        .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("matchLoading")
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    // Once a listing is shown, the tapped garment stays beside it for comparison.
+                    if product != nil, let crop {
+                        Image(uiImage: crop)
+                            .resizable().scaledToFill()
+                            .frame(width: 34, height: 34)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(.white, lineWidth: 2))
+                            .padding(5)
+                            .accessibilityLabel("Your scanned \(category.title.lowercased())")
+                            .accessibilityIdentifier("scannedCrop")
                     }
                 }
                 .overlay(alignment: .topLeading) {
@@ -586,7 +603,8 @@ private struct RetailerMatchCard: View {
     }
 
     private var tileSource: GarmentTile.Source {
-        product.map { $0.image.tileSource } ?? .none
+        if let product { return product.image.tileSource }
+        return crop.map(GarmentTile.Source.image) ?? .none
     }
 
     @ViewBuilder
@@ -656,6 +674,36 @@ private struct RetailerMatchCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityIdentifier("noMatch")
+        case .noCloseMatch:
+            Text("No close match found")
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                .accessibilityIdentifier("noCloseMatch")
+        case .lensFailed(let detail):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Couldn't search. Try again.")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                #if DEBUG
+                Text(detail).font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                #endif
+                Button(action: retry) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(minHeight: 36)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(AuthPalette.primary)
+                .accessibilityIdentifier("retryMatch")
+            }
+            .accessibilityIdentifier("lensError")
+        case .searchLimitReached:
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Search limit reached").font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                Text("FitMix has used this month's product searches. Try again next month.")
+                    .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityIdentifier("searchLimit")
         case .failed(let message, let retryable):
             VStack(alignment: .leading, spacing: 4) {
                 Label(retryable ? "Search failed" : "Search unavailable", systemImage: "exclamationmark.triangle.fill")
