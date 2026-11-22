@@ -24,6 +24,7 @@ struct StudioView: View {
     @State private var addPhoto = false
     @State private var matchListPiece: WorkingLook.Piece?
     @State private var needsAvatar = false
+    @State private var showBudget = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +34,9 @@ struct StudioView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         lookHeader.padding(.top, 10).padding(.bottom, 8)
                         heroArea(scan: scan, hero: hero, look: look)
+                        if studio.isLiveLook, let product = studio.selectedPiece?.product {
+                            selectedProduct(product).padding(.top, 12)
+                        }
                         garments(look).padding(.top, 18)
                     }
                     .padding(.horizontal, 16)
@@ -45,12 +49,14 @@ struct StudioView: View {
         }
         .background(Color.fmBackground.ignoresSafeArea())
         .preferredColorScheme(.light)
+        .sheet(isPresented: $showBudget) { OutfitBudgetSheet(cap: studio.outfitBudget, save: studio.setBudget) }
         .sheet(item: $swapPiece) { SwapPickerSheet(piece: $0) }
         .sheet(item: $matchListPiece) { piece in
             MatchListSheet(category: piece.detected.category, listings: studio.matchLists[piece.id] ?? [],
                            chosenID: studio.matchStates[piece.id].flatMap { if case .found(let p) = $0 { p.id } else { nil } }) { product in
-                studio.chooseListing(product, for: piece.id)
+                guard studio.chooseListing(product, for: piece.id) else { return false }
                 matchListPiece = nil
+                return true
             }
         }
         #if DEBUG
@@ -234,6 +240,27 @@ struct StudioView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    private func selectedProduct(_ product: CatalogProduct) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            GarmentTile(source: product.image.tileSource, category: product.category)
+                .frame(width: 62, height: 62)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(product.name).font(.system(size: 14, weight: .semibold))
+                Text(product.visualMatchLabel)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(AuthPalette.primary)
+                if let retailer = product.retailer, let price = product.price {
+                    Text("\(retailer) · \(price.formatted) \(price.currencyCode)")
+                        .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("studioSelectedProduct")
+    }
+
     // MARK: Garments
 
     private func garments(_ look: WorkingLook) -> some View {
@@ -267,7 +294,7 @@ struct StudioView: View {
                                 RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
                                                   state: studio.matchStates[piece.id],
                                                   crop: studio.cropPreviews[piece.id],
-                                                  moreCount: max(0, (studio.matchLists[piece.id]?.count ?? 0) - 1),
+                                                  moreCount: studio.matchLists[piece.id]?.filter { $0.id != piece.product?.id }.count ?? 0,
                                                   select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
                                                   retry: { studio.findMatch(for: piece.id) },
                                                   showMore: { matchListPiece = piece },
@@ -307,9 +334,42 @@ struct StudioView: View {
                 Text(look.pieces.count == 1 ? "1 piece" : "\(look.pieces.count) pieces")
                     .font(.system(size: 15)).foregroundStyle(Color.fmSecondary)
                 Spacer()
-                PriceSummary(look: look)
+                if studio.outfitBudget == nil || !studio.isLiveLook { PriceSummary(look: look) }
             }
             .accessibilityElement(children: .combine)
+            if studio.isLiveLook {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let cap = studio.outfitBudget {
+                            let subtotal = Price(amount: studio.budgetSubtotal, currencyCode: OutfitBudget.currency)
+                            let limit = Price(amount: cap, currencyCode: OutfitBudget.currency)
+                            Text("\(subtotal.formatted) of \(limit.formatted) CAD")
+                                .font(.system(size: 14, weight: .semibold))
+                                .accessibilityIdentifier("budgetSubtotal")
+                            if studio.isExpandingBudget {
+                                Label("Checking lower-priced listings", systemImage: "magnifyingglass")
+                            } else if !studio.missingBudgetPieces.isEmpty {
+                                Text("Missing: \(studio.missingBudgetPieces.map(\.title).joined(separator: ", "))")
+                                    .accessibilityIdentifier("budgetMissing")
+                            }
+                            if studio.budgetSearchFailed {
+                                Button("Retry budget search", action: studio.retryBudgetSearch)
+                            }
+                        }
+                        Text("Before tax and shipping")
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(AuthPalette.secondary)
+                    Spacer(minLength: 0)
+                    Button { showBudget = true } label: {
+                        Label("Budget", systemImage: "dollarsign.circle")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(minHeight: 34)
+                    }
+                    .foregroundStyle(AuthPalette.primary)
+                    .accessibilityIdentifier("outfitBudgetButton")
+                }
+            }
             HStack(spacing: 12) {
                 Button(action: openCamera) {
                     Label("Camera", systemImage: "camera")
@@ -573,10 +633,6 @@ private struct RetailerMatchCard: View {
                 Text(category.title)
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(selected ? AuthPalette.primary : AuthPalette.onSurface)
-                if let product {
-                    TagPill(text: product.matchLabel)
-                        .accessibilityIdentifier("matchLabel")
-                }
                 Spacer(minLength: 0)
             }
             details
@@ -612,6 +668,9 @@ private struct RetailerMatchCard: View {
         switch state {
         case .found(let product):
             VStack(alignment: .leading, spacing: 3) {
+                Text(product.visualMatchLabel)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(AuthPalette.primary)
+                    .accessibilityIdentifier("matchLabel")
                 Text(product.name)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AuthPalette.onSurface)
@@ -667,67 +726,48 @@ private struct RetailerMatchCard: View {
                 .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         case .noMatch:
-            VStack(alignment: .leading, spacing: 3) {
-                Text("No match found").font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
-                Text("No retailer listing looked like \(category.searchNoun). Try scanning again closer up.")
-                    .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .accessibilityIdentifier("noMatch")
-        case .noCloseMatch:
-            Text("No close match found")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
-                .accessibilityIdentifier("noCloseMatch")
-        case .lensFailed(let detail):
             VStack(alignment: .leading, spacing: 4) {
-                Text("Couldn't search. Try again.")
-                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
-                #if DEBUG
-                Text(detail).font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                #endif
-                Button(action: retry) {
-                    Label("Retry", systemImage: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(minHeight: 36)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(AuthPalette.primary)
-                .accessibilityIdentifier("retryMatch")
+                Text("No retailer match found")
+                    .font(.system(size: 13, weight: .semibold))
+                    .accessibilityIdentifier("noMatch")
+                retryButton
             }
-            .accessibilityIdentifier("lensError")
-        case .searchLimitReached:
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Search limit reached").font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
-                Text("FitMix has used this month's product searches. Try again next month.")
-                    .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        case .budgetMissing:
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Missing from this budget")
+                    .font(.system(size: 13, weight: .semibold))
+                Button("View alternatives", action: showMore)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AuthPalette.primary)
             }
-            .accessibilityIdentifier("searchLimit")
         case .failed(let message, let retryable):
             VStack(alignment: .leading, spacing: 4) {
                 Label(retryable ? "Search failed" : "Search unavailable", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AuthPalette.onSurface)
+                    .accessibilityIdentifier("matchError")
                 Text(message).font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if retryable {
-                    Button(action: retry) {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(minHeight: 36)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AuthPalette.primary)
-                    .accessibilityIdentifier("retryMatch")
+                    retryButton
                 }
             }
-            .accessibilityIdentifier("matchError")
         case nil:
             Text("Tap to find \(category.searchNoun) at retailers.")
                 .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var retryButton: some View {
+        Button(action: retry) {
+            Label("Retry", systemImage: "arrow.clockwise")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(minHeight: 36)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(AuthPalette.primary)
+        .accessibilityIdentifier("retryMatch")
     }
 }
 
@@ -747,7 +787,8 @@ private struct MatchListSheet: View {
     var category: GarmentCategory
     var listings: [CatalogProduct]
     var chosenID: String?
-    var choose: (CatalogProduct) -> Void
+    var choose: (CatalogProduct) -> Bool
+    @State private var swapRejected = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -755,13 +796,13 @@ private struct MatchListSheet: View {
     var body: some View {
         NavigationStack {
             List(listings) { product in
-                Button { choose(product) } label: {
+                Button { swapRejected = !choose(product) } label: {
                     HStack(alignment: .top, spacing: 12) {
                         GarmentTile(source: product.image.tileSource, category: category)
                             .frame(width: 72, height: 72)
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
-                                TagPill(text: product.matchLabel)
+                                TagPill(text: product.visualMatchLabel)
                                 if product.isFixture { TagPill(text: "Test fixture") }
                                 if product.id == chosenID {
                                     Image(systemName: "checkmark.circle.fill").foregroundStyle(AuthPalette.primaryContainer)
@@ -789,9 +830,13 @@ private struct MatchListSheet: View {
                     .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("choose-\(product.id)")
                 .accessibilityAddTraits(product.id == chosenID ? .isSelected : [])
             }
             .listStyle(.plain)
+            .alert("This swap exceeds your outfit budget", isPresented: $swapRejected) {
+                Button("OK", role: .cancel) {}
+            }
             .navigationTitle("Matches")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }

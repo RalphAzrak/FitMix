@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 
 /// Where the retailer search for one garment stands.
@@ -8,12 +9,7 @@ enum RetailerMatchState: Equatable {
     case noMatch
     /// The search failed. `retryable` when trying again may work (network, busy provider).
     case failed(String, retryable: Bool)
-    /// Google Lens answered with nothing close and usable.
-    case noCloseMatch
-    /// The Google Lens search failed; Retry runs it again. `detail` is shown in Debug builds only.
-    case lensFailed(detail: String)
-    /// The server's monthly Google Lens cap (or Scrappa's allowance) is used up. Retrying won't help.
-    case searchLimitReached
+    case budgetMissing
 }
 
 /// Owns the Studio session: the scan awaiting Outfit Review, the current scan (kept as the
@@ -42,13 +38,25 @@ final class StudioStore {
     private(set) var matchStates: [UUID: RetailerMatchState] = [:]
     /// Every ranked listing for a searched piece, best first. `.found` holds the one the user chose.
     private(set) var matchLists: [UUID: [CatalogProduct]] = [:]
+    private(set) var outfitBudget: Decimal?
+    private(set) var isExpandingBudget = false
+    private(set) var budgetSearchFailed = false
+    @ObservationIgnored private var searchIDs: [UUID: String] = [:]
+    @ObservationIgnored private var baseStates: [UUID: RetailerMatchState] = [:]
+    @ObservationIgnored private var pinned: [UUID: String] = [:]
+    @ObservationIgnored private var budgetTask: Task<Void, Never>?
+    @ObservationIgnored private var triedCap: Decimal?
+    @ObservationIgnored private var matchingStart: ContinuousClock.Instant?
+    @ObservationIgnored private var loggedFirst = false
+    @ObservationIgnored private var loggedSettled = false
+    private static let log = Logger(subsystem: "app.fitmix", category: "OutfitMatching")
+
     /// Listing photos downloaded for the on-device comparison, by listing id. Reused for try-on.
     @ObservationIgnored private var listingPhotos: [String: CGImage] = [:]
     /// The listing the user chose to try on their avatar, if any.
     private(set) var avatarTryOn: AvatarTryOn?
-    /// Crops used as search input only, never shown. Cut from the same frame as the scan image,
-    /// with the colour measured on the garment there.
-    @ObservationIgnored private var searchCrops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
+    /// The sharpest recent crop for each track, used for search and the comparison preview.
+    @ObservationIgnored private var searchCrops: [UUID: CGImage] = [:]
     /// The same crops, for display: a live card shows the garment the user tapped while it searches, and keeps
     /// it beside the retailer's photo once a match arrives.
     private(set) var cropPreviews: [UUID: UIImage] = [:]
@@ -111,6 +119,12 @@ final class StudioStore {
         cancelSearch()
         matchStates = [:]
         matchLists = [:]
+        baseStates = [:]
+        searchIDs = [:]
+        pinned = [:]
+        triedCap = nil
+        budgetSearchFailed = false
+        matchingStart = nil
         listingPhotos = [:]
         avatarTryOn = nil
         searchCrops = [:]
@@ -132,16 +146,17 @@ final class StudioStore {
     }
 
     /// Camera → Studio: the user tapped one garment in the live feed. Opens a look on that frame
-    /// (shown whole, as the reference), with every garment detected in the same frame and the tapped
+    /// (shown whole, as the reference), with each stable garment track and the tapped
     /// one selected, and starts a product search for every garment with a usable crop.
     func openLive(_ selection: LiveGarmentSelection, tryOnSource: UIImage?) {
+        let confirmedAt = ContinuousClock.now
         let frame = UIImage(cgImage: selection.frame, scale: 1, orientation: .up)
-        var crops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
+        var crops: [UUID: CGImage] = [:]
         var selectedID: UUID?
         let garments = selection.garments.map { garment in
             // No cutout or crop on the garment: cards show the retailer's photo, not the camera's.
             let detected = DetectedGarment(category: garment.category, bounds: garment.bounds)
-            crops[detected.id] = (garment.crop, garment.color)
+            crops[detected.id] = garment.crop
             if garment.category == selection.selected { selectedID = detected.id }
             return detected
         }
@@ -152,8 +167,11 @@ final class StudioStore {
         #endif
         open(scan, tryOnSource: tryOnSource)
         isLiveLook = true
+        matchingStart = confirmedAt
+        loggedFirst = false
+        loggedSettled = false
         searchCrops = crops
-        cropPreviews = crops.mapValues { UIImage(cgImage: $0.image) }
+        cropPreviews = crops.mapValues { UIImage(cgImage: $0) }
         if let selectedID { selectedPieceID = selectedID }
         // The tapped garment first, then the others in their card order.
         let ids = look?.pieces.map(\.id) ?? []
@@ -170,64 +188,191 @@ final class StudioStore {
         guard isLiveLook, let crop = searchCrops[pieceID], let scanID = scan?.id,
               let piece = look?.pieces.first(where: { $0.id == pieceID }) else { return }
         searchTasks[pieceID]?.cancel()
-        guard Self.searchableCategories.contains(piece.detected.category),
-              min(crop.image.width, crop.image.height) >= Self.minimumCropSide else {
-            matchStates[pieceID] = .failed("This garment's crop is too small to search. Scan a little closer.", retryable: false)
+        budgetTask?.cancel()
+        budgetTask = nil
+        isExpandingBudget = false
+        searchIDs[pieceID] = nil
+        triedCap = nil
+        if min(crop.width, crop.height) < Self.minimumCropSide ||
+            !Self.searchableCategories.contains(piece.detected.category) {
+            baseStates[pieceID] = .failed("This garment’s crop is too small. Scan a little closer.", retryable: false)
+            updateSelections()
+            logMatchingProgress()
             return
         }
         let token = UUID()
         searchTokens[pieceID] = token
-        matchStates[pieceID] = .searching
+        baseStates[pieceID] = .searching
+        if matchLists[pieceID]?.isEmpty != false { matchStates[pieceID] = .searching }
         let category = piece.detected.category
         let searcher = self.searcher
         searchTasks[pieceID] = Task { [weak self] in
-            let state: RetailerMatchState
-            var ranked: [CatalogProduct] = []
-            var photos: VisualReranker.Photos = [:]
-            if let request = await GarmentSearchInput.make(category: category, crop: crop.image, measuredColor: crop.color) {
+            var state: RetailerMatchState = .failed("This garment’s image couldn’t be prepared.", retryable: false)
+            var products: [CatalogProduct] = []
+            var searchID: String?
+            if let request = await GarmentSearchInput.make(category: category, crop: crop),
+               !Task.isCancelled {
                 do {
                     switch try await searcher.search(request) {
-                    case .noMatch: state = .noMatch
-                    case .lensNoMatch: state = .noCloseMatch
-                    case .lensMatch(let listing):
-                        // One listing, already filtered to this category with a link and a photo: shown as is.
-                        let product = Self.product(from: listing, category: category)
-                        ranked = [product]
-                        state = .found(product)
+                    case .outfit(let id, let listings):
+                        searchID = id
+                        products = listings.map { Self.product(from: $0, category: category) }
                     case .matches(let listings):
-                        // The backend already limited listings to this category; order within each label
-                        // by how the listing photos compare with the crop.
-                        let reranked = await VisualReranker.rerank(listings, crop: crop.image)
-                        photos = reranked.photos
-                        ranked = reranked.listings.map { Self.product(from: $0, category: category) }
-                        state = ranked.first.map(RetailerMatchState.found) ?? .noMatch
+                        products = listings.map { Self.product(from: $0, category: category) }
+                    case .noMatch: break
                     }
+                    state = products.first.map(RetailerMatchState.found) ?? .noMatch
                 } catch is CancellationError {
                     return
-                } catch RetailerSearchError.lensFailed(let detail) {
-                    state = .lensFailed(detail: detail)
-                } catch RetailerSearchError.searchLimitReached {
-                    state = .searchLimitReached
                 } catch let error as RetailerSearchError {
                     state = .failed(error.localizedDescription, retryable: error.isRetryable)
                 } catch {
-                    state = .failed(error.localizedDescription, retryable: true)
+                    state = .failed("Retailer search is unavailable. Try again.", retryable: true)
                 }
-            } else {
-                state = .failed("This garment's image couldn't be prepared for search.", retryable: false)
             }
             guard let self, !Task.isCancelled, self.searchTokens[pieceID] == token, self.scan?.id == scanID else { return }
-            self.matchLists[pieceID] = ranked
-            self.listingPhotos.merge(photos) { new, _ in new }
-            self.apply(state, to: pieceID)
+            self.searchIDs[pieceID] = searchID
+            self.matchLists[pieceID] = products
+            self.baseStates[pieceID] = state
+            self.searchTokens[pieceID] = nil
+            self.searchTasks[pieceID] = nil
+            if let choice = self.pinned[pieceID], !products.contains(where: { $0.id == choice }) { self.pinned[pieceID] = nil }
+            self.updateSelections()
+            self.expandBudgetIfNeeded()
+            self.logMatchingProgress()
         }
     }
 
-    /// The user picked another listing from the ranked list for this piece.
-    func chooseListing(_ product: CatalogProduct, for pieceID: UUID) {
-        guard matchLists[pieceID]?.contains(product) == true else { return }
-        apply(.found(product), to: pieceID)
-        if avatarTryOn?.pieceID == pieceID { avatarTryOn = nil; refreshPreview() }
+    var budgetSubtotal: Decimal {
+        look?.pieces.compactMap { $0.product?.price }
+            .filter { $0.currencyCode == OutfitBudget.currency }.reduce(0) { $0 + $1.amount } ?? 0
+    }
+
+    var missingBudgetPieces: [GarmentCategory] {
+        look?.pieces.filter { $0.product == nil }.map { $0.detected.category } ?? []
+    }
+
+    func setBudget(_ cap: Decimal?) {
+        guard outfitBudget != cap else { return }
+        outfitBudget = cap
+        pinned = [:]
+        triedCap = nil
+        budgetSearchFailed = false
+        budgetTask?.cancel()
+        budgetTask = nil
+        isExpandingBudget = false
+        updateSelections()
+        expandBudgetIfNeeded()
+    }
+
+    func retryBudgetSearch() {
+        triedCap = nil
+        expandBudgetIfNeeded()
+    }
+
+    /// A rejected choice leaves both Studio and the shopping review unchanged.
+    func chooseListing(_ product: CatalogProduct, for pieceID: UUID) -> Bool {
+        guard matchLists[pieceID]?.contains(product) == true else { return false }
+        if let cap = outfitBudget {
+            guard let price = product.price, price.currencyCode == OutfitBudget.currency else { return false }
+            let old = look?.pieces.first(where: { $0.id == pieceID })?.product?.price?.amount ?? 0
+            guard budgetSubtotal - old + price.amount <= cap else { return false }
+        }
+        pinned[pieceID] = product.id
+        updateSelections()
+        return true
+    }
+
+    private func updateSelections() {
+        guard var look, isLiveLook else { return }
+        let groups = look.pieces.map { matchLists[$0.id] ?? [] }
+        var choices = look.pieces.indices.map { index in
+            groups[index].first { $0.id == pinned[look.pieces[index].id] }
+        }
+        if let cap = outfitBudget {
+            let fixedCost = choices.compactMap { $0?.price?.amount }.reduce(0, +)
+            let options = groups.indices.map { index in
+                choices[index] == nil ? groups[index].compactMap { product -> OutfitBudget.Option? in
+                    guard let price = product.price, price.currencyCode == OutfitBudget.currency else { return nil }
+                    return OutfitBudget.Option(id: product.id, price: price.amount, score: product.visualScore ?? 0)
+                } : []
+            }
+            let plan = OutfitBudget.select(options, cap: cap - fixedCost)
+            for index in choices.indices where choices[index] == nil {
+                choices[index] = groups[index].first { $0.id == plan[index] }
+            }
+        } else {
+            for index in choices.indices where choices[index] == nil { choices[index] = groups[index].first }
+        }
+        for index in look.pieces.indices {
+            let id = look.pieces[index].id
+            let chosen = choices[index]
+            look.pieces[index].retailerMatch = chosen
+            if let chosen { matchStates[id] = .found(chosen) }
+            else if !groups[index].isEmpty, outfitBudget != nil { matchStates[id] = .budgetMissing }
+            else { matchStates[id] = baseStates[id] }
+        }
+        self.look = look
+        if let avatarTryOn, look.pieces.first(where: { $0.id == avatarTryOn.pieceID })?.product?.id != avatarTryOn.listingID {
+            self.avatarTryOn = nil
+            refreshPreview()
+        }
+    }
+
+    private func expandBudgetIfNeeded() {
+        guard let cap = outfitBudget, let look, searchTokens.isEmpty, !missingBudgetPieces.isEmpty,
+              !isExpandingBudget, triedCap != cap else { return }
+        let requests = look.pieces.compactMap { piece -> (UUID, GarmentCategory, String)? in
+            searchIDs[piece.id].map { (piece.id, piece.detected.category, $0) }
+        }
+        guard !requests.isEmpty else { return }
+        triedCap = cap
+        isExpandingBudget = true
+        budgetSearchFailed = false
+        let scanID = look.scanID
+        let searcher = self.searcher
+        budgetTask = Task { [weak self] in
+            await withTaskGroup(of: (UUID, GarmentCategory, [RetailerListing]?).self) { group in
+                for (id, category, searchID) in requests {
+                    group.addTask {
+                        let results = try? await searcher.cheaperListings(category: category, searchID: searchID, cap: cap)
+                        return (id, category, results)
+                    }
+                }
+                for await (id, category, results) in group {
+                    guard !Task.isCancelled, let self, self.scan?.id == scanID, self.outfitBudget == cap else { return }
+                    if let results {
+                        let existing = self.matchLists[id] ?? []
+                        let known = Set(existing.map(\.id))
+                        self.matchLists[id] = existing + results.filter { !known.contains($0.id) }
+                            .map { Self.product(from: $0, category: category) }
+                        self.updateSelections()
+                    } else {
+                        self.budgetSearchFailed = true
+                    }
+                }
+            }
+            guard !Task.isCancelled, let self, self.scan?.id == scanID, self.outfitBudget == cap else { return }
+            self.isExpandingBudget = false
+            self.budgetTask = nil
+            self.logMatchingProgress()
+        }
+    }
+
+    private func logMatchingProgress() {
+        guard let matchingStart, let look else { return }
+        let matched = look.pieces.filter { $0.product != nil }.count
+        let elapsed = matchingStart.duration(to: .now).components
+        let ms = Int(elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000)
+        if !loggedFirst, matched > 0 {
+            loggedFirst = true
+            Self.log.info("First outfit product card in \(ms, privacy: .public) ms")
+        }
+        if !loggedSettled, searchTokens.isEmpty, !isExpandingBudget,
+           look.pieces.allSatisfy({ baseStates[$0.id] != nil }) {
+            loggedSettled = true
+            Self.log.info("Outfit matching settled in \(ms, privacy: .public) ms (\(matched, privacy: .public)/\(look.pieces.count, privacy: .public) garments)")
+        }
     }
 
     /// "Try on my avatar": hands the chosen listing (id, category, product photo) and the user's full-body
@@ -249,7 +394,7 @@ final class StudioStore {
         refreshPreview()
         if handoff.productImage == nil, let url {
             Task { [weak self] in
-                guard let photo = await VisualReranker.download(url, session: .shared) else { return }
+                guard let photo = await ListingPhoto.download(url, session: .shared) else { return }
                 guard let self, self.avatarTryOn?.listingID == handoff.listingID else { return }
                 self.listingPhotos[handoff.listingID] = photo
                 self.avatarTryOn?.productImage = UIImage(cgImage: photo)
@@ -259,17 +404,11 @@ final class StudioStore {
         return true
     }
 
-    private func apply(_ state: RetailerMatchState, to pieceID: UUID) {
-        matchStates[pieceID] = state
-        searchTokens[pieceID] = nil
-        searchTasks[pieceID] = nil
-        guard var look, let index = look.pieces.firstIndex(where: { $0.id == pieceID }) else { return }
-        if case .found(let product) = state { look.pieces[index].retailerMatch = product } else { look.pieces[index].retailerMatch = nil }
-        self.look = look
-    }
-
     /// Stops every running search (a new look is opening).
     private func cancelSearch() {
+        budgetTask?.cancel()
+        budgetTask = nil
+        isExpandingBudget = false
         searchTasks.values.forEach { $0.cancel() }
         searchTasks = [:]
         // A search cut short goes back to "not searched", rather than spinning forever.
@@ -282,7 +421,7 @@ final class StudioStore {
                        category: category, match: listing.tier == .exact ? .exact : listing.tier == .brand ? .brand : .similar,
                        image: listing.imageURL.map(ProductImage.remote),
                        price: listing.price.flatMap { amount in listing.currency.map { Price(amount: amount, currencyCode: $0) } },
-                       retailerURL: listing.listingURL, isFixture: listing.isFixture, evidence: listing.evidence)
+                       retailerURL: listing.listingURL, isFixture: listing.isFixture, evidence: listing.evidence, visualScore: listing.visualScore)
     }
 
     /// The user added their photo from Studio. Renders the current look on it.
@@ -311,7 +450,7 @@ final class StudioStore {
         guard isLiveLook else { return }
         switch matchStates[id] {
         case nil: findMatch(for: id)
-        case .searching, .found, .noMatch, .failed, .noCloseMatch, .lensFailed, .searchLimitReached: break
+        case .searching, .found, .noMatch, .failed, .budgetMissing: break
         }
     }
 

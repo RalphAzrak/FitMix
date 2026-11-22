@@ -14,17 +14,14 @@ garment only. There is no shutter.
    frames. It is smoothed between frames and cleared once it has been out of view for 0.6 s. Frames much
    blurrier than recent ones don't replace the detections, so a tap always uses a recent sharp frame.
    **Tap to Isolate** shows when at least one target is ready.
-4. **Tap** (`CameraController.select`). The tapped garment is cut from **the exact frame it was detected in**,
-   along with every other garment detected in that frame. The camera stops and Studio opens
-   (`StudioStore.openLive`).
-5. **Studio**. The large image is that whole frame, with the tapped garment outlined. Layers & Garments shows
-   the garments from that frame with the tapped one selected, and its card starts a retailer search right
-   away. Tapping another card searches for that garment instead. Any search still running is cancelled, and
-   its result is dropped even if it arrives late (each search has a token).
-6. **Search**, only after the tap (`RetailerSearch.swift` → `POST /v1/garment-match`). The phone sends only the
-   selected garment's crop (JPEG, long edge ≤ 640 px, no metadata), its category, and the clues it read on-device
-   (`GarmentClues`). Full frames, profile photos and avatar images are never sent. The backend holds every
-   provider credential.
+4. **Tap** (`CameraController.select`). Studio keeps the tapped target's full frame as the outfit reference.
+   The analyzer compares recent crops from each stable garment track and takes its clearest one.
+5. **Studio** (`StudioStore.openLive`). Layers & Garments shows all captured tracks with the tapped garment
+   selected. Each card starts its own lookup and updates as the results arrive. A replacement scan cancels
+   the old work and rejects late responses.
+6. **Search** (`RetailerSearch.swift` → `POST /v1/outfit-match`). The phone sends one JPEG crop per garment
+   (long edge ≤ 640 px, no metadata), its category and text for product-code verification. The full outfit
+   frame stays on the phone. Provider credentials stay on the backend.
 
 ## Overlays and taps
 
@@ -92,75 +89,25 @@ matching chroma, and a dark T-shirt under a black jacket is still separated, by 
 
 ## Product match
 
-**Google Lens via Scrappa is the product search** (Debug and Release). When Studio Fit opens after a scan, every
-garment with a usable crop (jacket, T-shirt, pants or shoes, at least 48 px a side) gets its own
-`POST /v1/lens-search`, all side by side (`StudioStore.openLive` → `findMatch`, `LensRetailerSearch`). Each card:
+Studio chooses the clearest crop for each stable garment from up to four recent detections. Each
+crop goes to `POST /v1/outfit-match` independently. OpenAI describes the garment, then scores a batch
+of Canadian retailer listings on color, cut, pattern, and distinctive details. A verified retailer
+SKU or barcode matching a visible code earns **Exact match**. Otherwise Studio shows the highest-scoring
+listing as **Closest match**. **More matches** opens the alternatives. Changing the listing also updates
+the selected-product summary and shopping review.
 
-- shows that garment's original crop with a **Finding a match…** badge while its search runs;
-- then the best credible listing: the retailer's product photo (with the crop kept as a small inset), name, retailer,
-  price or **Price unavailable**, **View listing** (opens the listing), labeled **Similar match**;
-- or **No close match found** when Lens returns nothing usable for that category;
-- or **Couldn't search. Try again.** with **Retry** when the request fails (Debug builds also show the server's code);
-- or **Search limit reached** when the server's monthly cap or Scrappa's credits are used up (no Retry).
+**Budget** sets one cap in CAD. Studio maximizes the number of included garments and then total
+visual similarity. When necessary it searches for lower-priced alternatives using the original
+garment descriptions. An over-budget swap is blocked before it changes the look.
 
-One garment's failure doesn't affect the others, and a garment already answered isn't searched again for that look.
-The server caches answers per crop, joins duplicate in-flight requests and caps monthly calls (see Backend/README.md),
-so reopening Studio or retrying doesn't spend extra credits. Release builds find the backend through Info.plist
-`FitMixBackendURL` (and optional `FitMixBackendToken`); Debug builds use `FITMIX_BACKEND_URL` or the
-`Backend.local.json` that `Backend/run.sh` writes.
-
-The labels below come from the older `/v1/garment-match` search (eBay and others), which the app no longer calls:
-
-- **Exact match**: corroborated. A product code read on the garment matches the listing, or the brand, model name and
-  colour read on the garment all match, or the visual search found the same image on the listing and the brand is
-  supported.
-- **Likely from [brand]**: only the brand is supported, read on the garment or agreed on by at least 4 of the top 6
-  visual matches.
-- **Similar match**: the closest real alternative.
-
-Every photo, price, currency and link comes from the listing (provider data, then the listing page's own schema.org
-data). A missing price reads **Price unavailable**. **More matches (N)** lists every ranked listing with the evidence
-behind its label, and choosing one makes it the card's listing.
-
-The backend orders listings by label, then provider rank and shared clues. On the phone, `VisualReranker` downloads the
-top 6 listing photos, lifts the subject out of each and out of the crop (Vision foreground mask), and nudges the order
-within a label by subject colour and feature-print likeness. On the test photos this correctly put a white tee above
-black and green tees. It could not tell Converse models apart, so it's kept as a small nudge, never a label.
-
-What the phone reads (`GarmentClues`): words and codes printed on the garment, colour (measured on the person's pixels
-when the garment was detected), pattern (polka dots, leopard, or text print) and style (sneaker, boot, heel, loafer,
-sandal, hoodie, suit, jeans). Limits: Vision can't read curved or stylised logo text (the Converse patch read nothing),
-and it has no stripes, plaid or logo detection. Those depend on the visual search provider.
-
-### Providers
-
-| Provider | State |
-| --- | --- |
-| eBay Browse API (official) | As before; one provider among several. Needs keys. |
-| Google Lens via Scrappa | **The app's product search** (`/v1/lens-search`). Needs `SCRAPPA_API_KEY` and an https `FITMIX_PUBLIC_BASE_URL` on the backend. |
-| Fixtures | Labeled test data for development. |
-
-**Scrappa evaluation.** Sources: scrappa.co Lens API page, pricing, privacy policy and terms, read 21 Nov 2026.
-- **Upload contract:** `GET https://scrappa.co/api/google/lens?url=<public https image URL>&type=all|products|exact_matches|visual_matches`,
-  with an `X-API-KEY` header. The page also lists a POST upload, but its FAQ says "No. The endpoint accepts a public
-  HTTPS image URL", and the upload docs couldn't be read. So FitMix publishes the crop at a short-lived, unguessable URL
-  on its own server (90 s, 3 fetches, revoked after the search).
-- **Response:** `visual_matches`, `exact_matches`, `related_content`. Items have `title`, `link` (a google.com/goto
-  redirect), `source`, `thumbnail`, `price` (display text only, no currency field) and `position`.
-- **Price coverage:** "only filled when Google Lens displays them". A bare "$" is ambiguous, so FitMix takes prices
-  with a clear currency marker only, and otherwise reads the listing page.
-- **Data handling:** not stated for API inputs. There's no retention period for submitted images or URLs, no GDPR or
-  data-processing terms, and nothing on what goes to Google. The controller is Marin Solutions UG, Berlin.
-- **Cost:** $0.20 per 1,000 requests, 500 free credits a month, and a 45 s client timeout advised.
-
-Before enabling it, get Scrappa to confirm in writing (hello@marin.sh) how long it keeps submitted image URLs and
-fetched images, and whether images are passed to Google or others.
+See [backend setup and iPhone test](../Backend/README.md#studio-outfit-matching) for endpoint and
+deployment details. The Xcode console category `OutfitMatching` reports first card and settled times.
 
 ## Debug and test hooks (Debug builds only)
 
 | Variable | What it does |
 | --- | --- |
-| `FM_DEBUG_MATCH_FIXTURE=match\|branded\|nomatch\|error\|slow` | Replaces the backend with labeled fixtures ("Test fixture … (not a real listing)"); `branded` returns one of each label. |
+| `FM_DEBUG_MATCH_FIXTURE=match\|branded\|nomatch\|error\|slow\|budget` | Replaces the backend with labeled fixtures ("Test fixture … (not a real listing)"); `branded` returns one of each label. |
 | `FM_DEBUG_PERF_HUD=1` | Camera shows per-frame cost and time-to-tappable per garment. |
 | `FM_DEBUG_AUTO_TRYON=1` | Studio presses **Try on my avatar** once the selected garment's match arrives. |
 | `FM_DEBUG_SCREEN=live-sample-<jacket\|tshirt\|pants\|shoes>` | Opens Studio as if that garment of Sample Scan A had been tapped live. |
@@ -174,7 +121,4 @@ fetched images, and whether images are passed to Google or others.
 
 - Real time-to-tappable and frame cost (`FM_DEBUG_PERF_HUD=1`), and stable targets while moving.
 - Physical taps on targets (in the simulator, selection is checked through the same `select` path a tap uses).
-- On-device clues and photo comparison: in the simulator, Vision's classifier and foreground mask return nothing, so
-  clues came back empty there and the re-ranker kept the backend order. Both were checked on a Mac.
-- A live Scrappa result: needs `SCRAPPA_API_KEY`, an https `FITMIX_PUBLIC_BASE_URL` that reaches the backend, and
-  an approved garment-only photo.
+- Live OpenAI and retailer matching with a configured backend and a garment-only scan.
