@@ -20,14 +20,23 @@ garment-and-brand pair is searched once and then cached, so credits are only spe
 | Stage | What | Status |
 |---|---|---|
 | 1 | Skeleton, `MOCK_MODE`, `/health`, all endpoints with mock data | ✅ done |
-| 2 | Real OpenAI description + Google Shopping links | planned |
+| 2 | Real OpenAI description + Google Shopping links | ✅ done |
 | 3 | SegFormer segmentation (per-garment crops) | planned |
 | 4 | FashionCLIP catalog matching + demo catalog | planned |
 | 5 | Google Lens (via Supabase signed links) + re-ranking | planned |
 | 6 | `/refine` on real search + image-hash cache | planned |
 
-Until a stage is done, only `MOCK_MODE=1` has a working pipeline. Without it, `/analyze` answers
-`503 not_configured`.
+Without `MOCK_MODE=1`, each step runs when its key is present, and steps that aren't built or configured yet
+are skipped (they're `null` in `/health` → `components`). With neither `OPENAI_API_KEY` nor `SERPAPI_KEY`,
+`/analyze` answers `503 not_configured`.
+
+**What stage 2 does:**
+- **Crops** (`crops`) are described one per crop, all in one OpenAI call.
+- **A photo** (`image`) is described as a whole until segmentation exists: the model lists each garment it
+  sees, and every garment's `crop_url` shows the whole photo (`source_label: "whole_photo"`).
+- **`/search`** returns Google Shopping links for the garment's `search_query`. Their `score` follows Google's
+  order (1.0 for the first, then falling) until image re-ranking arrives in stage 5.
+- `catalog_matches` stays empty until stage 4.
 
 ## Setup on Mac
 
@@ -179,9 +188,9 @@ Every product is fictional. Links go to `example.com`, and product pictures are 
 
 ## Privacy
 
-- **`image` input sends the whole photo of a person to this service.** From stage 2 on, its garment crops go
-  to OpenAI (description), and from stage 5 on also to Supabase Storage and Google via SerpAPI (online
-  search). That's a change from the iPhone app's current guarantee that the full camera frame never leaves the
+- **`image` input sends the whole photo of a person to this service.** In stage 2, with no segmentation yet,
+  the **whole photo** goes to OpenAI for the description. From stage 3 on, only its garment crops go to
+  OpenAI, and from stage 5 on, also to Supabase Storage and Google via SerpAPI (online search). That's a change from the iPhone app's current guarantee that the full camera frame never leaves the
   phone (see `Docs/LiveGarmentMatch.md`).
 - **`crops` input keeps that guarantee:** the app cuts out garments on the phone and sends only those.
 - Photos and crops are kept **in memory only**, for the cache lifetime (`CACHE_TTL_SECONDS`, 1 hour by

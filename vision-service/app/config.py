@@ -28,8 +28,13 @@ class Settings:
     openai_api_key: str = field(default="", repr=False)
     openai_vision_model: str = "gpt-5-mini"
     openai_timeout_seconds: float = 60.0
+    # low, high or auto: how closely the model looks at each picture. high reads small logos better, costs more.
+    openai_image_detail: str = "auto"
 
     serpapi_key: str = field(default="", repr=False)
+    # Google country and language for Shopping and Lens results (prices come back in that country's currency).
+    serpapi_country: str = "us"
+    serpapi_language: str = "en"
 
     supabase_url: str = ""
     supabase_service_role_key: str = field(default="", repr=False)
@@ -62,7 +67,10 @@ class Settings:
             openai_api_key=env.get("OPENAI_API_KEY", "").strip(),
             openai_vision_model=env.get("OPENAI_VISION_MODEL", "").strip() or d.openai_vision_model,
             openai_timeout_seconds=_float(env, "OPENAI_TIMEOUT_SECONDS", d.openai_timeout_seconds),
+            openai_image_detail=env.get("OPENAI_IMAGE_DETAIL", "").strip().lower() or d.openai_image_detail,
             serpapi_key=env.get("SERPAPI_KEY", "").strip(),
+            serpapi_country=env.get("SERPAPI_COUNTRY", "").strip().lower() or d.serpapi_country,
+            serpapi_language=env.get("SERPAPI_LANGUAGE", "").strip().lower() or d.serpapi_language,
             supabase_url=env.get("SUPABASE_URL", "").strip().rstrip("/"),
             supabase_service_role_key=env.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
             supabase_crop_bucket=env.get("SUPABASE_CROP_BUCKET", "").strip() or d.supabase_crop_bucket,

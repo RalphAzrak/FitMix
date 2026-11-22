@@ -37,15 +37,30 @@ class ApiError(Exception):
 
 
 def build_pipeline(settings: Settings) -> Pipeline | None:
-    """The pipeline for these settings. Real models and providers are added stage by stage; until then only
-    MOCK_MODE has a pipeline."""
+    """The pipeline for these settings: every step mocked in MOCK_MODE, otherwise each step whose key or model
+    is available. None when nothing is configured."""
     if settings.mock:
         from .mock import MockCatalog, MockDescriber, MockEmbedder, MockOnlineSearch, MockSegmenter
 
         embedder = MockEmbedder()
         return Pipeline(MockSegmenter(), MockDescriber(), embedder, MockCatalog(embedder),
                         MockOnlineSearch(top_k=settings.online_top_k), catalog_top_k=settings.catalog_top_k)
-    return None
+
+    describer = online = None
+    if settings.openai_api_key:
+        from .describe import OpenAIDescriber
+
+        describer = OpenAIDescriber(settings.openai_api_key, settings.openai_vision_model,
+                                    settings.openai_timeout_seconds, settings.openai_image_detail)
+    if settings.serpapi_key:
+        from .search import SerpApiClient, ShoppingSearch
+
+        client = SerpApiClient(settings.serpapi_key, settings.serpapi_country, settings.serpapi_language)
+        online = ShoppingSearch(client, top_k=settings.online_top_k)
+    if describer is None and online is None:
+        return None
+    # Segmentation (stage 3), embeddings and the catalog (stage 4) aren't built yet.
+    return Pipeline(None, describer, None, None, online, catalog_top_k=settings.catalog_top_k)
 
 
 def create_app(settings: Settings | None = None, pipeline: Pipeline | None = None) -> FastAPI:
@@ -147,6 +162,8 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
 
     async def run_search(request: Request, body: SearchRequest, brand: str | None) -> SearchResponse:
         active = require_pipeline()
+        if active.online is None:
+            raise ApiError(503, "not_configured", "Online search isn't set up on this service yet (SERPAPI_KEY).")
         analysis = analyses.get(body.analysis_id)
         if analysis is None:
             raise ApiError(404, "analysis_not_found", "This analysis has expired or doesn't exist. Analyze the photo again.")

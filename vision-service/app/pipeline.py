@@ -4,7 +4,9 @@
 /search:   online search for one garment (Lens + Shopping + re-rank), on demand, cached per brand
 
 Each step is a small interface (Protocol) with a real and a mock implementation. A failing step is recorded on
-the garment as a StepError and the rest still runs, so callers always get whatever worked.
+the garment as a StepError and the rest still runs, so callers always get whatever worked. A step that isn't
+configured (None) is skipped without an error. Without a segmenter, a photo is described as a whole: the
+describer lists its garments and each garment's crop is the whole photo.
 """
 
 import asyncio
@@ -22,6 +24,9 @@ from .images import pad_on_white, to_jpeg
 from .models import HINT_CATEGORY, CatalogMatch, GarmentAttributes, OnlineMatch, StepError
 
 log = logging.getLogger("vision")
+
+# Source label for garments described from the whole photo (no segmentation): their crop is the whole photo.
+WHOLE_PHOTO = "whole_photo"
 
 
 class StepFailure(Exception):
@@ -75,6 +80,10 @@ class Describer(Protocol):
     name: str
 
     async def describe(self, crops: list[Image.Image], hints: list[str | None]) -> list[GarmentAttributes]: ...
+
+    async def describe_outfit(self, photo: Image.Image) -> list[GarmentAttributes]:
+        """Every garment in a whole photo, outermost first. Used only when there's no segmenter."""
+        ...
 
 
 class Embedder(Protocol):
@@ -157,15 +166,16 @@ class Analysis:
 # MARK: Orchestration
 
 class Pipeline:
-    def __init__(self, segmenter: Segmenter, describer: Describer, embedder: Embedder, catalog: Catalog,
-                 online: OnlineSearch, catalog_top_k: int = 5):
+    def __init__(self, segmenter: Segmenter | None, describer: Describer | None, embedder: Embedder | None,
+                 catalog: Catalog | None, online: OnlineSearch | None, catalog_top_k: int = 5):
         self.segmenter, self.describer, self.embedder = segmenter, describer, embedder
         self.catalog, self.online = catalog, online
         self.catalog_top_k = catalog_top_k
 
-    def components(self) -> dict[str, str]:
-        return {"segmenter": self.segmenter.name, "describer": self.describer.name, "embedder": self.embedder.name,
-                "catalog": self.catalog.name, "online_search": self.online.name}
+    def components(self) -> dict[str, str | None]:
+        parts = {"segmenter": self.segmenter, "describer": self.describer, "embedder": self.embedder,
+                 "catalog": self.catalog, "online_search": self.online}
+        return {key: part.name if part else None for key, part in parts.items()}
 
     async def analyze(self, image: Image.Image | None = None, crops: list[Image.Image] | None = None,
                       hints: list[str | None] | None = None) -> Analysis:
@@ -174,8 +184,24 @@ class Pipeline:
         errors: list[StepError] = []
         started = time.perf_counter()
 
-        if image is not None:
+        described: list[GarmentAttributes] | None = None  # filled by whole-photo description
+        if image is not None and self.segmenter is None:
             pieces: list[tuple[str | None, Image.Image]] = []
+            if self.describer is None:
+                errors.append(StepError(step="segment", code="not_configured",
+                                        message="This service can't find garments in a photo yet. Send garment crops instead."))
+            else:
+                try:
+                    with timer.step("describe"):
+                        described = await self.describer.describe_outfit(image)
+                    pieces = [(WHOLE_PHOTO, image) for _ in described]
+                    if not pieces:
+                        errors.append(StepError(step="describe", code="no_garments",
+                                                message="No garments were found in this photo. Try a photo that shows the whole outfit."))
+                except Exception as error:
+                    errors.append(step_error("describe", error))
+        elif image is not None:
+            pieces = []
             try:
                 with timer.step("segment"):
                     segments = await asyncio.to_thread(self.segmenter.segment, image)
@@ -191,8 +217,12 @@ class Pipeline:
             pieces = [(hint, pad_on_white(crop)) for crop, hint in zip(crops, hints)]
 
         garments = [Garment(index=i, crop=crop, crop_jpeg=to_jpeg(crop), hint=hint) for i, (hint, crop) in enumerate(pieces)]
+        if described is not None:
+            for garment, attributes in zip(garments, described):
+                garment.attributes = attributes
         if garments:
-            await asyncio.gather(self._describe(garments, timer), self._embed(garments, timer))
+            describe = self._describe(garments, timer) if described is None else asyncio.sleep(0)
+            await asyncio.gather(describe, self._embed(garments, timer))
             await self._match_catalog(garments, timer)
 
         timer.ms["total"] = round((time.perf_counter() - started) * 1000)
@@ -201,6 +231,8 @@ class Pipeline:
                         errors=errors, timings_ms=timer.ms)
 
     async def _describe(self, garments: list[Garment], timer: Timer):
+        if self.describer is None:
+            return
         try:
             with timer.step("describe"):
                 described = await self.describer.describe([g.crop for g in garments], [g.hint for g in garments])
@@ -214,6 +246,8 @@ class Pipeline:
                 garment.errors.append(failure)
 
     async def _embed(self, garments: list[Garment], timer: Timer):
+        if self.embedder is None:
+            return
         try:
             with timer.step("embed"):
                 vectors = await asyncio.to_thread(self.embedder.embed, [g.crop for g in garments])
@@ -225,6 +259,8 @@ class Pipeline:
                 garment.errors.append(failure)
 
     async def _match_catalog(self, garments: list[Garment], timer: Timer):
+        if self.catalog is None:
+            return
         with timer.step("catalog"):
             for garment in garments:
                 if garment.embedding is None:
@@ -245,6 +281,8 @@ class Pipeline:
             return garment, garment.searches[key], query, True, {}
         timer = Timer(f"search {analysis.id[:8]}#{index}")
         started = time.perf_counter()
+        if self.online is None:
+            raise StepFailure("not_configured", "Online search isn't set up on this service (SERPAPI_KEY).")
         request = OnlineRequest(crop=garment.crop, crop_jpeg=garment.crop_jpeg, embedding=garment.embedding,
                                 attributes=garment.attributes, category=garment.category, query=query,
                                 key=f"{analysis.id}/{index}")

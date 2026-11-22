@@ -77,6 +77,11 @@ class MockDescriber:
                 search_query=template["query"].format(color=color), layered_over_top=False))
         return described
 
+    async def describe_outfit(self, photo: Image.Image) -> list[GarmentAttributes]:
+        """A top and pants, coloured from the upper and lower body of the photo."""
+        bands = MockSegmenter().segment(photo)
+        return await self.describe([b.crop for b in bands], [b.label for b in bands])
+
 
 class MockEmbedder:
     """A 48-number colour layout (4×4 grid × RGB), centred and L2-normalised. Stands in for FashionCLIP."""
