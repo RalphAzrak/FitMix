@@ -59,10 +59,12 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
         let category: GarmentCategory
         /// Normalized to `frame`, top-left origin.
         let bounds: CGRect
-        /// Cut from `frame` itself. The only image that may be sent for retailer search.
+        /// Cut from `frame` itself, using the same rectangle as the highlight.
         let crop: CGImage
         /// Measured on the person's pixels in `frame` when it was detected. Nil if unknown.
         var color: SIMD3<Float>? = nil
+        /// A clearer crop of this garment from a recent snapshot, used only for retailer search.
+        var searchCrop: CGImage? = nil
     }
 
     /// The full outfit frame. Stays on the iPhone.
@@ -161,6 +163,7 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     private var run = 0
     private var holdingStill = false
     private var lastState = LiveScanState()
+    private var recentFrames: [LiveScanFrame] = []
     private var firstSubjectFrame: Double?
     private var loggedFirstTarget = false
     /// Per garment, for the performance overlay: seconds from the subject's first frame to tappable.
@@ -257,8 +260,10 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     private func process(_ result: LiveGarmentDetector.Result, size: CGSize, time: Double, date: Date,
                          copyFrame: () -> CGImage?) {
         let now = CACurrentMediaTime()
+        recentFrames.removeAll { $0.isExpired(at: now) }
         if result.acquiredSubject {
             tracker.reset()
+            recentFrames.removeAll()
             firstSubjectFrame = time
             loggedFirstTarget = false
             tappableAfter = [:]
@@ -286,6 +291,8 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             // Keep other garments from this *same* frame available in Studio.
             let companions = result.detections.filter { !updated.contains($0.category) }
             let frame = LiveScanFrame(image: image, date: date, detections: shown + companions, expiresAt: expiresAt)
+            recentFrames.append(frame)
+            if recentFrames.count > 4 { recentFrames.removeFirst() }
             targets.removeAll { updated.contains($0.category) }
             targets += shown.map {
                 LiveTarget(category: $0.category, bounds: $0.bounds, frame: frame)
@@ -323,6 +330,7 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     private func clear() {
         loadedDetector?.reset()
         tracker.reset()
+        recentFrames.removeAll()
         holdingStill = false
         lastRun = -.infinity
         ranEarly = false
@@ -333,10 +341,35 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         lastState = LiveScanState()
     }
 
+    /// Keep the tap and its crop aligned. Only ranking for product search uses other snapshots.
+    private func clearerCrop(for detection: LiveDetection, exactCrop: CGImage, frame: LiveScanFrame,
+                             tappedAt time: Double) -> CGImage? {
+        let earlier = recentFrames.filter { $0.date < frame.date && !$0.isExpired(at: time) }
+        guard !earlier.isEmpty else { return nil }
+
+        func score(_ crop: CGImage) -> Double {
+            let coverage = min(1, Double(min(crop.width, crop.height)) / 96)
+            return (ColorGrid(crop, maxWidth: 80)?.sharpness ?? 0) * coverage
+        }
+        var best: CGImage?
+        var bestScore = score(exactCrop)
+        for snapshot in earlier.reversed() {
+            guard let candidate = snapshot.detections.first(where: { $0.category == detection.category }),
+                  iou(candidate.bounds, detection.bounds) > 0.15,
+                  let crop = LiveGarmentSelection.crop(snapshot.image, to: candidate.bounds, padding: 0) else { continue }
+            let sharpness = score(crop)
+            if sharpness > bestScore {
+                best = crop
+                bestScore = sharpness
+            }
+        }
+        return best
+    }
+
     /// Resolve the displayed frame and exact bounds from the tap, even if newer targets arrived.
     func selection(of target: LiveTarget, tappedAt time: Double,
                    completion: @escaping @MainActor @Sendable (LiveGarmentSelection?) -> Void) {
-        queue.async {
+        queue.async { [self] in
             let frame = target.frame
             guard !frame.isExpired(at: time) else {
                 DispatchQueue.main.async { completion(nil) }
@@ -345,7 +378,9 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             let garments = GarmentCategory.liveScannable.compactMap { category -> LiveGarmentSelection.Garment? in
                 guard let detection = frame.detections.first(where: { $0.category == category }),
                       let crop = LiveGarmentSelection.crop(frame.image, to: detection.bounds, padding: 0) else { return nil }
-                return LiveGarmentSelection.Garment(category: category, bounds: detection.bounds, crop: crop, color: detection.color)
+                let searchCrop = clearerCrop(for: detection, exactCrop: crop, frame: frame, tappedAt: time)
+                return LiveGarmentSelection.Garment(category: category, bounds: detection.bounds, crop: crop,
+                                                    color: detection.color, searchCrop: searchCrop)
             }
             let selection = garments.contains { $0.category == target.category && $0.bounds == target.bounds }
                 ? LiveGarmentSelection(frame: frame.image, capturedAt: frame.date, garments: garments, selected: target.category)

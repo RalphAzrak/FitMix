@@ -110,10 +110,15 @@ struct CatalogProduct: Identifiable, Hashable {
         switch match {
         case .exact: "Exact match"
         case .brand: brand.map { "Likely from \($0)" } ?? "Likely same brand"
-        case .similar: "Similar match"
+        case .similar: visualScore == nil ? "Similar match" : "Closest match"
         }
     }
 
+    var visualMatchLabel: String {
+        visualScore.map { "\(matchLabel) · \($0)% visual match" } ?? matchLabel
+    }
+
+    var visualScore: Int? = nil
     let id: String
     let name: String
     let brand: String?
@@ -134,7 +139,7 @@ struct CatalogProduct: Identifiable, Hashable {
 
     init(id: String, name: String, brand: String? = nil, retailer: String? = nil, category: GarmentCategory, match: Match,
          image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil, isFixture: Bool = false,
-         evidence: [String] = []) {
+         evidence: [String] = [], visualScore: Int? = nil) {
         self.id = id
         self.name = name
         self.brand = brand
@@ -147,6 +152,7 @@ struct CatalogProduct: Identifiable, Hashable {
         self.retailerURL = retailerURL
         self.isFixture = isFixture
         self.evidence = evidence
+        self.visualScore = visualScore
     }
 }
 

@@ -7,7 +7,8 @@
 - `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
   server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
   labeled "exact", "brand" or "similar" (see visual_search.py).
-- `POST /v1/lens-search`: the app's product search. For each garment crop from a scan, this server asks Google
+- `POST /v1/outfit-match`: Studio's OpenAI garment matching and Canadian storefront search.
+- `POST /v1/lens-search`: legacy compatibility route for older app builds. This server asks Google
   Lens (via Scrappa) for visual matches and returns the best credible retailer listing, labeled "similar"
   (see lens_search.py). Cached, de-duplicated and capped per month.
 
@@ -35,6 +36,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import avatar3d
 from .mock import placeholder_png
+from .outfit_match import CURRENCY, OpenAIGarmentAnalysis, OutfitMatcher, ShopifyCatalog, price
 from .prompt import build_outfit_prompt, build_prompt
 from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
@@ -48,6 +50,8 @@ LENS_STATE_PATH = Path(__file__).parent.parent / ".cache" / "lens_search.json"
 
 log = logging.getLogger("fitmix")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Storefront query URLs can include codes read from garments.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_CROP_BYTES = 2 * 1024 * 1024
@@ -61,6 +65,7 @@ FALLBACK_MODEL = "gpt-image-2"
 class Settings:
     api_key: str = field(default="", repr=False)
     model: str = "gpt-image-2.6-sunburst"
+    matching_model: str = "gpt-4.1-mini"
     quality: str = "medium"
     size: str = "1024x1536"
     timeout_seconds: float = 240.0
@@ -92,6 +97,7 @@ class Settings:
         return Settings(
             api_key=env.get("OPENAI_API_KEY", "").strip(),
             model=env.get("OPENAI_IMAGE_MODEL", "").strip() or Settings.model,
+            matching_model=env.get("OPENAI_MATCH_MODEL", "").strip() or Settings.matching_model,
             quality=env.get("OPENAI_IMAGE_QUALITY", "").strip() or Settings.quality,
             size=env.get("OPENAI_IMAGE_SIZE", "").strip() or Settings.size,
             timeout_seconds=float(env.get("OPENAI_TIMEOUT_SECONDS", "") or Settings.timeout_seconds),
@@ -229,7 +235,7 @@ def default_lens_search(settings: Settings, crop_host: CropHost, enricher: Enric
 def create_app(settings: Settings | None = None, generator: Generator | None = None,
                providers: list[VisualProvider] | None = None, enricher: Enricher | None = None,
                crop_host: CropHost | None = None, lens: LensSearch | None = None,
-               builder: avatar3d.Builder | None = None) -> FastAPI:
+               builder: avatar3d.Builder | None = None, outfit: OutfitMatcher | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
     if builder is None:
         builder = avatar3d.MockBuilder() if settings.mock else avatar3d.ScriptBuilder()
@@ -246,6 +252,10 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     if enricher is None and settings.listing_enrichment:
         enricher = ListingEnricher()
     lens = lens or default_lens_search(settings, crop_host, enricher)
+    outfit = outfit or OutfitMatcher(
+        OpenAIGarmentAnalysis(settings.api_key, settings.matching_model) if settings.api_key else None,
+        ShopifyCatalog(),
+    )
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
     recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -293,7 +303,8 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         return {"status": "ok", "ready": generator is not None, "mock": settings.mock,
                 "avatar3d_ready": builder.ready,
                 "match_ready": bool(providers), "match_providers": [p.name for p in providers],
-                "match_skipped": skipped, "lens_search": lens.status()}
+                "match_skipped": skipped, "lens_search": lens.status(),
+                "outfit_match": {"ready": outfit.analysis is not None, "currency": CURRENCY}}
 
     @app.get("/v1/crops/{token}.jpg")
     async def crop_for_provider(token: str):
@@ -383,6 +394,37 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         return JSONResponse({"status": "matched" if answer.result else "no_match", "category": category,
                              "source": "google_lens", "cached": answer.cached, "result": answer.result},
                             headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/outfit-match")
+    async def outfit_match(
+        category: str = Form(...), crop: UploadFile | None = File(None), text: str = Form(""),
+        search_id: str | None = Form(None), max_price: str | None = Form(None),
+        _: str = Depends(authorize_match),
+    ):
+        if category not in CATEGORIES:
+            raise ApiError(400, "invalid_category", "Choose a jacket, T-shirt, pants or shoes.")
+        cap = price(max_price)
+        if bool(crop) == bool(search_id) or (search_id and (len(search_id) != 32 or cap is None)):
+            raise ApiError(400, "invalid_request", "Send a garment crop or a valid budget search.")
+        data = await crop.read(MAX_CROP_BYTES + 1) if crop else b""
+        media = _media_type(data) if crop else None
+        if len(data) > MAX_CROP_BYTES:
+            raise ApiError(413, "image_too_large", "This garment photo is too large.")
+        if crop and media is None:
+            raise ApiError(400, "invalid_image", "This garment image couldn't be read.")
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(60):
+                search_id, results = await outfit.match(category, data, media, text[:500].split(",")[:12], search_id, cap)
+        except TimeoutError:
+            raise ApiError(504, "provider_timeout", "Garment matching took too long. Try again.") from None
+        except ProviderError as error:
+            status = {"search_expired": 410, "provider_timeout": 504, "not_configured": 503}.get(error.code, 502)
+            log.info("outfit %s: failed (%s)", category, error.code)
+            raise ApiError(status, error.code, error.message) from None
+        log.info("outfit %s: %d listings in %.2fs", category, len(results), time.monotonic() - started)
+        return JSONResponse({"status": "matched" if results else "no_match", "currency": CURRENCY,
+                             "search_id": search_id, "results": results}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(

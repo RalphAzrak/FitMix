@@ -1,32 +1,21 @@
-import CoreImage
-import CoreVideo
 import Foundation
 import ImageIO
 import UIKit
 import UniformTypeIdentifiers
-import Vision
 
-// MARK: - Retailer match for one selected garment
-//
-// After a tap, the iPhone sends the FitMix backend only the selected garment's crop, its category, and the
-// clues read on-device (`GarmentClues`: printed text and codes, colour, pattern, style). Studio's search is
-// Google Lens through the backend (`LensSearch.swift`), which answers with one listing or none. Lists of
-// listings labeled exact / brand / similar, and the on-device photo comparison that orders them
-// (`VisualReranker`), now come only from the Debug fixtures at the end of this file. The full outfit frame,
-// profile photos and avatar images never leave the iPhone for search. See Docs/LiveGarmentMatch.md and
-// Backend/README.md.
+// MARK: - Retailer matching for one garment
 
 /// Exactly what leaves the phone for one search.
 nonisolated struct GarmentSearchRequest: Sendable {
     var category: GarmentCategory
     /// JPEG of the garment crop only, long edge ≤ 640 px.
     var crop: Data
-    /// What the phone read on the crop.
-    var clues: GarmentClueSet
+    /// Text read on-device for structured product-code verification.
+    var detectedText: [String]
 }
 
 /// How sure FitMix is that a listing is the garment the user tapped.
-nonisolated enum MatchTier: Sendable, Equatable, Comparable {
+nonisolated enum MatchTier: String, Sendable, Equatable, Comparable {
     /// Corroborated: a product code, the same image, or brand + model + colour.
     case exact
     /// Only the brand is supported.
@@ -56,61 +45,185 @@ nonisolated struct RetailerListing: Sendable, Equatable {
     var evidence: [String] = []
     /// Which search found it (e.g. "google_lens", "ebay").
     var provider: String = ""
-    /// The backend's score; the phone adds photo similarity within a tier.
-    var score: Double = 0
     /// Development data, not a real listing.
     var isFixture: Bool
+    var visualScore: Int? = nil
 }
 
 nonisolated enum RetailerSearchOutcome: Sendable, Equatable {
     case matches([RetailerListing])
     /// The provider answered, but nothing credible in this category.
     case noMatch
-    /// Google Lens: the best credible retailer listing ("Similar match").
-    case lensMatch(RetailerListing)
-    /// Google Lens answered, but nothing close and usable.
-    case lensNoMatch
+    case outfit(searchID: String, listings: [RetailerListing])
 }
 
 nonisolated enum RetailerSearchError: LocalizedError, Equatable {
-    /// The search failed in a way that may pass (busy, rate limited, outage). Only the Debug fixtures throw this.
+    /// No backend in this build, or the backend has no provider credentials.
+    case notConfigured(String)
+    case offline
+    case unreachable
+    case timedOut
+    /// The provider failed in a way that may pass (busy, rate limited, outage).
     case providerBusy(String)
-    /// The Google Lens search failed (provider error, timeout, not configured, unreachable). The detail is for
-    /// Debug builds; people see "Couldn't search. Try again."
-    case lensFailed(String)
-    /// The monthly Google Lens allowance is used up (server cap or Scrappa credits).
-    case searchLimitReached
-
+    /// The provider refused (bad credentials, account not approved). Retrying won't help.
+    case providerRejected(String)
+    case invalidResponse
     var errorDescription: String? {
         switch self {
-        case .providerBusy(let message): message
-        case .lensFailed: "Couldn't search. Try again."
-        case .searchLimitReached: "FitMix has used this month's product searches."
+        case .notConfigured(let message): message
+        case .offline: "You're offline. Connect to the internet and try again."
+        case .unreachable: "FitMix couldn't reach its product search. Check your connection and try again."
+        case .timedOut: "The product search took too long. Try again."
+        case .providerBusy(let message), .providerRejected(let message): message
+        case .invalidResponse: "The product search sent back something FitMix couldn't read. Try again."
         }
     }
 
     var isRetryable: Bool {
         switch self {
-        case .providerBusy, .lensFailed: true
-        case .searchLimitReached: false
+        case .offline, .unreachable, .timedOut, .providerBusy, .invalidResponse: true
+        case .notConfigured, .providerRejected: false
         }
     }
 }
 
 nonisolated protocol RetailerSearching: Sendable {
     func search(_ request: GarmentSearchRequest) async throws -> RetailerSearchOutcome
+    func cheaperListings(category: GarmentCategory, searchID: String, cap: Decimal) async throws -> [RetailerListing]
+}
+
+extension RetailerSearching {
+    nonisolated func cheaperListings(category: GarmentCategory, searchID: String, cap: Decimal) async throws -> [RetailerListing] { [] }
 }
 
 enum RetailerSearchers {
-    /// The search Studio uses: Google Lens through the FitMix backend (`/v1/lens-search`), in Debug and Release.
-    /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|branded|nomatch|error|slow|shopify.
+    /// The search Studio uses: OpenAI and live storefronts through the FitMix backend, in Debug and Release.
+    /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|nomatch|error|slow.
     static var current: RetailerSearching {
         #if DEBUG
         if let mode = ProcessInfo.processInfo.environment["FM_DEBUG_MATCH_FIXTURE"], let fixture = FixtureRetailerSearch(mode: mode) {
             return fixture
         }
         #endif
-        return LensRetailerSearch(config: .current)
+        return BackendRetailerSearch(config: .current)
+    }
+}
+
+// MARK: - Backend
+
+/// `POST /v1/outfit-match` on the FitMix backend.
+nonisolated struct BackendRetailerSearch: RetailerSearching {
+    var config: BackendConfig?
+    var session: URLSession = BackendRetailerSearch.makeSession()
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral  // nothing cached on disk
+        configuration.timeoutIntervalForRequest = 65
+        configuration.timeoutIntervalForResource = 70
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }
+
+    private struct Response: Decodable {
+        struct Listing: Decodable {
+            struct Amount: Decodable { var value: String; var currency: String }
+            var id: String
+            var title: String
+            var retailer: String
+            var seller: String?
+            var image_url: String?
+            var url: String?
+            var price: Amount?
+            var match: String
+            var brand: String?
+            var evidence: [String]?
+            var provider: String?
+            var fixture: Bool?
+            var visual_score: Int?
+        }
+        var status: String
+        var fixture: Bool?
+        var search_id: String
+        var currency: String
+        var results: [Listing]
+    }
+
+    private struct Failure: Decodable {
+        struct Detail: Decodable { var code: String; var message: String }
+        var error: Detail
+    }
+
+    func search(_ request: GarmentSearchRequest) async throws -> RetailerSearchOutcome {
+        var form = MultipartForm()
+        form.add(file: request.crop, name: "crop", fileName: "garment.jpg", type: "image/jpeg")
+        form.add(value: request.category.rawValue, name: "category")
+        if !request.detectedText.isEmpty { form.add(value: request.detectedText.joined(separator: ","), name: "text") }
+        let response = try await submit(form)
+        return .outfit(searchID: response.search_id, listings: Self.listings(response))
+    }
+
+    func cheaperListings(category: GarmentCategory, searchID: String, cap: Decimal) async throws -> [RetailerListing] {
+        var form = MultipartForm()
+        form.add(value: category.rawValue, name: "category")
+        form.add(value: searchID, name: "search_id")
+        form.add(value: NSDecimalNumber(decimal: cap).stringValue, name: "max_price")
+        return Self.listings(try await submit(form))
+    }
+
+    private func submit(_ form: MultipartForm) async throws -> Response {
+        guard let config else {
+            throw RetailerSearchError.notConfigured("Start the FitMix backend and rebuild to enable outfit matching.")
+        }
+        var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent("v1/outfit-match"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+        if let token = config.token, !token.isEmpty { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+
+        let data: Data, response: URLResponse
+        do {
+            (data, response) = try await session.upload(for: urlRequest, from: form.finished())
+        } catch let error as URLError {
+            switch error.code {
+            case .cancelled: throw CancellationError()
+            case .notConnectedToInternet, .dataNotAllowed: throw RetailerSearchError.offline
+            case .timedOut: throw RetailerSearchError.timedOut
+            default: throw RetailerSearchError.unreachable
+            }
+        }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else { throw RetailerSearchError.invalidResponse }
+        guard http.statusCode == 200 else {
+            guard let failure = try? JSONDecoder().decode(Failure.self, from: data) else {
+                throw http.statusCode == 404 ? RetailerSearchError.notConfigured("The FitMix backend on this network doesn't have retailer search yet. Update and restart it.")
+                    : RetailerSearchError.invalidResponse
+            }
+            switch failure.error.code {
+            case "not_configured": throw RetailerSearchError.notConfigured(failure.error.message)
+            case "provider_auth", "unauthorized": throw RetailerSearchError.providerRejected(failure.error.message)
+            default: throw RetailerSearchError.providerBusy(failure.error.message)
+            }
+        }
+        guard let body = try? JSONDecoder().decode(Response.self, from: data),
+              body.currency == "CAD", ["matched", "no_match"].contains(body.status) else {
+            throw RetailerSearchError.invalidResponse
+        }
+        return body
+    }
+
+    private static func listings(_ body: Response) -> [RetailerListing] {
+        body.results.compactMap { item in
+            guard !item.id.isEmpty, !item.title.isEmpty, !item.retailer.isEmpty,
+                  let score = item.visual_score, (0...100).contains(score),
+                  let image = item.image_url.flatMap(URL.init(string:)), image.scheme == "https", image.host() != nil,
+                  let link = item.url.flatMap(URL.init(string:)), link.scheme == "https", link.host() != nil,
+                  let cost = item.price, cost.currency == body.currency,
+                  let amount = Decimal(string: cost.value, locale: Locale(identifier: "en_US_POSIX")), amount > 0 else { return nil }
+            return RetailerListing(id: item.id, title: item.title, retailer: item.retailer, seller: item.seller,
+                                   imageURL: image, listingURL: link, price: amount, currency: cost.currency,
+                                   tier: MatchTier(rawValue: item.match) ?? .similar,
+                                   brand: item.brand, evidence: item.evidence ?? [], provider: item.provider ?? "",
+                                   isFixture: item.fixture ?? body.fixture ?? false, visualScore: score)
+        }
     }
 }
 
@@ -119,10 +232,10 @@ enum RetailerSearchers {
 nonisolated enum GarmentSearchInput {
     /// Downscales the crop to JPEG (no metadata) and reads its clues, on-device.
     @concurrent
-    static func make(category: GarmentCategory, crop: CGImage, measuredColor: SIMD3<Float>?) async -> GarmentSearchRequest? {
+    static func make(category: GarmentCategory, crop: CGImage) async -> GarmentSearchRequest? {
         guard let jpeg = jpegData(crop, maxDimension: 640) else { return nil }
         return GarmentSearchRequest(category: category, crop: jpeg,
-                                    clues: GarmentClues.read(category: category, crop: crop, measuredColor: measuredColor))
+                                    detectedText: GarmentClues.words(in: crop))
     }
 
     static func jpegData(_ image: CGImage, maxDimension: Int) -> Data? {
@@ -141,43 +254,8 @@ nonisolated enum GarmentSearchInput {
     }
 }
 
-// MARK: - On-device photo comparison
-
-/// Orders listings within each match label by how much their photo looks like the tapped crop. Labels
-/// never change here, and the backend's order (provider visual rank + evidence) stays the main signal:
-/// Vision's generic feature prints tell colour and shape apart but not one shoe model from another, so the
-/// photo comparison only nudges.
-nonisolated enum VisualReranker {
-    /// Listing photos downloaded here, by listing id, for the try-on handoff.
-    typealias Photos = [String: CGImage]
-
-    @concurrent
-    static func rerank(_ listings: [RetailerListing], crop: CGImage, session: URLSession = .shared,
-                       limit: Int = 6) async -> (listings: [RetailerListing], photos: Photos) {
-        guard let query = SubjectPhoto(crop) else { return (listings, [:]) }
-        let top = Array(listings.prefix(limit))
-        var photos: Photos = [:]
-        await withTaskGroup(of: (String, CGImage?).self) { group in
-            for listing in top {
-                guard let url = listing.imageURL else { continue }
-                group.addTask { (listing.id, await download(url, session: session)) }
-            }
-            for await (id, image) in group { if let image { photos[id] = image } }
-        }
-        var adjusted = listings
-        for index in adjusted.indices.prefix(limit) {
-            guard let photo = photos[adjusted[index].id], let candidate = SubjectPhoto(photo) else { continue }
-            adjusted[index].score += 0.15 * query.likeness(to: candidate)
-        }
-        // Stable within tier: label first, then score.
-        let ordered = adjusted.enumerated().sorted { a, b in
-            if a.element.tier != b.element.tier { return a.element.tier < b.element.tier }
-            if a.element.score != b.element.score { return a.element.score > b.element.score }
-            return a.offset < b.offset
-        }.map(\.element)
-        return (ordered, photos)
-    }
-
+/// Downloads the selected product photo for the existing try-on handoff.
+nonisolated enum ListingPhoto {
     static func download(_ url: URL, session: URLSession) async -> CGImage? {
         guard url.scheme == "https" || url.scheme == "http" else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 6)
@@ -188,56 +266,6 @@ nonisolated enum VisualReranker {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
                                                                kCGImageSourceThumbnailMaxPixelSize: 600,
                                                                kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
-    }
-}
-
-/// A photo's main subject (garment or product) lifted onto neutral grey, with its own colour.
-nonisolated struct SubjectPhoto {
-    let print: VNFeaturePrintObservation
-    let color: SIMD3<Float>
-
-    init?(_ image: CGImage) {
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
-        let lifted: CGImage
-        let color: SIMD3<Float>
-        if (try? handler.perform([request])) != nil, let result = request.results?.first,
-           let mask = try? result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler),
-           let made = Self.composite(image, mask: mask) {
-            (lifted, color) = made
-        } else {
-            // No separable subject: compare the whole photo.
-            guard let mean = ColorGrid(image, maxWidth: 48)?.mean(in: CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6), mask: nil) else { return nil }
-            (lifted, color) = (image, mean)
-        }
-        guard let print = VisualSimilarity.featurePrint(lifted) else { return nil }
-        self.print = print
-        self.color = color
-    }
-
-    /// 0…1, higher is more alike: mostly the subject's colour, partly its feature print.
-    func likeness(to other: SubjectPhoto) -> Double {
-        let colour = 1 - min(Double(deltaE(color, other.color)), 60) / 60
-        let shape = 1 - min(Double(VisualSimilarity.distance(print, other.print) ?? 1.5), 1.5) / 1.5
-        return 0.7 * colour + 0.3 * shape
-    }
-
-    private static let context = CIContext(options: [.cacheIntermediates: false])
-
-    private static func composite(_ image: CGImage, mask: CVPixelBuffer) -> (CGImage, SIMD3<Float>)? {
-        let photo = CIImage(cgImage: image)
-        let maskImage = CIImage(cvPixelBuffer: mask)
-        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: photo.extent)
-        let onGrey = photo.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: grey, kCIInputMaskImageKey: maskImage])
-        let alone = photo.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: CIImage(color: .clear).cropped(to: photo.extent),
-                                                                          kCIInputMaskImageKey: maskImage])
-        var pixel = [UInt8](repeating: 0, count: 4)
-        let average = alone.applyingFilter("CIAreaAverage", parameters: [kCIInputExtentKey: CIVector(cgRect: photo.extent)])
-        context.render(average, toBitmap: &pixel, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-                       format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        let coverage = max(Float(pixel[3]) / 255, 0.01)
-        guard coverage > 0.02, let lifted = context.createCGImage(onGrey, from: photo.extent) else { return nil }
-        return (lifted, SIMD3(Float(pixel[0]) / 255 / coverage, Float(pixel[1]) / 255 / coverage, Float(pixel[2]) / 255 / coverage))
     }
 }
 
@@ -254,16 +282,16 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
             seller: nil, imageURL: URL(string: "https://cdn.shopify.com/s/files/1/0932/1356/files/WOMENS_SHRUNKEN_TEE_BLACK_02.jpg"),
             listingURL: URL(string: "https://kotn.com/products/womens-shrunken-tee-in-black-v2"),
             price: 48, currency: "CAD", tier: .similar, brand: "Kotn",
-            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", score: 0, isFixture: false),
+            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", isFixture: false),
         .pants: RetailerListing(
             id: "shopify-frankandoak-mens-woven-pants-classic-navy", title: "Essential Slim Chino Pant", retailer: "Frank And Oak",
             seller: nil, imageURL: URL(string: "https://cdn.shopify.com/s/files/1/0553/7100/6130/files/2MWP0001FE-BLUE-2698.jpg"),
             listingURL: URL(string: "https://www.frankandoak.com/products/mens-woven-pants-classic-navy-2mwp0001fe-dcnavy"),
             price: 81.75, currency: "CAD", tier: .similar, brand: "Frank And Oak",
-            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", score: 0, isFixture: false),
+            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", isFixture: false),
     ]
 
-    enum Mode: String { case match, branded, nomatch, error, slow, shopify }
+    enum Mode: String { case match, branded, nomatch, error, slow, shopify, budget }
     let mode: Mode
 
     init?(mode: String) {
@@ -272,6 +300,16 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
     }
 
     func search(_ request: GarmentSearchRequest) async throws -> RetailerSearchOutcome {
+        if mode == .budget {
+            let delay: Duration = switch request.category {
+            case .jacket: .milliseconds(200)
+            case .tshirt: .milliseconds(500)
+            case .pants: .seconds(1)
+            default: .seconds(2.5)
+            }
+            try await Task.sleep(for: delay)
+            return .outfit(searchID: request.category.rawValue, listings: [budgetListing(request.category, cheaper: false)])
+        }
         try await Task.sleep(for: mode == .slow ? .seconds(6) : .seconds(1.2))
         let name = request.category.title.lowercased()
         func listing(_ id: String, _ title: String, _ tier: MatchTier, brand: String? = nil, price: Decimal? = 42,
@@ -279,7 +317,7 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
             RetailerListing(id: "fixture-\(request.category.rawValue)-\(id)", title: "Test fixture \(title) (not a real listing)",
                             retailer: "FitMix test fixture", seller: nil, imageURL: nil, listingURL: nil,
                             price: price, currency: price == nil ? nil : "USD", tier: tier, brand: brand,
-                            evidence: evidence, provider: "fixture", score: 0, isFixture: true)
+                            evidence: evidence, provider: "fixture", isFixture: true)
         }
         switch mode {
         case .shopify:
@@ -298,9 +336,30 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
                         evidence: ["test fixture: brand matches"]),
                 listing("3", "similar \(name)", .similar),
             ])
-        case .match, .slow:
+        case .match, .slow, .budget:
             return .matches([listing("1", name, .similar, price: request.category == .shoes ? nil : 42), listing("2", "\(name) B", .similar)])
         }
+    }
+
+    func cheaperListings(category: GarmentCategory, searchID: String, cap: Decimal) async throws -> [RetailerListing] {
+        guard mode == .budget else { return [] }
+        try await Task.sleep(for: .milliseconds(300))
+        let listing = budgetListing(category, cheaper: true)
+        return (listing.price ?? 0) <= cap ? [listing] : []
+    }
+
+    private func budgetListing(_ category: GarmentCategory, cheaper: Bool) -> RetailerListing {
+        let prices: (Int, Int) = switch category {
+        case .jacket: (70, 40)
+        case .tshirt: (45, 20)
+        case .pants: (55, 35)
+        default: (60, 45)
+        }
+        return RetailerListing(id: "fixture-\(category.rawValue)-\(cheaper ? "budget" : "close")",
+                               title: "Test fixture \(category.title) \(cheaper ? "budget option" : "closest option")",
+                               retailer: "FitMix test fixture", seller: nil, imageURL: nil, listingURL: nil,
+                               price: Decimal(cheaper ? prices.1 : prices.0), currency: "CAD", tier: .similar,
+                               brand: nil, isFixture: true, visualScore: cheaper ? 75 : 92)
     }
 }
 #endif

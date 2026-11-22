@@ -650,6 +650,22 @@ nonisolated struct ColorGrid {
         return n >= 3 ? sum / Float(n) : nil
     }
 
+    /// Mean absolute Laplacian of brightness. Higher is sharper; only meaningful relative to
+    /// other frames of the same scene.
+    var sharpness: Double {
+        guard width > 2, height > 2 else { return 0 }
+        func luma(_ x: Int, _ y: Int) -> Float {
+            let i = (y * width + x) * 3
+            return 0.299 * rgb[i] + 0.587 * rgb[i + 1] + 0.114 * rgb[i + 2]
+        }
+        var total: Float = 0
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                total += abs(4 * luma(x, y) - luma(x - 1, y) - luma(x + 1, y) - luma(x, y - 1) - luma(x, y + 1))
+            }
+        }
+        return Double(total) / Double((width - 2) * (height - 2))
+    }
 }
 
 extension LabelMask {
