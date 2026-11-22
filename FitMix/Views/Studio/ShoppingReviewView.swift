@@ -2,28 +2,16 @@ import SwiftUI
 import SafariServices
 
 /// Review of the current look's purchasable pieces, including confirmed swaps.
-/// Each piece can be added to the cart in its chosen size. A piece whose listing is a Shopify product
-/// opens `VariantPickerSheet` to choose the store's exact variant, and can then be checked out in
-/// FitMix from the cart. Other retailers still sell on their own page.
+/// Each piece is added to the cart from FitMix's own size page (`SizePickerSheet`). Sizes never come from
+/// the retailer, so the page opens for every store.
 struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
     @Environment(CartStore.self) private var cart
     @Environment(\.dismiss) private var dismiss
     @Environment(AppRouter.self) private var router
-    @Environment(ProfileStore.self) private var profile
-    /// Sizes the user picked here. Without a pick, a saved Profile size is used when the product lists it.
-    @State private var sizes: [UUID: String] = [:]
     @State private var retailer: URL?
-    @State private var cartFailure: String?
-    /// The Shopify listing whose variant picker is open.
-    @State private var picking: VariantPick?
-
-    struct VariantPick: Identifiable {
-        var product: CatalogProduct
-        var link: ShopifyProductLink
-        var autoPick: DebugCheckoutScript.Pick?
-        var id: String { product.id }
-    }
+    /// The piece whose FitMix size page is open.
+    @State private var sizing: CatalogProduct?
 
     var body: some View {
         NavigationStack {
@@ -45,15 +33,9 @@ struct ShoppingReviewView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
-        .sheet(item: $picking) { VariantPickerSheet(product: $0.product, link: $0.link, autoPick: $0.autoPick) }
-        .task { await runDebugScript() }
+        .sheet(item: $sizing) { SizePickerSheet(product: $0) }
         .preferredColorScheme(.light)
         .sheet(item: $retailer) { SafariView(url: $0).ignoresSafeArea() }
-        .alert("Couldn't add to cart", isPresented: Binding(get: { cartFailure != nil }, set: { if !$0 { cartFailure = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(cartFailure ?? "")
-        }
     }
 
     private func content(_ look: WorkingLook) -> some View {
@@ -119,15 +101,8 @@ struct ShoppingReviewView: View {
         }
     }
 
-    /// The user's pick, else their saved size for this kind of piece if the product lists it exactly.
-    private func size(for piece: WorkingLook.Piece, _ product: CatalogProduct) -> (value: String, fromProfile: Bool)? {
-        if let picked = sizes[piece.id] { return (picked, false) }
-        return profile.sizing.preferredSize(among: product.sizes, for: product.category).map { ($0, true) }
-    }
-
     private func row(piece: WorkingLook.Piece, product: CatalogProduct) -> some View {
-        let chosen = size(for: piece, product)
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
                 GarmentTile(source: piece.isSwapped ? product.image.tileSource : (product.image.tileSource.isNone ? piece.tileSource : product.image.tileSource),
                             category: piece.detected.category)
@@ -149,39 +124,7 @@ struct ShoppingReviewView: View {
                 Spacer(minLength: 0)
             }
             HStack {
-                if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
-                    Text("Sizes and colours from \(link.host)").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
-                } else if product.sizes.isEmpty {
-                    Text("Sizes unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
-                } else {
-                    Menu {
-                        ForEach(product.sizes, id: \.self) { size in
-                            Button(size) { sizes[piece.id] = size }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(chosen.map { "Size \($0.value)" } ?? "Choose size")
-                            Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
-                        }
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(AuthPalette.onSurface)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 36)
-                        .background(AuthPalette.container, in: Capsule())
-                    }
-                    .accessibilityLabel("Size for \(product.name)")
-                    .accessibilityValue(chosen.map { $0.fromProfile ? "\($0.value), your saved size" : $0.value } ?? "Not chosen")
-                    if chosen?.fromProfile == true {
-                        Text("Your saved size")
-                            .font(.system(size: 12))
-                            .foregroundStyle(AuthPalette.secondary)
-                            .accessibilityHidden(true)
-                    }
-                }
-                Spacer()
-            }
-            HStack {
-                addButton(product: product, size: chosen?.value)
+                addButton(product: product)
                 Spacer()
                 if let url = product.retailerURL {
                     Button("View at retailer") { retailer = url }
@@ -199,74 +142,21 @@ struct ShoppingReviewView: View {
 }
 
 extension ShoppingReviewView {
-    /// Add to Cart for one piece. A product that lists sizes needs one chosen first; one that lists
-    /// none (most live retailer matches) is added without a size.
-    @ViewBuilder
-    fileprivate func addButton(product: CatalogProduct, size: String?) -> some View {
-        if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
-            Button {
-                picking = VariantPick(product: product, link: link)
-            } label: {
-                Label(cart.containsProduct(product.id) ? "Add Another" : "Choose Size & Add",
-                      systemImage: cart.containsProduct(product.id) ? "checkmark" : "bag.badge.plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 36)
-                    .background(AuthPalette.container, in: Capsule())
-            }
-            .foregroundStyle(cart.containsProduct(product.id) ? Color.fmGreen : AuthPalette.onSurface)
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
-        } else {
-            plainAddButton(product: product, size: size)
-        }
-    }
-
-    @ViewBuilder
-    fileprivate func plainAddButton(product: CatalogProduct, size: String?) -> some View {
-        let needsSize = !product.sizes.isEmpty && size == nil
-        if !needsSize && cart.contains(productID: product.id, size: size) {
-            Label("In Cart", systemImage: "checkmark")
+    /// Opens FitMix's size page for one piece. The size and quantity are chosen there, then it is added.
+    fileprivate func addButton(product: CatalogProduct) -> some View {
+        Button {
+            sizing = product
+        } label: {
+            Label(cart.containsProduct(product.id) ? "Add Another" : "Choose Size & Add",
+                  systemImage: cart.containsProduct(product.id) ? "checkmark" : "bag.badge.plus")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.fmGreen)
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("shopInCart-\(product.category.rawValue)")
-        } else {
-            Button {
-                do { try cart.add(product, size: size) } catch { cartFailure = error.localizedDescription }
-            } label: {
-                Label(needsSize ? "Choose a size to add" : "Add to Cart", systemImage: "bag.badge.plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 36)
-                    .background(AuthPalette.container, in: Capsule())
-            }
-            .foregroundStyle(AuthPalette.onSurface)
-            .disabled(needsSize)
-            .opacity(needsSize ? 0.55 : 1)
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
+                .padding(.horizontal, 12)
+                .frame(minHeight: 36)
+                .background(AuthPalette.container, in: Capsule())
         }
-    }
-}
-
-extension ShoppingReviewView {
-    /// Debug: `FM_DEBUG_CHECKOUT_PICKS` adds each scripted piece through its variant picker, then opens the cart.
-    fileprivate func runDebugScript() async {
-        guard let script = DebugCheckoutScript.current, !script.order.isEmpty, let look = studio.look else { return }
-        try? await Task.sleep(for: .seconds(1))
-        for category in script.order {
-            guard let pick = script.picks[category],
-                  let product = look.pieces.first(where: { $0.detected.category == category })?.product,
-                  let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) else {
-                CheckoutLog.record("debug-no-listing", store: "-", note: "category=\(category.rawValue)")
-                continue
-            }
-            picking = VariantPick(product: product, link: link, autoPick: pick)
-            for _ in 0..<80 where picking != nil { try? await Task.sleep(for: .milliseconds(250)) }
-            try? await Task.sleep(for: .milliseconds(700))
-        }
-        router.openCart()
+        .foregroundStyle(cart.containsProduct(product.id) ? Color.fmGreen : AuthPalette.onSurface)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("shopAdd-\(product.category.rawValue)")
     }
 }
 

@@ -1,8 +1,8 @@
 # Cart
 
 Shop This Look (the bag button) → **Add to Cart** on each piece → **View Cart** at the bottom of Shop This
-Look. Shopify listings open a variant picker first; if the store's sizes can't be loaded (the retailer isn't on
-Shopify, or the store is unreachable), **Add Without a Store Variant** adds the listing as it is. The cart is
+Look. **Choose Size & Add** opens FitMix's own size page (`SizePickerSheet`) for every piece: the sizes are
+FitMix's, never loaded from the retailer, so the page opens for any store. The cart is
 grouped by store. In demo builds **Checkout** goes through Order Review, Demo Payment and Order Summary for the
 whole cart inside FitMix; outside demo mode each Shopify store has its own checkout. See [Checkout.md](Checkout.md).
 
@@ -16,9 +16,10 @@ whole cart inside FitMix; outside demo mode each Shopify store has its own check
 
 ## Behaviour
 
-- **Sizes.** A product that lists sizes needs one chosen before it can be added (the saved Profile size is
-  preselected when it matches). A product that lists none, like most live eBay matches, is added without a
-  size and shows "Size not listed".
+- **Sizes.** FitMix offers its own sizes by kind of garment: letter sizes for tops and jackets, waist sizes
+  for bottoms (or the system saved in Profile), shoe sizes in the saved system (US Men's by default), and
+  One Size for accessories. The saved Profile size is preselected. A size must be chosen before adding. The
+  page says these are FitMix sizes and to check the retailer's own chart.
 - **Lines.** The same product in the same size is one line; adding it again raises the quantity (1 to 10).
 - **Prices.** Each line stores the listed price and currency at the time it was added. The cart shows one total
   per currency (never converted or added across currencies) and how many pieces have no price. Nothing is

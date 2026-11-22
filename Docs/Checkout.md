@@ -79,10 +79,10 @@ can't be checked out this way.
 
 ## Adding any retailer's piece
 
-A listing whose link has `/products/<handle>` opens the Shopify variant picker. Many retailers that aren't on
-Shopify use that path too (Uniqlo, for one), and their product data can't be loaded. The picker then offers
-**Add Without a Store Variant**, which adds the listing as it is (no size). Such lines go through the demo
-checkout like any other, but not through a Shopify store checkout.
+Every listing is added from FitMix's own size page (`SizePickerSheet`), whatever the retailer. Nothing is
+loaded from the store, so there is no "couldn't load sizes" state. The Shopify variant picker was removed on
+22 Nov 2026. Lines added this way carry a FitMix size and no store variant: they go through the demo checkout,
+not through a Shopify store checkout.
 
 ## Debug launch arguments (Debug builds only)
 
@@ -113,6 +113,6 @@ Seeded pieces are labeled **Test fixture**. Seeding replaces the cart of whichev
 - `testFailedSaveKeepsTheCartAndRetryPlacesTheOrder`: a failed save shows the error, and Try Again places one
   order.
 - `testShopifyAndNonShopifyRetailersInOneDemoOrder`: the normal app flow with `FM_DEBUG_MATCH_FIXTURE=mixed`.
-  Uniqlo is added without a store variant. Frank And Oak's real sizes are loaded from its store and an exact
-  variant is added. Checkout, Demo Payment and Pay Demo Order follow, and one order holds both retailers and
-  reopens after a relaunch. Adding Frank And Oak needs a network connection; the checkout itself doesn't.
+  Both pieces get a size on FitMix's size page (M for the Uniqlo T-shirt, W32 for the Frank And Oak pants).
+  Checkout, Demo Payment and Pay Demo Order follow, and one order holds both retailers and reopens after a
+  relaunch. No store is contacted for sizes.

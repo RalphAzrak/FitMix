@@ -85,19 +85,18 @@ final class DemoCheckoutUITests: XCTestCase {
         shop.tap()
         XCTAssertTrue(bar("Shop This Look").waitForExistence(timeout: 5))
 
-        // Choose a size (the size menu, as a shopper would), then Add to Cart.
-        let sizeMenu = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Size for '")).firstMatch
-        XCTAssertTrue(sizeMenu.waitForExistence(timeout: 5), "no size menu in Shop This Look")
-        sizeMenu.tap()
-        let firstSize = app.collectionViews.buttons.firstMatch.exists ? app.collectionViews.buttons.firstMatch : app.buttons.element(boundBy: 0)
-        XCTAssertTrue(firstSize.waitForExistence(timeout: 5))
-        firstSize.tap()
+        // Choose a size on FitMix's own size page, as a shopper would, then Add to Cart.
         // Rows set their own identifier on the whole row, so the button is found by its label.
-        let adds = app.buttons.matching(NSPredicate(format: "label == 'Add to Cart'"))
-        XCTAssertTrue(adds.firstMatch.waitForExistence(timeout: 5), "no Add to Cart button")
-        let add = adds.allElementsBoundByIndex.first { $0.isEnabled && $0.isHittable }
-        XCTAssertNotNil(add, "Add to Cart didn't enable after choosing a size")
-        add?.tap()
+        let choose = app.buttons.matching(NSPredicate(format: "label == 'Choose Size & Add'")).firstMatch
+        XCTAssertTrue(choose.waitForExistence(timeout: 5), "no Choose Size & Add button in Shop This Look")
+        choose.tap()
+        let addSize = app.buttons["sizeAdd"]
+        XCTAssertTrue(addSize.waitForExistence(timeout: 5), "FitMix's size page didn't open")
+        let firstSize = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'sizeOption-'")).firstMatch
+        XCTAssertTrue(firstSize.waitForExistence(timeout: 5), "the size page offers no sizes")
+        firstSize.tap()
+        XCTAssertTrue(addSize.isEnabled, "Add to Cart didn't enable after choosing a size")
+        addSize.tap()
         let viewCart = app.buttons["shopViewCart"]
         XCTAssertTrue(viewCart.waitForExistence(timeout: 5))
         viewCart.tap()
@@ -217,9 +216,8 @@ final class DemoCheckoutUITests: XCTestCase {
 
     // MARK: Any retailer
 
-    /// The normal app flow with two kinds of retailer: a Shopify store's exact variant (Frank And Oak,
-    /// chosen in the variant picker from the store's live product data) and a retailer that isn't on
-    /// Shopify (Uniqlo, added without a store variant). Both go through Shop This Look, the cart's
+    /// The normal app flow with two retailers (Frank And Oak and Uniqlo), each given a size on FitMix's
+    /// own size page. Both go through Shop This Look, the cart's
     /// Checkout button, Demo Payment, and end up in the same saved demo order, which reopens after a
     /// relaunch. Matches come from FM_DEBUG_MATCH_FIXTURE=mixed (hand-picked real listings), so no
     /// OpenAI or Trendtrack request is made.
@@ -230,42 +228,38 @@ final class DemoCheckoutUITests: XCTestCase {
         shop.tap()
         XCTAssertTrue(bar("Shop This Look").waitForExistence(timeout: 5))
 
-        // Uniqlo: its link looks like a product page, but the store isn't Shopify, so sizes can't load.
+        // Sizes come from FitMix's own size page, the same for every retailer: nothing is loaded from a store.
         // Rows set their identifier on everything inside them, so buttons are found by row and label.
         func rowButton(_ row: String, _ label: String) -> XCUIElement {
             app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", row, label)).firstMatch
         }
+        let addSize = app.buttons["sizeAdd"]
         let addTee = rowButton("shopRow-tshirt", "Choose Size & Add")
         XCTAssertTrue(addTee.waitForExistence(timeout: 10), "no Uniqlo T-shirt in Shop This Look")
         addTee.tap()
-        let withoutVariant = app.buttons["variantAddWithoutVariant"]
-        XCTAssertTrue(withoutVariant.waitForExistence(timeout: 20), "Uniqlo should offer Add Without a Store Variant")
-        snapshot("mixed-1-uniqlo-no-variant")
-        withoutVariant.tap()
+        XCTAssertTrue(addSize.waitForExistence(timeout: 10), "FitMix's size page didn't open for the Uniqlo T-shirt")
+        app.buttons["sizeOption-M"].tap()
+        XCTAssertTrue(addSize.isEnabled)
+        snapshot("mixed-1-uniqlo-size")
+        addSize.tap()
         XCTAssertTrue(bar("Shop This Look").waitForExistence(timeout: 5))
 
-        // Frank And Oak: a Shopify store, so the picker loads real sizes and adds an exact variant.
         let addPants = rowButton("shopRow-pants", "Choose Size & Add")
         XCTAssertTrue(addPants.waitForExistence(timeout: 10), "no Frank And Oak pants in Shop This Look")
         addPants.tap()
-        let addVariant = app.buttons["variantAdd"]
-        XCTAssertTrue(addVariant.waitForExistence(timeout: 20), "Frank And Oak sizes didn't load")
-        let options = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'variantOption-' AND NOT (label CONTAINS 'sold out')"))
-        for index in 0..<min(options.count, 12) where !addVariant.isEnabled {
-            let option = options.element(boundBy: index)
-            if option.isHittable { option.tap() }
-        }
-        XCTAssertTrue(addVariant.isEnabled, "no in-stock Frank And Oak variant could be chosen")
-        snapshot("mixed-2-frank-and-oak-variant")
-        addVariant.tap()
+        XCTAssertTrue(addSize.waitForExistence(timeout: 10), "FitMix's size page didn't open for the Frank And Oak pants")
+        app.buttons["sizeOption-W32"].tap()
+        XCTAssertTrue(addSize.isEnabled)
+        snapshot("mixed-2-frank-and-oak-size")
+        addSize.tap()
 
         let viewCart = app.buttons["shopViewCart"]
         XCTAssertTrue(viewCart.waitForExistence(timeout: 5))
         viewCart.tap()
         XCTAssertTrue(bar("Cart").waitForExistence(timeout: 5))
         let ordersBefore = savedOrderCount()
-        XCTAssertTrue(app.descendants(matching: .any).containing(NSPredicate(format: "label BEGINSWITH 'Variant '")).firstMatch.exists,
-                      "the Frank And Oak line should carry its Shopify variant")
+        XCTAssertTrue(app.descendants(matching: .any).containing(NSPredicate(format: "label CONTAINS 'W32'")).firstMatch.exists,
+                      "the Frank And Oak line should carry the size chosen on FitMix's size page")
         snapshot("mixed-3-cart")
 
         app.buttons["cartCheckout"].tap()

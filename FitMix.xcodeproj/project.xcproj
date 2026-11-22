@@ -104,18 +104,19 @@
         "SWIFT_VERSION": "5.0",
         "TARGETED_DEVICE_FAMILY": "1",
       },
-    },
-    {
+    }, {
       "name": "FitMixUITests",
       "id": "000000000000000200000000",
       "product": "Products/FitMixUITests.xctest",
       "product-type": "bundle.ui-testing",
+      "dependencies": [
+        "FitMix",
+      ],
       "build-phases": [
         "compile-sources",
         "frameworks",
         "resources",
       ],
-      "dependencies": [ "FitMix" ],
       "build-settings": {
         "CODE_SIGN_STYLE": "Automatic",
         "DEVELOPMENT_TEAM": "3DCANY67BR",
