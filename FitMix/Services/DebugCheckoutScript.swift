@@ -5,10 +5,12 @@ import Foundation
 ///
 /// - `FM_DEBUG_CHECKOUT_PICKS=tshirt=Size:M*1;pants=Size:32X32*2`: for each piece, in order, Shop This
 ///   Look opens the variant picker, applies those options and quantity, and adds it to the cart.
-/// - `FM_DEBUG_CART_SEED=multistore`: fills the cart with `DemoCheckoutFixtures` (four stores, two
-///   currencies, one piece without a price) without going through Studio.
-/// - `FM_DEBUG_CHECKOUT_PLACE=1`: the cart opens Checkout, and Checkout places the demo order, as tapping
-///   **Checkout** and **Place Demo Order** do.
+/// - `FM_DEBUG_CART_SEED=multistore|twostores`: replaces the cart with `DemoCheckoutFixtures` (four stores in
+///   two currencies with one piece without a price, or Kotn and Uniqlo) without going through Studio.
+/// - `FM_DEBUG_CHECKOUT_PLACE=1`: once the cart is open, taps Checkout, Continue to Payment, then Simulate
+///   Payment three times in a row (only one order may be saved).
+/// - `FM_DEBUG_ORDER_SAVE_FAIL=1`: the first demo-order save fails (the cart must stay intact).
+/// - `FM_DEBUG_OPEN_ORDER=latest`: opens the newest saved demo order's summary at launch.
 struct DebugCheckoutScript {
     struct Pick: Equatable {
         var options: [(String, String)]

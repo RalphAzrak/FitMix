@@ -49,7 +49,7 @@ struct HomeView: View {
 
     private var header: some View {
         FMTopBar {
-            FMBagButton(count: cart.count) { router.showCart = true }
+            FMBagButton(count: cart.count) { router.openCart() }
             // Opens the account Profile when signed in, otherwise Sign In (see AccountFlowView).
             // The avatar's Profile opens from the avatar on Home.
             Button(action: router.openAccount) {

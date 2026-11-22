@@ -9,6 +9,18 @@ nonisolated struct DemoOrder: Codable, Identifiable, Equatable, Sendable {
     var placedAt: Date
     /// The cart lines exactly as they were when the order was placed.
     var items: [CartItem]
+    /// Totals per currency at the time of the order, never converted or added across currencies.
+    /// Nil for orders saved before totals were stored: `savedTotals` recomputes them from the items.
+    var totals: [CurrencyTotal]?
+    /// Pieces without a listed price, left out of every total.
+    var unpricedPieces: Int?
+    /// The Payment screen visit that placed it. A second tap from the same visit returns this order
+    /// instead of saving another.
+    var checkoutID: UUID?
+
+    var savedTotals: [CurrencyTotal] { totals ?? CartItem.totals(of: items) }
+    var savedUnpricedPieces: Int { unpricedPieces ?? CartItem.unpricedPieces(in: items) }
+    var pieces: Int { items.reduce(0) { $0 + $1.quantity } }
 
     /// "FM-" + the date + four characters that can't be confused with each other.
     static func makeNumber(at date: Date, existing: Set<String>) -> String {
@@ -32,7 +44,7 @@ nonisolated struct DemoOrderData: Codable, Equatable, Sendable {
 }
 
 /// Listed prices in one currency, added up. Different currencies are never added together or converted.
-nonisolated struct CurrencyTotal: Equatable, Sendable {
+nonisolated struct CurrencyTotal: Codable, Equatable, Sendable {
     var price: Price
     /// Pieces (counting quantities) included.
     var pieces: Int

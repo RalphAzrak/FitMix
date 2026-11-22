@@ -36,10 +36,21 @@ enum DemoCheckoutFixtures {
              size: nil, quantity: 1),
     ]
 
+    /// Two stores, two currencies: Kotn (CAD) and Uniqlo (USD).
+    static var twostores: [Seed] { multistore.filter { ["fixture-kotn-shrunken-tee", "fixture-uniqlo-airism-tee"].contains($0.product.id) } }
+
+    /// Replaces the cart with the named set, so a run always starts from the same cart.
     @MainActor
     static func seed(_ name: String, into cart: CartStore) {
-        guard name == "multistore" else { return }
-        for seed in multistore where !cart.contains(productID: seed.product.id, size: seed.size) {
+        let seeds: [Seed]
+        switch name {
+        case "multistore": seeds = multistore
+        case "twostores": seeds = twostores
+        case "empty": seeds = []
+        default: return
+        }
+        try? cart.removeAll()
+        for seed in seeds where !cart.contains(productID: seed.product.id, size: seed.size) {
             do {
                 try cart.add(seed.product, size: seed.size)
                 if let line = cart.items.first(where: { $0.isSameLine(productID: seed.product.id, size: seed.size) }), seed.quantity > 1 {

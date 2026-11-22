@@ -1,8 +1,8 @@
 # Cart
 
 Shop This Look (the bag button) → **Add to Cart** on each piece → **View Cart** at the bottom of Shop This
-Look. Shopify listings open a variant picker first. The cart is grouped by store, and **Checkout** places one
-demo order for the whole cart inside FitMix: see [Checkout.md](Checkout.md).
+Look. Shopify listings open a variant picker first. The cart is grouped by store, and **Checkout** goes through
+Checkout, Payment (demo mode) and Order Summary for the whole cart inside FitMix: see [Checkout.md](Checkout.md).
 
 | Piece | Where |
 | --- | --- |

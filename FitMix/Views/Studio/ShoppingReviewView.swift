@@ -9,6 +9,7 @@ struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
     @Environment(CartStore.self) private var cart
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppRouter.self) private var router
     @Environment(ProfileStore.self) private var profile
     /// Sizes the user picked here. Without a pick, a saved Profile size is used when the product lists it.
     @State private var sizes: [UUID: String] = [:]
@@ -16,7 +17,6 @@ struct ShoppingReviewView: View {
     @State private var cartFailure: String?
     /// The Shopify listing whose variant picker is open.
     @State private var picking: VariantPick?
-    @State private var showCart = false
 
     struct VariantPick: Identifiable {
         var product: CatalogProduct
@@ -44,7 +44,6 @@ struct ShoppingReviewView: View {
             .navigationTitle("Shop This Look")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .navigationDestination(isPresented: $showCart) { CartView(showsDone: false) }
         }
         .sheet(item: $picking) { VariantPickerSheet(product: $0.product, link: $0.link, autoPick: $0.autoPick) }
         .task { await runDebugScript() }
@@ -106,9 +105,8 @@ struct ShoppingReviewView: View {
                         .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                         .multilineTextAlignment(.center)
                 } else {
-                    NavigationLink {
-                        CartView(showsDone: false)
-                    } label: {
+                    // Same flow as the bag icon: this sheet closes and the cart opens full screen.
+                    Button { router.openCart() } label: {
                         Label(cart.count == 1 ? "View Cart (1 item)" : "View Cart (\(cart.count) items)", systemImage: "bag")
                     }
                     .buttonStyle(AuthPrimaryButtonStyle())
@@ -255,7 +253,7 @@ extension ShoppingReviewView {
 extension ShoppingReviewView {
     /// Debug: `FM_DEBUG_CHECKOUT_PICKS` adds each scripted piece through its variant picker, then opens the cart.
     fileprivate func runDebugScript() async {
-        guard let script = DebugCheckoutScript.current, let look = studio.look else { return }
+        guard let script = DebugCheckoutScript.current, !script.order.isEmpty, let look = studio.look else { return }
         try? await Task.sleep(for: .seconds(1))
         for category in script.order {
             guard let pick = script.picks[category],
@@ -268,7 +266,7 @@ extension ShoppingReviewView {
             for _ in 0..<80 where picking != nil { try? await Task.sleep(for: .milliseconds(250)) }
             try? await Task.sleep(for: .milliseconds(700))
         }
-        showCart = true
+        router.openCart()
     }
 }
 

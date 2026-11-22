@@ -1,66 +1,78 @@
 # Demo checkout
 
-Shop This Look → **Add to Cart** → **View Cart** → **Checkout** → **Place Demo Order**. One checkout covers the
-whole cart, whatever stores the pieces come from. It is a demo that runs entirely in FitMix: no backend calls,
-no store redirects, no Shopify Checkout Kit, no payment details. It works offline (product photos load only when
-online; everything else works without a connection).
+Home → **Scan Fits** → Studio Fit → **Shop This Look** → **Add to Cart** → **Cart** → **Checkout** → **Payment** →
+**Order Summary**. One checkout covers the whole cart, whatever stores the pieces come from.
+
+It is a demo that runs entirely in FitMix. It never collects card details, charges money, calls Shopify or a
+payment provider, contacts a store or places a retailer order, and it works offline (product photos load only
+when online).
 
 | Piece | Where |
 | --- | --- |
-| Cart screen, recent demo orders | `FitMix/Views/Checkout/CartView.swift` |
-| Checkout screen, confirmation, shared line and totals views | `FitMix/Views/Checkout/CheckoutView.swift` |
+| Flow container, routes, Checkout, Payment, Order Summary, shared line and totals views | `FitMix/Views/Checkout/CheckoutView.swift` |
+| Cart (the flow's first page), recent demo orders | `FitMix/Views/Checkout/CartView.swift` |
+| Opening the flow (bag icon, "View Cart") | `AppRouter.openCart` in `FitMix/Views/Shell/AppShell.swift` |
 | `DemoOrder`, per-currency totals | `FitMix/Models/DemoOrder.swift` |
 | Saving demo orders | `FitMix/Services/DemoOrderStore.swift` |
-| Removing the ordered lines from the cart | `CartStore.remove(ids:)` in `FitMix/Services/CartStore.swift` |
-| Debug seed and launch switches | `FitMix/Services/DemoCheckoutFixtures.swift`, `FitMix/Services/DebugCheckoutScript.swift` |
+| UI tests | `FitMixUITests/DemoCheckoutUITests.swift` |
 
-## Flow
+## Navigation
 
-1. **Checkout** lists every cart line, grouped by store for reading: photo, title, store, size or variant,
-   quantity and listed price. Totals are shown per currency (e.g. CAD and USD), never converted or added
-   together; pieces without a listed price are counted separately.
-2. **Place Demo Order** saves a `DemoOrder` (order number like `FM-261121-6K8Z`, date, and a snapshot of every
-   line) to disk **first**. Only after the file is written are exactly those lines removed from the cart; a
-   piece added in the meantime stays. If saving fails, nothing changes and the cart is kept. If the order saves
-   but the cart can't be updated, the confirmation says so.
-3. The screen then shows **Demo order placed** with the number, items and totals. The cart lists recent demo
-   orders, and each opens its confirmation again.
+The flow is one full-screen cover (`CheckoutFlowView`) holding a `NavigationStack`: **Cart** is the root, and
+**Checkout**, **Payment** and **Order Summary** are pushed onto it (`CheckoutRoute`), never shown as sheets.
+
+- The bag icon (Home, Studio, Camera) and **View Cart** in Shop This Look open the same flow. Shop This Look is
+  a sheet, so **View Cart** closes it first and the cart opens once it's gone (`AppRouter.openCart` /
+  `shopLookDismissed`). Done on the cart closes the flow.
+- Back works normally on Checkout and Payment. While Payment is saving, Back is hidden.
+- After payment the stack is **replaced** by Order Summary: no Back button, the edge swipe does nothing, and
+  **Done** closes the flow. There is no way back to a payable screen.
+- Size selection in Shop This Look is unchanged: a menu, or the Shopify variant picker sheet.
+
+## Steps
+
+1. **Cart**: lines grouped by store, with quantity controls, one **Checkout** button for every store together,
+   and the recent demo orders.
+2. **Checkout**: every line grouped by store, with photo, size or variant, quantity and price. Totals are shown
+   per currency (CAD, USD…), never converted or added together. A piece without a listed price shows **Price
+   unavailable** and is listed as "Not in any total", never counted as zero. **Continue to Payment**.
+3. **Payment**: **Demo mode**, the preset **Demo card •••• 4242** (a label, nothing to type), the totals, and
+   **Simulate Payment**. The button is disabled while saving. Each visit to Payment has a checkout ID: saving
+   again with the same ID returns the order already saved, so repeated taps can't create duplicates.
+4. Simulate Payment approves locally, then saves one `DemoOrder` (number like `FM-261122-932C`, timestamp, a
+   snapshot of every line, totals per currency, the count of unpriced pieces, the checkout ID) to disk
+   **first**. Only after the file is written are exactly those lines removed from the cart. If saving fails,
+   the cart is unchanged and the alert offers **Try Again**.
+5. **Order Summary**: **Demo order placed**, the number, time, items grouped by store and totals. The same page
+   opens from "Demo orders" in the cart, also after a relaunch (there, Back returns to the cart).
 
 ## Storage
 
 `Application Support/Accounts/<user-id>/demo-orders.json` when signed in, `Accounts/guest/demo-orders.json` when
-signed out, written atomically with complete file protection. Unlike the signed-out cart (memory only), a
-guest's demo orders are kept on disk, so the confirmation is still there after a restart. Nothing is sent
-anywhere.
-
-## Not in the checkout path any more
-
-The Shopify proof of concept's per-store Checkout Kit sheets, cart permalinks, receipts and the
-`checkout-kit` package are removed, and the cart no longer links out to retailers. The Shopify size picker in
-Shop This Look (`VariantPickerSheet`, `ShopifyProducts.swift`) is unchanged: it reads a store's public product
-data when adding a piece, which needs a connection, but checkout doesn't.
+signed out, written atomically with complete file protection. Orders saved before totals were stored are
+still read; their totals are recomputed from the items.
 
 ## Debug launch arguments (Debug builds only)
 
 | Variable | What it does |
 | --- | --- |
-| `FM_DEBUG_CART_SEED=multistore` | Fills the cart with test fixtures from four stores (Kotn and Frank And Oak in CAD, Uniqlo in USD, a test store with no price), each labeled **Test fixture**. |
-| `FM_DEBUG_CHECKOUT_PLACE=1` | The cart opens Checkout and Checkout places the demo order, as tapping both buttons does. |
-| `FM_DEBUG_SCREEN=cart` | Opens the cart (with the recent demo orders). |
-| `FM_DEBUG_CHECKOUT_PICKS=…` | Adds pieces from Shop This Look through the size picker (see `DebugCheckoutScript`). |
+| `FM_DEBUG_CART_SEED=twostores` | Replaces the cart with two test fixtures: Kotn (CAD) and Uniqlo (USD, quantity 2). |
+| `FM_DEBUG_CART_SEED=multistore` | Replaces the cart with four stores in two currencies, including one piece without a price. |
+| `FM_DEBUG_CART_SEED=empty` | Empties the cart at launch. |
+| `FM_DEBUG_CHECKOUT_PLACE=1` | Taps Checkout, Continue to Payment, then Simulate Payment three times in a row. |
+| `FM_DEBUG_ORDER_SAVE_FAIL=1` | The first demo-order save fails, to check the cart stays intact and Try Again works. |
+| `FM_DEBUG_OPEN_ORDER=latest` | Opens the newest saved demo order's summary at launch. |
+| `FM_DEBUG_SCREEN=cart` | Opens the checkout flow at the cart. |
 
-## Observed on 21 Nov 2026 (iPhone 17 simulator, iOS 27.2, Debug, signed out)
+Seeded pieces are labeled **Test fixture**. Seeding replaces the cart of whichever account is active.
 
-- Seeded cart: 5 pieces, 4 stores. Checkout showed all four lines; totals CA$129.75 (2 items) and US$49.80
-  (2 items), plus "1 item has no listed price".
-- **Place Demo Order** saved `FM-261121-6K8Z` to `Accounts/guest/demo-orders.json`, then the cart had 0 lines,
-  and **Demo order placed** showed the number, items and totals.
-- After terminating and relaunching without any seed, the cart listed "Demo order placed · FM-261121-6K8Z", and
-  the file still held all four lines (store, quantity, price, currency). No payment fields exist.
-- The only network connection the app had open was to Shopify's image CDN, for product photos.
+## Tests (FitMixUITests, run with ⌘U on the FitMix scheme)
 
-## Not done yet
-
-- On a real iPhone and in airplane mode.
-- Signed in: per-account orders and clearing the saved `cart.json` (the logic is the same; a signed-in run
-  wasn't done here).
+- `testBagIconOpensFullPageCartAndBackWorksBeforePayment`: the bag icon opens the cart over the tab bar; Back
+  from Checkout and from Payment; Done closes the flow.
+- `testViewCartFromShopThisLookLeavesTheSheet`: Studio sample look → Shop This Look → choose a size → Add to
+  Cart → View Cart. The cart opens full screen with the Shop This Look sheet gone.
+- `testUnpricedItemsAreShownAndLeftOutOfTotals`: four stores, CAD and USD totals, the unpriced piece named.
+- `testOneOrderFromTwoStoresSurvivesRepeatTapsAndRelaunch`: Kotn + Uniqlo, three taps on Simulate Payment,
+  exactly one new order, no Back on the summary, cart emptied, and the same summary opens after a relaunch.
+- `testFailedSaveKeepsTheCartAndRetryPlacesTheOrder`: a failed save shows the error, Try Again places one order.

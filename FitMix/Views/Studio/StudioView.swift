@@ -27,7 +27,7 @@ struct StudioView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            FMTopBar { FMBagButton(count: cart.count) { router.showCart = true } }
+            FMTopBar { FMBagButton(count: cart.count) { router.openCart() } }
             if let scan = studio.scan, let look = studio.look, let hero = studio.hero {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {

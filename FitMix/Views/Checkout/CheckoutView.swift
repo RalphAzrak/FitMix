@@ -1,31 +1,68 @@
 import SwiftUI
 
-/// FitMix's own checkout for the whole cart, every store at once. It is a demo: it runs entirely on the
-/// iPhone, works offline, asks for no payment details, and sends nothing to any store or server.
-/// **Place Demo Order** saves the order on the device first, then removes those lines from the cart,
-/// and shows the confirmation.
+// MARK: - The demo checkout flow
+//
+// Cart → Checkout → Payment → Order Summary, as full-screen pushes in one navigation stack
+// (`CheckoutFlowView`). The bag icon and Shop This Look's "View Cart" both open this same flow.
+//
+// It is a demo: it runs entirely on the iPhone, works offline, never asks for card details, charges
+// nothing, contacts no payment provider, Shopify or store, and places no retailer order. "Simulate
+// Payment" approves locally, saves one `DemoOrder`, and only then removes those lines from the cart.
+// See Docs/Checkout.md.
+
+/// A step pushed on top of the cart.
+enum CheckoutRoute: Hashable {
+    case checkout
+    case payment
+    /// A saved demo order. `justPlaced`: Payment just placed it, so Back is hidden and Done closes the flow.
+    case summary(UUID, justPlaced: Bool)
+}
+
+/// Drives the flow's navigation. Shared through the environment so each step can push the next.
+@Observable
+final class CheckoutNavigator {
+    var path: [CheckoutRoute]
+    @ObservationIgnored var close: () -> Void = {}
+
+    init(path: [CheckoutRoute] = []) { self.path = path }
+}
+
+/// The whole flow, full screen. Cart is the root; the other steps are pushed.
+struct CheckoutFlowView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var navigator: CheckoutNavigator
+
+    init(startingAt path: [CheckoutRoute] = []) {
+        _navigator = State(initialValue: CheckoutNavigator(path: path))
+    }
+
+    var body: some View {
+        @Bindable var navigator = navigator
+        NavigationStack(path: $navigator.path) {
+            CartView()
+                .navigationDestination(for: CheckoutRoute.self) { route in
+                    switch route {
+                    case .checkout: CheckoutView()
+                    case .payment: PaymentView()
+                    case .summary(let id, let justPlaced): OrderSummaryView(orderID: id, justPlaced: justPlaced)
+                    }
+                }
+        }
+        .environment(navigator)
+        .onAppear { navigator.close = { dismiss() } }
+    }
+}
+
+// MARK: - Checkout
+
+/// Every cart line, grouped by store, with totals per currency. Continue to Payment goes on.
 struct CheckoutView: View {
     @Environment(CartStore.self) private var cart
-    @Environment(DemoOrderStore.self) private var orders
-
-    /// The order this screen just placed; the screen then shows its confirmation.
-    @State private var placedID: UUID?
-    @State private var placing = false
-    @State private var failure: String?
-    /// The order saved, but the cart couldn't be updated afterwards.
-    @State private var cartWarning: String?
+    @Environment(CheckoutNavigator.self) private var navigator
 
     var body: some View {
         Group {
-            if let placedID, let order = orders.order(id: placedID) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if let cartWarning { NoticeRow(tone: .caution, text: cartWarning) }
-                        DemoOrderSummary(order: order, headline: "Demo order placed")
-                    }
-                    .padding(16)
-                }
-            } else if cart.isEmpty {
+            if cart.isEmpty {
                 ScrollView {
                     ProfileEmptyState(icon: "bag", title: "Nothing to check out", message: "Your cart is empty.").padding(16)
                 }
@@ -34,89 +71,251 @@ struct CheckoutView: View {
             }
         }
         .background(Color.fmBackground.ignoresSafeArea())
-        .navigationTitle(placedID == nil ? "Checkout" : "Order")
+        .navigationTitle("Checkout")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await runDebugPlace() }
-        .alert("Couldn't place the demo order", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: { Text(failure ?? "") }
+        .task { await runDebugStep() }
     }
-
-    // MARK: Review
 
     private var review: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                NoticeRow(tone: .info, text: "Demo checkout. Everything in your cart is ordered together, here in FitMix. No payment details are needed, nothing is charged, and no store receives this order.")
+                NoticeRow(tone: .info, text: "Demo checkout. Everything in your cart is ordered together, from every store, here in FitMix. Nothing is charged and no store receives this order.")
                     .accessibilityIdentifier("checkoutDemoNotice")
-                ForEach(cart.groups) { group in
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Eyebrow(text: group.name, color: .fmInk)
-                            Spacer()
-                            Text(group.count == 1 ? "1 item" : "\(group.count) items").font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
-                        }
-                        ForEach(group.items) { OrderLineRow(item: $0, image: cart.localImage(for: $0)) }
-                    }
-                    .fmCard(padding: 14)
-                    .accessibilityIdentifier("checkoutStore-\(group.id)")
-                }
+                StoreGroupsList(groups: cart.groups, image: cart.localImage(for:))
                 CurrencyTotalsCard(totals: cart.totals, unpriced: cart.unpricedPieces, pieces: cart.count, stores: cart.groups.count)
             }
             .padding(16)
         }
         .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 8) {
-                Button(action: place) {
-                    if placing { ProgressView().tint(.white) } else { Label("Place Demo Order", systemImage: "checkmark.seal") }
+            BottomBar {
+                Button { navigator.path.append(.payment) } label: {
+                    Label("Continue to Payment", systemImage: "arrow.right")
                 }
                 .buttonStyle(FMFilledButtonStyle())
-                .disabled(placing || cart.loadError != nil)
-                .accessibilityIdentifier("checkoutPlaceDemoOrder")
-                Text("Saved on this iPhone only. Prices are the listed prices; nothing is paid.")
+                .disabled(cart.loadError != nil)
+                .accessibilityIdentifier("checkoutContinueToPayment")
+            }
+        }
+    }
+
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` continues to Payment once the screen is up.
+    private func runDebugStep() async {
+        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty, navigator.path.last == .checkout else { return }
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        CheckoutLog.record("debug-continue-to-payment", store: "-")
+        navigator.path.append(.payment)
+    }
+}
+
+// MARK: - Payment
+
+/// Demo payment: a preset demo card and a button that approves locally. Never collects card details,
+/// never calls Shopify or a payment provider, never places a retailer order.
+struct PaymentView: View {
+    @Environment(CartStore.self) private var cart
+    @Environment(DemoOrderStore.self) private var orders
+    @Environment(CheckoutNavigator.self) private var navigator
+
+    /// This visit to Payment. Saving twice with the same ID returns the first order instead of a second.
+    @State private var checkoutID = UUID()
+    @State private var paying = false
+    @State private var failure: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                demoModeBanner
+                demoCard
+                CurrencyTotalsCard(totals: cart.totals, unpriced: cart.unpricedPieces, pieces: cart.count, stores: cart.groups.count)
+                Text("Simulate Payment approves this order on your iPhone. No card details are collected, no money is charged, and no payment provider, Shopify or store is contacted.")
                     .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(16)
-            .background(Color.fmBackground)
-            .overlay(alignment: .top) { Rectangle().fill(Color.fmHairline).frame(height: 1) }
         }
+        .background(Color.fmBackground.ignoresSafeArea())
+        .navigationTitle("Payment")
+        .navigationBarTitleDisplayMode(.inline)
+        // While the order is saving, there's no going back to change the cart under it.
+        .navigationBarBackButtonHidden(paying)
+        .safeAreaInset(edge: .bottom) {
+            BottomBar {
+                Button(action: pay) {
+                    if paying {
+                        HStack(spacing: 8) { ProgressView().tint(.white); Text("Approving…") }
+                    } else {
+                        Label("Simulate Payment", systemImage: "checkmark.shield")
+                    }
+                }
+                .buttonStyle(FMFilledButtonStyle())
+                .disabled(paying || cart.isEmpty || cart.loadError != nil)
+                .accessibilityIdentifier("paymentSimulate")
+            }
+        }
+        .task { await runDebugPay() }
+        .alert("Couldn't place the demo order", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("Try Again") { pay() }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(failure ?? "") }
     }
 
-    /// Saves the order first; only once it's on disk are those exact lines removed from the cart.
-    private func place() {
-        guard !placing else { return }
-        placing = true
-        defer { placing = false }
-        let items = cart.items
-        let order: DemoOrder
-        do {
-            order = try orders.place(items)
-        } catch {
-            CheckoutLog.record("demo-order-failed", store: "-", note: error.localizedDescription)
-            failure = error.localizedDescription
+    private var demoModeBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "testtube.2").font(.system(size: 16, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Demo mode").font(.system(size: 15, weight: .bold))
+                Text("This payment is simulated. Nothing is charged.").font(.system(size: 13))
+            }
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Color.fmInk)
+        .padding(12)
+        .background(Color.fmLime.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.fmInk.opacity(0.15)))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("paymentDemoMode")
+    }
+
+    /// The preset demo card. It's a label, not a form: there is nothing to type and nothing is stored.
+    private var demoCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Eyebrow(text: "Pay with", color: .fmInk)
+            HStack(spacing: 12) {
+                Image(systemName: "creditcard.fill").font(.system(size: 22)).foregroundStyle(Color.fmCobalt)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Demo card •••• 4242").font(.system(size: 16, weight: .semibold).monospacedDigit()).foregroundStyle(Color.fmInk)
+                    Text("Preset for the demo. Not a real card.").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                }
+                Spacer()
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.fmCobalt)
+            }
+        }
+        .fmCard(padding: 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("paymentDemoCard")
+    }
+
+    /// Approves locally, saves the order, and only once it's saved removes those exact lines from the cart.
+    private func pay() {
+        guard !paying else {
+            CheckoutLog.record("payment-tap-ignored", store: "-", note: "reason=already_saving")
             return
         }
-        CheckoutLog.record("demo-order-saved", store: "-", note: "number=\(order.number) lines=\(order.items.count) pieces=\(order.items.reduce(0) { $0 + $1.quantity }) stores=\(Set(order.items.map(\.retailerKey)).count) totals=\(CartItem.totals(of: order.items).map(\.price.formatted)) file=\(orders.fileURL.path)")
-        do {
-            try cart.remove(ids: Set(items.map(\.id)))
-        } catch {
-            cartWarning = "Your demo order was saved, but FitMix couldn't remove those pieces from your cart: \(error.localizedDescription)"
+        paying = true
+        let items = cart.items
+        let checkoutID = checkoutID
+        CheckoutLog.record("payment-simulate", store: "-", note: "checkout=\(checkoutID.uuidString.prefix(8)) lines=\(items.count)")
+        Task {
+            // A short pause so "Approving…" is visible, like a real authorization. Nothing leaves the phone.
+            try? await Task.sleep(for: .milliseconds(900))
+            let order: DemoOrder
+            do {
+                order = try orders.place(items, checkoutID: checkoutID)
+            } catch {
+                CheckoutLog.record("demo-order-failed", store: "-", note: error.localizedDescription)
+                failure = error.localizedDescription  // cart untouched; Try Again saves with the same checkout ID
+                paying = false
+                return
+            }
+            CheckoutLog.record("demo-order-saved", store: "-", note: "number=\(order.number) lines=\(order.items.count) pieces=\(order.pieces) stores=\(Set(order.items.map(\.retailerKey)).count) totals=\(order.savedTotals.map(\.price.formatted)) file=\(orders.fileURL.path)")
+            var cartWarning: String?
+            do {
+                try cart.remove(ids: Set(items.map(\.id)))
+            } catch {
+                cartWarning = error.localizedDescription
+            }
+            CheckoutLog.record("cart-after-order", store: "-", note: "items=\(cart.items.count) orders=\(orders.orders.count)\(cartWarning.map { " warning=\($0)" } ?? "")")
+            // Replaces the stack: Order Summary, with nothing payable behind it.
+            navigator.path = [.summary(order.id, justPlaced: true)]
         }
-        CheckoutLog.record("cart-after-order", store: "-", note: "items=\(cart.items.count)")
-        placedID = order.id
     }
 
-    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` taps Place Demo Order once the screen is up.
-    private func runDebugPlace() async {
-        guard DebugCheckoutScript.current?.placeOrder == true, placedID == nil, !cart.isEmpty else { return }
-        try? await Task.sleep(for: .seconds(2))
-        place()
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` taps Simulate Payment, then taps it again right away (and once more
+    /// while saving), as an impatient shopper would. Only one order may be saved.
+    private func runDebugPay() async {
+        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty else { return }
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        pay()
+        pay()
+        try? await Task.sleep(for: .milliseconds(300))
+        pay()
+    }
+}
+
+// MARK: - Order Summary
+
+/// A saved demo order. Right after payment it replaces the whole flow: no Back to a payable screen, and
+/// Done closes the flow. From "Demo orders" in the cart it opens like any other page.
+struct OrderSummaryView: View {
+    var orderID: UUID
+    var justPlaced: Bool
+
+    @Environment(DemoOrderStore.self) private var orders
+    @Environment(CheckoutNavigator.self) private var navigator
+
+    var body: some View {
+        Group {
+            if let order = orders.order(id: orderID) {
+                ScrollView { DemoOrderSummary(order: order).padding(16) }
+            } else {
+                ScrollView {
+                    ProfileEmptyState(icon: "questionmark.folder", title: "Order not found",
+                                      message: "This demo order isn't saved on this iPhone for this account.").padding(16)
+                }
+            }
+        }
+        .background(Color.fmBackground.ignoresSafeArea())
+        .navigationTitle("Order Summary")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(justPlaced)
+        .safeAreaInset(edge: .bottom) {
+            if justPlaced {
+                BottomBar {
+                    Button("Done") { navigator.close() }
+                        .buttonStyle(FMFilledButtonStyle())
+                        .accessibilityIdentifier("orderSummaryDoneButton")
+                }
+            }
+        }
     }
 }
 
 // MARK: - Shared pieces
 
-/// One line as it's ordered: photo, title, store, variant, quantity, listed price.
+/// A bottom action bar above the safe area.
+struct BottomBar<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 8) { content }
+            .padding(16)
+            .background(Color.fmBackground)
+            .overlay(alignment: .top) { Rectangle().fill(Color.fmHairline).frame(height: 1) }
+    }
+}
+
+/// Lines grouped by store, one card per store.
+struct StoreGroupsList: View {
+    var groups: [CartStore.RetailerGroup]
+    var image: (CartItem) -> UIImage? = { _ in nil }
+
+    var body: some View {
+        ForEach(groups) { group in
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Eyebrow(text: group.name, color: .fmInk)
+                    Spacer()
+                    Text(group.count == 1 ? "1 item" : "\(group.count) items").font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+                }
+                ForEach(group.items) { OrderLineRow(item: $0, image: image($0)) }
+            }
+            .fmCard(padding: 14)
+            .accessibilityIdentifier("store-\(group.id)")
+        }
+    }
+}
+
+/// One line as it's ordered: photo, title, size or variant, quantity, listed price.
 struct OrderLineRow: View {
     var item: CartItem
     var image: UIImage? = nil
@@ -124,18 +323,19 @@ struct OrderLineRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             GarmentTile(source: image.map { .image($0) } ?? item.imageURL.map { .remote($0) } ?? .none, category: item.category)
-                .frame(width: 44, height: 50)
+                .frame(width: 52, height: 60)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(item.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk).lineLimit(2)
                     if item.isFixture { TagPill(text: "Test fixture") }
                 }
-                Text(item.retailer ?? "Store not listed").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
-                Text("\(variant) · Qty \(item.quantity)").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                Text(variant).font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                Text("Qty \(item.quantity)").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
             }
             Spacer(minLength: 0)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(item.lineTotal?.formatted ?? "No price").font(.system(size: 14, weight: item.lineTotal == nil ? .regular : .bold))
+                Text(item.lineTotal?.formatted ?? "Price unavailable")
+                    .font(.system(size: 14, weight: item.lineTotal == nil ? .regular : .bold))
                     .foregroundStyle(item.lineTotal == nil ? Color.fmSecondary : Color.fmInk)
                 if item.quantity > 1, let unit = item.unitPrice {
                     Text("\(unit.formatted) each").font(.system(size: 11)).foregroundStyle(Color.fmSecondary)
@@ -153,7 +353,8 @@ struct OrderLineRow: View {
     }
 }
 
-/// Totals per currency, never converted or added across currencies.
+/// Totals per currency, never converted or added across currencies. Pieces without a price are named,
+/// never counted as zero.
 struct CurrencyTotalsCard: View {
     var totals: [CurrencyTotal]
     var unpriced: Int
@@ -169,7 +370,7 @@ struct CurrencyTotalsCard: View {
                     .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
             }
             if totals.isEmpty {
-                Text("No listed prices").font(.system(size: 15)).foregroundStyle(Color.fmSecondary)
+                Text("Prices unavailable").font(.system(size: 15)).foregroundStyle(Color.fmSecondary)
             }
             ForEach(totals, id: \.price.currencyCode) { total in
                 HStack(alignment: .firstTextBaseline) {
@@ -181,54 +382,47 @@ struct CurrencyTotalsCard: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("total-\(total.price.currencyCode)")
             }
-            if unpriced > 0 {
-                Text(unpriced == 1 ? "1 item has no listed price and isn't in a total." : "\(unpriced) items have no listed price and aren't in a total.")
+            if totals.count > 1 {
+                Text("Each currency is totaled on its own. Nothing is converted.")
                     .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+            }
+            if unpriced > 0 {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(unpriced == 1 ? "1 item · Price unavailable" : "\(unpriced) items · Price unavailable")
+                        .font(.system(size: 14)).foregroundStyle(Color.fmSecondary)
+                    Spacer()
+                    Text("Not in any total").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fmSecondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("total-unpriced")
             }
         }
         .fmCard(padding: 14)
     }
 }
 
-/// A placed demo order: number, date, every line, totals per currency.
+/// A placed demo order: headline, number, time, items by store, totals per currency.
 struct DemoOrderSummary: View {
     var order: DemoOrder
-    var headline: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 34)).foregroundStyle(Color.fmGreen)
-                Text(headline).font(.fmDisplay(28)).foregroundStyle(Color.fmInk)
+                Text("Demo order placed").font(.fmDisplay(28)).foregroundStyle(Color.fmInk)
                     .accessibilityIdentifier("demoOrderHeadline")
                 Text("Order \(order.number)").font(.system(size: 17, weight: .semibold).monospacedDigit())
                     .accessibilityIdentifier("demoOrderNumber")
                 Text(order.placedAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
-                Text("A demo order saved on this iPhone. Nothing was paid, and no store received it.")
+                Text("Paid with Demo card •••• 4242 in demo mode. Nothing was charged, and no store received this order.")
                     .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 10) {
-                Eyebrow(text: "Items", color: .fmInk)
-                ForEach(order.items) { OrderLineRow(item: $0) }
-            }
-            .fmCard(padding: 14)
-            CurrencyTotalsCard(totals: CartItem.totals(of: order.items), unpriced: CartItem.unpricedPieces(in: order.items),
-                               pieces: order.items.reduce(0) { $0 + $1.quantity },
+            StoreGroupsList(groups: CartStore.groups(of: order.items))
+            CurrencyTotalsCard(totals: order.savedTotals, unpriced: order.savedUnpricedPieces, pieces: order.pieces,
                                stores: Set(order.items.map(\.retailerKey)).count)
         }
-    }
-}
-
-/// A saved demo order, opened from the cart.
-struct DemoOrderView: View {
-    var order: DemoOrder
-
-    var body: some View {
-        ScrollView { DemoOrderSummary(order: order, headline: "Demo order placed").padding(16) }
-            .background(Color.fmBackground.ignoresSafeArea())
-            .navigationTitle("Order")
-            .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -43,6 +43,10 @@ import SwiftUI
                     profile.activate(accountID: id)
                     cart.activate(accountID: id)
                     orders.activate(accountID: id)
+                    #if DEBUG
+                    // FM_DEBUG_CART_SEED replaces whichever cart just loaded (guest, then the signed-in account).
+                    if let seed = DebugCheckoutScript.current?.seed { DemoCheckoutFixtures.seed(seed, into: cart) }
+                    #endif
                 }
                 // Studio always renders from the current try-on photo, including after it's replaced or removed.
                 .onChange(of: store.bodyPhoto) { _, photo in studio.useTryOnPhoto(photo) }

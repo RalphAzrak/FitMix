@@ -50,12 +50,22 @@ final class DemoOrderStore {
     func order(id: UUID) -> DemoOrder? { orders.first { $0.id == id } }
 
     /// Saves a demo order of `items` and returns it. Memory only changes once the file is written, so an
-    /// order that failed to save never shows as placed.
-    func place(_ items: [CartItem], at date: Date = .now) throws -> DemoOrder {
+    /// order that failed to save never shows as placed. `checkoutID` identifies one Payment visit: if an
+    /// order from it was already saved, that order is returned and nothing new is written.
+    func place(_ items: [CartItem], checkoutID: UUID? = nil, at date: Date = .now) throws -> DemoOrder {
+        if let checkoutID, let existing = orders.first(where: { $0.checkoutID == checkoutID }) { return existing }
         guard !items.isEmpty else { throw DemoOrderError.emptyCart }
         guard loadError == nil else { throw DemoOrderError.unreadable }
+        #if DEBUG
+        // FM_DEBUG_ORDER_SAVE_FAIL=1: the first save fails, to check the cart stays intact and Retry works.
+        if ProcessInfo.processInfo.environment["FM_DEBUG_ORDER_SAVE_FAIL"] == "1", !Self.debugFailedOnce {
+            Self.debugFailedOnce = true
+            throw DemoOrderError.saveFailed
+        }
+        #endif
         let order = DemoOrder(id: UUID(), number: DemoOrder.makeNumber(at: date, existing: Set(orders.map(\.number))),
-                              placedAt: date, items: items)
+                              placedAt: date, items: items, totals: CartItem.totals(of: items),
+                              unpricedPieces: CartItem.unpricedPieces(in: items), checkoutID: checkoutID)
         let next = [order] + orders
         do {
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true,
@@ -69,6 +79,10 @@ final class DemoOrderStore {
         orders = next
         return order
     }
+
+    #if DEBUG
+    private static var debugFailedOnce = false
+    #endif
 
     var fileURL: URL {
         baseDirectory.appendingPathComponent(accountID?.uuidString.lowercased() ?? "guest", isDirectory: true)

@@ -65,7 +65,10 @@ final class CartStore {
     }
 
     /// Lines grouped by store, in the order each store was first added.
-    var groups: [RetailerGroup] {
+    var groups: [RetailerGroup] { Self.groups(of: items) }
+
+    /// Any lines (the cart's, or a saved order's) grouped by store, in the order each store first appears.
+    nonisolated static func groups(of items: [CartItem]) -> [RetailerGroup] {
         var order: [String] = []
         var byKey: [String: [CartItem]] = [:]
         for item in items {

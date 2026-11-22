@@ -66,7 +66,7 @@ struct CameraView: View {
         .onChange(of: covered) { _, covered in
             if covered { camera.deactivate(release: false) } else { Task { await camera.activate() } }
         }
-        .sheet(isPresented: $showBag) { NavigationStack { CartView() } }
+        .fullScreenCover(isPresented: $showBag) { CheckoutFlowView() }
         .fullScreenCover(isPresented: $showAccount) { AccountFlowView() }
     }
 

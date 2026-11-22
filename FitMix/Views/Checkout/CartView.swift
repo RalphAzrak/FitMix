@@ -1,18 +1,16 @@
 import SwiftUI
 
-/// The cart: pieces the user added from Shop This Look, with size and quantity, grouped by store.
-/// **Checkout** opens FitMix's own demo checkout for the whole cart (`CheckoutView`): no store
-/// redirects, no payment, works offline. Recent demo orders are listed here too.
+/// The cart, the first page of the demo checkout flow (`CheckoutFlowView`): pieces the user added from
+/// Shop This Look, with size and quantity, grouped by store. One **Checkout** button pushes the demo
+/// checkout for the whole cart, every store together. Recent demo orders are listed here too and open
+/// their Order Summary.
 struct CartView: View {
     @Environment(CartStore.self) private var cart
     @Environment(DemoOrderStore.self) private var orders
-    @Environment(\.dismiss) private var dismiss
-    /// False when pushed inside another screen's navigation (Shop This Look), where Back is enough.
-    var showsDone = true
+    @Environment(CheckoutNavigator.self) private var navigator
 
     @State private var failure: String?
     @State private var confirmClear = false
-    @State private var showCheckout = false
 
     var body: some View {
         Group {
@@ -35,8 +33,8 @@ struct CartView: View {
         .navigationTitle("Cart")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if showsDone {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { navigator.close() }.accessibilityIdentifier("cartDone")
             }
             if !cart.isEmpty && cart.loadError == nil {
                 ToolbarItem(placement: .topBarLeading) {
@@ -45,7 +43,6 @@ struct CartView: View {
                 }
             }
         }
-        .navigationDestination(isPresented: $showCheckout) { CheckoutView() }
         .task { await runDebugCheckout() }
         .confirmationDialog("Remove everything from your cart?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear Cart", role: .destructive) { perform { try cart.removeAll() } }
@@ -210,7 +207,7 @@ struct CartView: View {
                 .accessibilityIdentifier("cartTotals")
             }
             Button {
-                showCheckout = true
+                navigator.path.append(.checkout)
             } label: {
                 Label("Checkout", systemImage: "bag")
             }
@@ -229,15 +226,16 @@ struct CartView: View {
             NoticeRow(tone: .caution, text: error)
         } else if !orders.orders.isEmpty {
             FMSectionHeader(title: "Demo orders")
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("demoOrdersSection")
+                .accessibilityValue("\(orders.orders.count)")
             ForEach(orders.orders.prefix(5)) { order in
-                NavigationLink {
-                    DemoOrderView(order: order)
-                } label: {
+                NavigationLink(value: CheckoutRoute.summary(order.id, justPlaced: false)) {
                     HStack(spacing: 12) {
                         Image(systemName: "checkmark.seal.fill").foregroundStyle(Color.fmGreen)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Demo order placed · \(order.number)").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk)
-                            Text("\(order.items.reduce(0) { $0 + $1.quantity }) items · \(CartItem.totals(of: order.items).map(\.price.formatted).joined(separator: " · ")) · \(order.placedAt.formatted(date: .abbreviated, time: .shortened))")
+                            Text("\(order.pieces) items · \(order.savedTotals.map(\.price.formatted).joined(separator: " · ")) · \(order.placedAt.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
                         }
                         Spacer()
@@ -251,11 +249,12 @@ struct CartView: View {
         }
     }
 
-    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` goes on to Checkout, which places the order.
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` taps Checkout, then Checkout and Payment carry on.
     private func runDebugCheckout() async {
-        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty else { return }
-        try? await Task.sleep(for: .seconds(1.5))
-        showCheckout = true
+        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty, navigator.path.isEmpty else { return }
+        do { try await Task.sleep(for: .seconds(1.5)) } catch { return }
+        CheckoutLog.record("debug-cart-checkout", store: "-", note: "items=\(cart.items.count) stores=\(cart.groups.count)")
+        navigator.path.append(.checkout)
     }
 
     private func perform(_ change: () throws -> Void) {
