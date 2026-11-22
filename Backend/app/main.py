@@ -7,7 +7,7 @@
 - `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
   server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
   labeled "exact", "brand" or "similar" (see visual_search.py).
-- `POST /v1/outfit-match`: Studio's OpenAI garment matching and Canadian storefront search.
+- `POST /v1/outfit-match`: Studio's OpenAI-orchestrated image-first product search.
 - `POST /v1/lens-search`: legacy compatibility route for older app builds. This server asks Google
   Lens (via Scrappa) for visual matches and returns the best credible retailer listing, labeled "similar"
   (see lens_search.py). Cached, de-duplicated and capped per month.
@@ -36,7 +36,8 @@ from fastapi.responses import JSONResponse, Response
 
 from . import avatar3d
 from .mock import placeholder_png
-from .outfit_match import CURRENCY, OpenAIGarmentAnalysis, OutfitMatcher, ShopifyCatalog, price
+from .outfit_match import OpenAIVisualSearch, OutfitMatcher, TrendtrackImageSearch
+from .retailer_product import CURRENCY, price
 from .prompt import build_outfit_prompt, build_prompt
 from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
@@ -64,6 +65,7 @@ FALLBACK_MODEL = "gpt-image-2"
 @dataclass(frozen=True)
 class Settings:
     api_key: str = field(default="", repr=False)
+    trendtrack_api_key: str = field(default="", repr=False)
     model: str = "gpt-image-2.6-sunburst"
     matching_model: str = "gpt-4.1-mini"
     quality: str = "medium"
@@ -96,6 +98,7 @@ class Settings:
         env = os.environ
         return Settings(
             api_key=env.get("OPENAI_API_KEY", "").strip(),
+            trendtrack_api_key=env.get("TRENDTRACK_API_KEY", "").strip(),
             model=env.get("OPENAI_IMAGE_MODEL", "").strip() or Settings.model,
             matching_model=env.get("OPENAI_MATCH_MODEL", "").strip() or Settings.matching_model,
             quality=env.get("OPENAI_IMAGE_QUALITY", "").strip() or Settings.quality,
@@ -253,8 +256,8 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         enricher = ListingEnricher()
     lens = lens or default_lens_search(settings, crop_host, enricher)
     outfit = outfit or OutfitMatcher(
-        OpenAIGarmentAnalysis(settings.api_key, settings.matching_model) if settings.api_key else None,
-        ShopifyCatalog(),
+        OpenAIVisualSearch(settings.api_key, settings.matching_model) if settings.api_key else None,
+        TrendtrackImageSearch(settings.trendtrack_api_key) if settings.trendtrack_api_key else None,
     )
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
     recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
@@ -304,7 +307,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
                 "avatar3d_ready": builder.ready,
                 "match_ready": bool(providers), "match_providers": [p.name for p in providers],
                 "match_skipped": skipped, "lens_search": lens.status(),
-                "outfit_match": {"ready": outfit.analysis is not None, "currency": CURRENCY}}
+                "outfit_match": {"ready": outfit.ready, "currency": CURRENCY, "discovery": "trendtrack"}}
 
     @app.get("/v1/crops/{token}.jpg")
     async def crop_for_provider(token: str):

@@ -216,7 +216,7 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
                   let score = item.visual_score, (0...100).contains(score),
                   let image = item.image_url.flatMap(URL.init(string:)), image.scheme == "https", image.host() != nil,
                   let link = item.url.flatMap(URL.init(string:)), link.scheme == "https", link.host() != nil,
-                  let cost = item.price, cost.currency == body.currency,
+                  let cost = item.price, cost.currency.range(of: "^[A-Z]{3}$", options: .regularExpression) != nil,
                   let amount = Decimal(string: cost.value, locale: Locale(identifier: "en_US_POSIX")), amount > 0 else { return nil }
             return RetailerListing(id: item.id, title: item.title, retailer: item.retailer, seller: item.seller,
                                    imageURL: image, listingURL: link, price: amount, currency: cost.currency,

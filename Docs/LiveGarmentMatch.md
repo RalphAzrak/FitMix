@@ -81,10 +81,10 @@ matching chroma, and a dark T-shirt under a black jacket is still separated, by 
 ## Product match
 
 Studio sends the clearest eligible crop for each garment using up to four recent snapshots. Each
-crop goes to `POST /v1/outfit-match` independently. OpenAI describes the garment, then scores a batch
-of Canadian retailer listings on color, cut, pattern, and distinctive details. A verified retailer
-SKU or barcode matching a visible code earns **Exact match**. Otherwise Studio shows the highest-scoring
-listing as **Closest match**. **More matches** opens the alternatives. Changing the listing also updates
+crop goes to `POST /v1/outfit-match` independently. OpenAI invokes Trendtrack’s image search with the actual
+crop, then compares the crop against the retailer photos. The score uses color, cut, pattern and distinctive
+details. A verified retailer code matching a visible code earns **Exact match**. Otherwise Studio shows the
+highest-scoring credible listing as **Similar match**. **More matches** opens the alternatives. Changing the listing also updates
 the selected-product summary and shopping review.
 
 **Budget** sets one cap in CAD. Studio maximizes the number of included garments and then total

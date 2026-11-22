@@ -9,8 +9,8 @@ variables. They are never in the app or in Git.
   The server returns one styled image. See [Avatar outfit previews](#avatar-outfit-previews).
 - **3D avatars:** the app sends the accepted portrait. The server builds a rotatable model on this computer.
   See [3D avatars](#3d-avatars).
-- **Outfit match:** the app sends one crop per garment. OpenAI describes each crop and scores real
-  Canadian storefront listings. See [Studio outfit matching](#studio-outfit-matching).
+- **Outfit match:** the app sends one crop per garment. OpenAI invokes image-based discovery and compares
+  the crop with verified retailer photos. See [Studio outfit matching](#studio-outfit-matching).
 
 ## Run it on your Mac
 
@@ -121,29 +121,34 @@ codes are. When one provider fails, the others' results are still returned.
 
 ## Studio outfit matching
 
-Set `OPENAI_API_KEY` in this worktree's ignored `Backend/.env` and run `./run.sh`.
-`OPENAI_MATCH_MODEL` defaults to `gpt-4.1-mini` and is separate from the avatar image model.
-`/health` reports `outfit_match.ready` and the market currency. Readiness checks for a configured key.
-Use the same network for the iPhone and Mac, then build and run this worktree's Xcode project.
-Remove any `FM_DEBUG_MATCH_FIXTURE` or camera replay settings from the Xcode scheme for a live scan.
+Add `OPENAI_API_KEY` and `TRENDTRACK_API_KEY` to this worktree's ignored `Backend/.env`.
+`OPENAI_MATCH_MODEL` defaults to `gpt-4.1-mini`. Start the server with `./run.sh`.
+Check `/health` for `outfit_match.ready` and `outfit_match.discovery`. Readiness indicates that
+both keys are configured. Trendtrack requires API access to its image search endpoint.
 
-Studio sends one crop per garment concurrently to `POST /v1/outfit-match`. Only that garment's image goes
-to OpenAI for analysis. OpenAI ranks a batch of real Canadian storefront candidates using color (35),
-cut (30), pattern (20), and distinctive details (15). Shopify predictive search supplies products for
-Frank And Oak, tentree, and Vessi Canada. Storefront cart context must report CAD, and the product
-must be available with a positive price, a product-page link and a photo. Exact matches additionally
-require a code visible in the crop that equals a retailer variant SKU or barcode. The score is separate
-from the identity label.
+FitMix sends one garment JPEG per garment to `POST /v1/outfit-match`. OpenAI invokes the
+backend's `discover_products_by_image` function. That function sends the unchanged crop as
+the multipart image to [Trendtrack product image search](https://docs.trendtrack.io/en/docs/guides/image-search).
+Discovery covers Trendtrack's indexed stores. FitMix has no store allowlist. It resolves each
+hit to its retailer page, requires a structured in-stock offer with a price and currency,
+and downloads the retailer's product photo. The OpenAI ranking call sees only the crop,
+product photos and category. It compares color (35), cut (30), pattern (20) and details (15).
+A visible product code must match a retailer SKU, MPN or GTIN for an **Exact match**.
+Otherwise Studio shows a credible **Similar match**, or no result if verification fails.
 
-The Budget button compares CAD subtotals before tax and shipping. It picks a complete outfit when
-possible, maximizing total visual score, and otherwise maximizes the number of pieces before score.
-If the initial candidates cannot fill the outfit, the app searches for lower-priced candidates using
-short-lived search IDs. These reuse in-memory garment descriptions and never reupload the crops.
-Pick an alternative in Layers & Garments to update the outfit or see a warning if it exceeds the cap.
+The app shows the merchant's currency. The existing outfit budget uses CAD listings only
+and compares item prices before tax and shipping. Budget follow-ups page the same image
+search without re-uploading to Trendtrack. The backend retains the original crop in memory
+for up to 10 minutes when more pages are available, with a 16 MiB server-wide cap. Crops
+are never written to disk. Each initial result or budget fetch can examine at most two
+pages of 12 hits. Trendtrack charges API credits per returned row and for detail lookups
+when needed.
 
-Test by scanning a jacket with at least one other garment and tapping its target. Product cards should
-arrive independently. Use the Xcode console category `OutfitMatching` for first card and outfit-settled
-timings. The backend emits per-garment timings. Scrappa and a public crop URL are unnecessary for Studio.
+For an iPhone test, run the backend on the same Wi-Fi, then build this worktree in Xcode.
+Disable `FM_DEBUG_MATCH_FIXTURE` and camera replay settings. Open **Scan Fits** and tap a
+garment target. In **Layers & Garments**, check the shop link, photo, currency and visual
+score. Try an alternative, open **Shop This Look**, and set a CAD budget. The Xcode console
+category `OutfitMatching` shows first-card and settled timings.
 
 ## Legacy product search: `POST /v1/lens-search`
 
