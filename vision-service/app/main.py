@@ -47,23 +47,43 @@ def build_pipeline(settings: Settings) -> Pipeline | None:
         return Pipeline(MockSegmenter(), MockDescriber(), embedder, MockCatalog(embedder),
                         MockOnlineSearch(top_k=settings.online_top_k), catalog_top_k=settings.catalog_top_k)
 
-    describer = online = None
+    describer = None
     if settings.openai_api_key:
         from .describe import OpenAIDescriber
 
         describer = OpenAIDescriber(settings.openai_api_key, settings.openai_vision_model,
                                     settings.openai_timeout_seconds, settings.openai_image_detail)
-    if settings.serpapi_key:
-        from .search import SerpApiClient, ShoppingSearch
-
-        client = SerpApiClient(settings.serpapi_key, settings.serpapi_country, settings.serpapi_language)
-        online = ShoppingSearch(client, top_k=settings.online_top_k)
     embedder = load_embedder(settings)
     catalog = load_catalog(settings, embedder) if embedder is not None else None
+    online = build_online_search(settings, embedder)
     if describer is None and online is None and embedder is None:
         return None
     segmenter = load_segmenter(settings)
     return Pipeline(segmenter, describer, embedder, catalog, online, catalog_top_k=settings.catalog_top_k)
+
+
+def build_online_search(settings: Settings, embedder):
+    """Lens + Shopping with re-ranking when embeddings are available (Lens only with a Supabase crop store),
+    otherwise Shopping alone in Google's order. None without a SerpAPI key."""
+    if not settings.serpapi_key:
+        return None
+    from .search import OnlineSearch, SerpApiClient, ShoppingSearch
+
+    client = SerpApiClient(settings.serpapi_key, settings.serpapi_country, settings.serpapi_language)
+    if embedder is None:
+        log.warning("online search without re-ranking: image embeddings aren't available")
+        return ShoppingSearch(client, top_k=settings.online_top_k)
+    storage = None
+    if settings.supabase_url and settings.supabase_service_role_key:
+        from .storage import SupabaseStorage
+
+        storage = SupabaseStorage(settings.supabase_url, settings.supabase_service_role_key,
+                                  settings.supabase_crop_bucket, settings.signed_url_seconds)
+    else:
+        log.warning("Google Lens is off: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY so Lens can fetch crops")
+    return OnlineSearch(client, embedder, storage, image_weight=settings.rerank_image_weight,
+                        attr_weight=settings.rerank_attr_weight, top_k=settings.online_top_k,
+                        max_candidates=settings.rerank_max_candidates, lens_cache_seconds=settings.cache_ttl_seconds)
 
 
 def load_embedder(settings: Settings):

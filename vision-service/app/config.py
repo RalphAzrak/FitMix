@@ -56,6 +56,8 @@ class Settings:
     # Online re-ranking: score = image_weight * cosine + attr_weight * attribute_match.
     rerank_image_weight: float = 0.8
     rerank_attr_weight: float = 0.2
+    # At most this many merged Lens + Shopping results are downloaded and re-ranked per search.
+    rerank_max_candidates: int = 40
     # Garment segmentation for photos. Off: photos are described as a whole instead.
     segmentation: bool = True
     segmentation_model: str = "mattmdjaga/segformer_b2_clothes"
@@ -96,6 +98,7 @@ class Settings:
             signed_url_seconds=_int(env, "SIGNED_URL_SECONDS", d.signed_url_seconds),
             rerank_image_weight=_float(env, "RERANK_IMAGE_WEIGHT", d.rerank_image_weight),
             rerank_attr_weight=_float(env, "RERANK_ATTR_WEIGHT", d.rerank_attr_weight),
+            rerank_max_candidates=_int(env, "RERANK_MAX_CANDIDATES", d.rerank_max_candidates),
             segmentation=_flag(env.get("SEGMENTATION", "1")),
             segmentation_model=env.get("SEGMENTATION_MODEL", "").strip() or d.segmentation_model,
             embeddings=_flag(env.get("EMBEDDINGS", "1")),

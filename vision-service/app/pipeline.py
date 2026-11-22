@@ -109,6 +109,7 @@ class OnlineRequest:
     category: str | None
     query: str
     key: str  # stable name for uploads, e.g. "<analysis_id>/<index>"
+    brand: str | None = None  # set by /refine
 
 
 @dataclass
@@ -285,7 +286,7 @@ class Pipeline:
             raise StepFailure("not_configured", "Online search isn't set up on this service (SERPAPI_KEY).")
         request = OnlineRequest(crop=garment.crop, crop_jpeg=garment.crop_jpeg, embedding=garment.embedding,
                                 attributes=garment.attributes, category=garment.category, query=query,
-                                key=f"{analysis.id}/{index}")
+                                key=f"{analysis.id}/{index}", brand=(brand or "").strip() or None)
         try:
             result = await self.online.search(request, timer)
         except Exception as error:

@@ -23,14 +23,14 @@ garment-and-brand pair is searched once and then cached, so credits are only spe
 | 2 | Real OpenAI description + Google Shopping links | ✅ done |
 | 3 | SegFormer segmentation (per-garment crops) | ✅ done |
 | 4 | FashionCLIP catalog matching + demo catalog | ✅ done |
-| 5 | Google Lens (via Supabase signed links) + re-ranking | planned |
+| 5 | Google Lens (via Supabase signed links) + re-ranking | ✅ done |
 | 6 | `/refine` on real search + image-hash cache | planned |
 
 Without `MOCK_MODE=1`, each step runs when its key is present, and steps that aren't built or configured yet
 are skipped (they're `null` in `/health` → `components`). With neither `OPENAI_API_KEY` nor `SERPAPI_KEY`,
 `/analyze` answers `503 not_configured`.
 
-**What runs today (after stage 4):**
+**What runs today (after stage 5):**
 - **A photo** (`image`) is segmented by SegFormer into upper clothes, dress, skirt, pants and shoes. Each
   garment is cut out onto white, and pieces under `MIN_GARMENT_AREA` of the photo are dropped (shoes need half
   that). All the crops are then described in one OpenAI call. The model merges a jacket and the top under it
@@ -38,8 +38,15 @@ are skipped (they're `null` in `/health` → `components`). With neither `OPENAI
 - **Crops** (`crops`) skip segmentation and are described the same way.
 - If the segmentation model can't load, or `SEGMENTATION=0`, photos are described as a whole instead: the LLM
   lists the garments, and each `crop_url` shows the whole photo (`source_label: "whole_photo"`). The log says why.
-- **`/search`** returns Google Shopping links for the garment's `search_query`. Their `score` follows Google's
-  order (1.0 for the first, then falling) until image re-ranking arrives in stage 5.
+- **`/search`** runs **Google Lens** with the garment crop and **Google Shopping** with its `search_query`, side
+  by side (2 SerpAPI searches). The results are merged, so a link both found is one result
+  (`source: "lens+shopping"`). Then the **top 10 come back re-ranked** by how alike their thumbnails look (see
+  [Re-ranking](#re-ranking)).
+  - Lens needs the Supabase settings: it downloads the crop through a signed link, and the crop is deleted from
+    the bucket right after. Without those settings, Lens is skipped and the log says so.
+  - If FashionCLIP isn't available, `/search` falls back to Shopping alone, in Google's order.
+  - **`/refine`** reuses the garment's Lens results (the picture hasn't changed), so only Shopping runs again, with
+    the brand in the query. It costs 1 search.
 - **Catalog matches:** each garment is embedded with FashionCLIP and compared with the demo catalog's products
   of the same category. The 5 most similar come back as `catalog_matches`, best first. If FashionCLIP can't
   load or `EMBEDDINGS=0`, `catalog_matches` stays empty and the log says why.
@@ -65,7 +72,7 @@ For the Mac that runs the service (Apple Silicon recommended: the models then ru
    | `SERPAPI_KEY` | stage 2 | [serpapi.com/manage-api-key](https://serpapi.com/manage-api-key). The free plan has a small monthly search quota. |
    | `SUPABASE_URL` | stage 5 | Already filled in with FitMix's project. |
    | `SUPABASE_SERVICE_ROLE_KEY` | stage 5 | Supabase dashboard → Project Settings → API → `service_role` key. **A master key**: keep it only in this file. |
-   | `SUPABASE_CROP_BUCKET` | stage 5 | Create a **private** bucket with this name (default `vision-crops`) under Storage. |
+   | `SUPABASE_CROP_BUCKET` | stage 5 | Supabase dashboard → Storage → **New bucket**, named `vision-crops` (or your choice), with **Public bucket turned off**. No policies needed: the service role key can use it. |
    | `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` | stage 4, optional | Only for the catalog seed script; the same keys as `Backend/.env`. |
    | `VISION_APP_TOKEN` | optional | Any random string. When set, callers must send `Authorization: Bearer <token>`. |
 
@@ -207,15 +214,19 @@ startup only for new or changed products and cached in `catalog/embeddings.npz`,
 service after changing the catalog. Matches from local images point at `/catalog-images/<file>`, served by
 this service.
 
-## Re-ranking (stage 5)
+## Re-ranking
 
-Each online result's thumbnail is compared with the garment crop:
+Each online result's thumbnail is downloaded and compared with the garment crop:
 
     score = RERANK_IMAGE_WEIGHT · cos(crop, thumbnail) + RERANK_ATTR_WEIGHT · attribute_match
 
-`cos` is the cosine similarity of the two FashionCLIP vectors. `attribute_match` is the fraction of the
-garment's category, colour and pattern found in the result's title. The weights default to 0.8 and 0.2 and
-are set in `.env`.
+- `cos` is the cosine similarity of the two FashionCLIP vectors, from −1 to 1; higher looks more alike. A
+  result whose thumbnail couldn't be downloaded gets 0 for this part, because nothing shows that it looks alike.
+- `attribute_match` is the fraction of the garment's category, colour and pattern found in the result's title,
+  from 0 to 1. Common synonyms count ("tee" for a top, "gray" for grey, "army green" for olive). A solid pattern
+  is left out, because shops rarely write "solid". On `/refine` the brand counts too.
+- The weights default to 0.8 and 0.2, and are set in `.env`. Up to `RERANK_MAX_CANDIDATES` (40) merged results
+  are scored, and the best `ONLINE_TOP_K` (10) are returned. Equal scores keep the providers' order.
 
 ## Mock mode
 
@@ -231,13 +242,15 @@ Every product is fictional. Links go to `example.com`, and product pictures are 
 
 - **`image` input sends the whole photo of a person to this service.** In stage 2, with no segmentation yet,
   the **whole photo** goes to OpenAI for the description. From stage 3 on, only its garment crops go to
-  OpenAI, and from stage 5 on, also to Supabase Storage and Google via SerpAPI (online search). That's a change from the iPhone app's current guarantee that the full camera frame never leaves the
-  phone (see `Docs/LiveGarmentMatch.md`).
+  OpenAI, and from stage 5 on, the crop of a garment someone searches also goes to Supabase Storage and Google
+  via SerpAPI (online search). That's a change from the iPhone app's current guarantee that the full camera
+  frame never leaves the phone (see `Docs/LiveGarmentMatch.md`).
 - **`crops` input keeps that guarantee:** the app cuts out garments on the phone and sends only those.
 - Photos and crops are kept **in memory only**, for the cache lifetime (`CACHE_TTL_SECONDS`, 1 hour by
   default), and nothing is written to disk. Logs contain step names, counts and timings, never images or keys.
-- Crops uploaded for Google Lens (stage 5) go to a private bucket, and Lens gets a signed link that expires
-  after `SIGNED_URL_SECONDS` (5 minutes by default).
+- Crops uploaded for Google Lens go to a private bucket, and Lens gets a signed link that expires after
+  `SIGNED_URL_SECONDS` (5 minutes by default). The crop is deleted as soon as the Lens search is done. If a
+  delete fails, it's logged; leftovers can be cleared from the dashboard.
 
 ## Tests
 

@@ -1,19 +1,26 @@
-"""Online product search through SerpAPI.
+"""Online product search through SerpAPI: Google Lens with the garment crop and Google Shopping with its text
+query, run side by side, merged, and re-ranked by how alike the thumbnails look (see rerank.py).
 
-Stage 2: Google Shopping with the garment's text query. Results keep their title, price, shop, picture and
-link exactly as returned. Duplicate links are merged. Until image re-ranking exists (stage 5), the score
-reflects Google's own order: 1.0 for the first result, falling evenly.
+Results keep their title, price, shop, picture and link exactly as returned. The same link found by both is
+one result (source "lens+shopping"). `ShoppingSearch` alone (no Lens, no re-ranking, scores in Google's
+order) is kept for setups without image embeddings.
 """
 
+import asyncio
+import io
 import logging
 import re
+import time
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+import numpy as np
+from PIL import Image
 
-from .models import OnlineMatch, Price
-from .pipeline import OnlineRequest, OnlineResult, StepFailure, Timer
+from .models import OnlineMatch, Price, StepError
+from .pipeline import OnlineRequest, OnlineResult, StepFailure, Timer, step_error
+from .rerank import rerank
 
 log = logging.getLogger("vision")
 
@@ -123,3 +130,144 @@ def shopping_matches(body: dict, country: str) -> list[OnlineMatch]:
             title=title, price=parse_price(result.get("price"), result.get("extracted_price"), country),
             retailer=result.get("source"), url=url, image=result.get("thumbnail"), score=0.0, source="shopping"))
     return matches
+
+
+def lens_matches(body: dict, country: str) -> list[OnlineMatch]:
+    """Google Lens visual matches as matches, in Google's order, without results that have no link or repeat one."""
+    seen: set[str] = set()
+    matches = []
+    for result in body.get("visual_matches") or []:
+        url, title = result.get("link"), (result.get("title") or "").strip()
+        if not url or not title or normalize_url(url) in seen:
+            continue
+        seen.add(normalize_url(url))
+        price = result.get("price") or {}
+        matches.append(OnlineMatch(
+            title=title, price=parse_price(price.get("value"), price.get("extracted_value"), country),
+            retailer=result.get("source"), url=url, image=result.get("thumbnail") or result.get("image"),
+            score=0.0, source="lens"))
+    return matches
+
+
+def merge_matches(*lists: list[OnlineMatch]) -> list[OnlineMatch]:
+    """One result per link, in the order given. A link found by several sources keeps the first one's details,
+    fills in a missing price or picture from the others, and lists every source."""
+    merged: dict[str, OnlineMatch] = {}
+    for matches in lists:
+        for match in matches:
+            key = normalize_url(match.url)
+            if key not in merged:
+                merged[key] = match.model_copy()
+                continue
+            kept = merged[key]
+            sources = kept.source.split("+")
+            if match.source not in sources:
+                kept.source = "+".join(sorted(sources + [match.source]))
+            kept.price = kept.price or match.price
+            kept.image = kept.image or match.image
+    return list(merged.values())
+
+
+class ThumbnailFetcher:
+    """Downloads result thumbnails for re-ranking, several at a time. A failed download gives None."""
+
+    def __init__(self, timeout_seconds: float = 8.0, max_bytes: int = 2 * 1024 * 1024, concurrency: int = 8,
+                 transport: httpx.AsyncBaseTransport | None = None):
+        self.max_bytes = max_bytes
+        self.limit = asyncio.Semaphore(concurrency)
+        self.http = httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, transport=transport,
+                                      headers={"User-Agent": "FitMix-vision/1.0"})
+
+    async def fetch_all(self, urls: list[str | None]) -> list[bytes | None]:
+        return await asyncio.gather(*(self.fetch(url) for url in urls))
+
+    async def fetch(self, url: str | None) -> bytes | None:
+        if not url or not url.startswith(("http://", "https://")):
+            return None
+        async with self.limit:
+            try:
+                response = await self.http.get(url)
+            except httpx.HTTPError:
+                return None
+        if response.status_code != 200 or len(response.content) > self.max_bytes:
+            return None
+        return response.content
+
+
+class OnlineSearch:
+    """Lens (when a crop store is configured) and Shopping in parallel, merged, then re-ranked with the embedder.
+
+    /refine reuses the garment's Lens results (the picture hasn't changed), so a refine costs one search."""
+
+    def __init__(self, client: SerpApiClient, embedder, storage=None, fetcher: ThumbnailFetcher | None = None,
+                 image_weight: float = 0.8, attr_weight: float = 0.2, top_k: int = 10, max_candidates: int = 40,
+                 lens_cache_seconds: float = 3600):
+        self.client, self.embedder, self.storage = client, embedder, storage
+        self.fetcher = fetcher or ThumbnailFetcher()
+        self.image_weight, self.attr_weight = image_weight, attr_weight
+        self.top_k, self.max_candidates = top_k, max_candidates
+        self.lens_cache_seconds = lens_cache_seconds
+        self._lens: dict[str, tuple[float, list[OnlineMatch]]] = {}
+        self.name = "serpapi-" + ("lens+shopping" if storage else "shopping") + "+rerank"
+
+    async def search(self, request: OnlineRequest, timer: Timer) -> OnlineResult:
+        errors: list[StepError] = []
+
+        async def guarded(step: str, work):
+            try:
+                with timer.step(step):
+                    return await work
+            except Exception as error:
+                errors.append(step_error(step, error))
+                return []
+
+        lens, shopping = await asyncio.gather(guarded("lens", self._lens_matches(request, timer)),
+                                              guarded("shopping", self._shopping_matches(request)))
+        candidates = merge_matches(shopping, lens)[: self.max_candidates]
+        if not candidates:
+            return OnlineResult(matches=[], errors=errors)
+        with timer.step("thumbnails"):
+            pictures = await self.fetcher.fetch_all([m.image for m in candidates])
+        with timer.step("rerank"):
+            vectors = await asyncio.to_thread(self._embed_thumbnails, pictures)
+            ranked = rerank(candidates, request.embedding, vectors, request.attributes, request.category, request.brand,
+                            self.image_weight, self.attr_weight, self.top_k)
+        log.info("online search: %d lens + %d shopping → %d candidates, %d thumbnails embedded",
+                 len(lens), len(shopping), len(candidates), sum(v is not None for v in vectors))
+        return OnlineResult(matches=ranked, errors=errors)
+
+    async def _shopping_matches(self, request: OnlineRequest) -> list[OnlineMatch]:
+        body = await self.client.get("google_shopping", q=request.query, num=40)
+        return shopping_matches(body, self.client.country)
+
+    async def _lens_matches(self, request: OnlineRequest, timer: Timer) -> list[OnlineMatch]:
+        if self.storage is None:
+            return []
+        cached = self._lens.get(request.key)
+        if cached and time.monotonic() - cached[0] < self.lens_cache_seconds:
+            return cached[1]
+        path = f"crops/{request.key}.jpg"
+        link = await self.storage.signed_link(path, request.crop_jpeg)
+        try:
+            body = await self.client.get("google_lens", url=link, country=self.client.country)
+        finally:
+            await self.storage.remove(path)  # Lens has fetched it (or failed); don't keep the crop around
+        matches = lens_matches(body, self.client.country)
+        self._lens[request.key] = (time.monotonic(), matches)
+        return matches
+
+    def _embed_thumbnails(self, pictures: list[bytes | None]) -> list[np.ndarray | None]:
+        opened: list[tuple[int, Image.Image]] = []
+        for index, data in enumerate(pictures):
+            if data is None:
+                continue
+            try:
+                with Image.open(io.BytesIO(data)) as picture:
+                    opened.append((index, picture.convert("RGB")))
+            except Exception:
+                continue
+        vectors: list[np.ndarray | None] = [None] * len(pictures)
+        if opened and self.embedder is not None:
+            for (index, _), vector in zip(opened, self.embedder.embed([p for _, p in opened])):
+                vectors[index] = vector
+        return vectors
