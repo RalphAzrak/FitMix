@@ -20,9 +20,10 @@ enum CartStoreError: LocalizedError, Equatable {
 /// memory only. Those items move into the account's cart when the user signs in. Signing out
 /// clears the cart from memory; the saved file comes back when that account signs in again.
 ///
-/// Lines are grouped by retailer, and each Shopify store gets its own checkout inside FitMix
-/// (`RetailerCheckout`). The store prices the order; `subtotal` here is only the sum of the prices
-/// the listings showed when they were added. A completed checkout removes only what that store sold.
+/// Lines are grouped by retailer for display. Checkout is FitMix's own (demo) checkout
+/// (`CheckoutView`); a paid order removes exactly its lines (`completeOrder`). `subtotal` is the sum
+/// of the prices the listings showed when they were added. `completeCheckout` and `receipts` belong to
+/// the Shopify store checkout (`RetailerCheckout`), which the cart no longer opens.
 @Observable
 final class CartStore {
     static let maxQuantity = 10
@@ -144,6 +145,12 @@ final class CartStore {
                 return item.quantity > 0 ? item : nil
             }
         }
+    }
+
+    /// An order from FitMix's own checkout was paid: removes exactly the lines it contained. Lines added
+    /// meanwhile (none can be, while checkout is open) would stay.
+    func completeOrder(itemIDs: Set<UUID>) throws {
+        try update { items in items.removeAll { itemIDs.contains($0.id) } }
     }
 
     func setQuantity(_ quantity: Int, for id: UUID) throws {
