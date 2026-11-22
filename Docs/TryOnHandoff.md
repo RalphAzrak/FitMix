@@ -38,6 +38,39 @@ On a live garment's card, once a listing is chosen, **Try on my avatar** makes `
 source and requests that one listing (`AvatarTryOn`). With the backend renderer this is a render too, of the
 avatar with that listing's product photo.
 
+## Mix with your wardrobe
+
+Studio's **On your avatar** board (live looks) shows the avatar's four slots head to toe: Jacket, Shirt, Pants,
+Shoes. A slot holds the scanned listing (**SCAN**), a wardrobe piece (**YOURS**), or nothing. Tapping a slot
+offers the scanned garment for that slot or **Choose from Wardrobe** (`WardrobeMixPicker`).
+
+- `StudioStore.wardrobeMix` holds one `WardrobeMixPiece` per `AvatarOutfitSlot`. `addToMix` / `removeFromMix`.
+- The avatar request is the scanned listing (`avatarTryOn`) plus every wardrobe piece in another slot, sent
+  together to `/v1/avatar-outfit`. No backend change: the endpoint already takes one image per slot.
+- One piece per slot, last choice wins: trying a scanned shirt takes a wardrobe shirt off, and vice versa.
+  Only one scanned listing is on the avatar at a time.
+- Wardrobe photos load with `tryOnPath` (the cleaned cutout when there is one). Accessories have no slot.
+- The mix is cleared when a new look opens and when the account changes.
+
+### Keeping track of the try-on
+
+The preview sits above the garment cards, so every action that dresses the avatar (card, board, wardrobe)
+scrolls Studio back to it. While the preview is out of view, `TryOnProgressPill` floats above the footer
+(**Dressing your avatar…**, then **Your try-on is ready**) and scrolls up when tapped. A finished render
+plays a success haptic and a VoiceOver announcement. The card's button turns into **On your avatar ↑**.
+
+### Garment categories
+
+`GarmentCategoryStyle.swift` gives each family one color and glyph used everywhere in Studio: jacket
+(terracotta), shirt (teal), pants (plum, drawn glyph since SF Symbols has none), shoes (ochre). The Scanned
+Outfit photo outlines each garment in its color, cards carry a color stripe and badge, and a chip row jumps
+to each garment's card. Cobalt stays for selection and actions.
+
+| Variable | What it does |
+| --- | --- |
+| `FM_DEBUG_WARDROBE_MIX=/path.png` | Puts that image on the avatar as a wardrobe piece after a look opens (`FM_DEBUG_WARDROBE_MIX_CATEGORY`, default `pants`; `FM_DEBUG_WARDROBE_MIX_DELAY`, default 4 s). |
+| `FM_DEBUG_STUDIO_NO_AUTOSCROLL=1` | Leaves the page where it is when something goes on the avatar, to check the progress pill. |
+
 ## Privacy
 
 The try-on photo leaves the phone only when a render runs, to the FitMix backend, which passes it to OpenAI and

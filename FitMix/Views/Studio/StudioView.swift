@@ -30,44 +30,60 @@ struct StudioView: View {
     @State private var savingLook = false
     @State private var savedLookKey: String?
     @State private var saveLookFailed = false
+    @State private var mixRequest: WardrobeMixRequest?
+    /// False while the preview is scrolled out of view; the progress pill shows then.
+    @State private var heroVisible = true
+    /// The render the user has already seen finish, so the pill doesn't nag about it.
+    @State private var seenSignature: String?
+    @State private var scrollTarget: String?
+
+    private static let previewAnchor = "studioPreview"
+
+    /// Debug: FM_DEBUG_STUDIO_NO_AUTOSCROLL=1 leaves the page where it is when something goes on the avatar,
+    /// to check the floating progress pill.
+    private static var debugNoAutoScroll: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["FM_DEBUG_STUDIO_NO_AUTOSCROLL"] == "1"
+        #else
+        false
+        #endif
+    }
 
     var body: some View {
+        studioContent
+            .sheet(item: $mixRequest) { request in
+                WardrobeMixPicker(request: request, scannedSlot: studio.scannedSlot) { item, image in
+                    if !studio.addToMix(item, image: image, avatar: avatar.avatarImage) { needsAvatar = true }
+                }
+            }
+            // Something went on the avatar: show the preview where the result will appear.
+            .onChange(of: studio.avatarChangeCount) {
+                mode = .tryOn
+                seenSignature = nil
+                if !heroVisible, !Self.debugNoAutoScroll { scrollTarget = Self.previewAnchor }
+            }
+            // Feel and hear when the try-on lands, even while looking elsewhere.
+            .sensoryFeedback(trigger: readySignature) { _, new in
+                new == nil ? nil : .success
+            }
+            .onChange(of: readySignature) {
+                guard readySignature != nil else { return }
+                if heroVisible { seenSignature = readySignature }
+                AccessibilityNotification.Announcement("Try-on ready").post()
+            }
+            .onChange(of: auth.user?.id) { studio.clearMix(unlessOwnedBy: auth.user?.id) }
+            #if DEBUG
+            .task(id: studio.lookNumber) { await debugWardrobeMix() }
+            #endif
+    }
+
+    private var studioContent: some View {
         VStack(spacing: 0) {
             FMTopBar { FMBagButton(count: cart.count) { router.openCart() } }
             if let item = studio.wardrobeItem {
                 wardrobeTryOn(item)
             } else if let scan = studio.scan, let look = studio.look, let hero = studio.hero {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        lookHeader.padding(.top, 10).padding(.bottom, 8)
-                        if studio.isLiveLook {
-                            ShoppingDepartmentPicker(title: "Shop this scan for", identifier: "scanShoppingDepartment", selection: Binding(
-                                get: { studio.shoppingDepartment }, set: studio.setShoppingDepartment
-                            ))
-                            .fmCard(padding: 10)
-                            .padding(.bottom, 8)
-                            budgetControl.padding(.bottom, 12)
-                        }
-                        Picker("Preview view", selection: $mode) {
-                            Text("Try On").tag(PreviewMode.tryOn)
-                            Text("Scanned Outfit").tag(PreviewMode.street)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.bottom, 12)
-                        heroArea(scan: scan, hero: hero, look: look)
-                        if saveLookFailed {
-                            NoticeRow(tone: .caution, text: "Couldn't save this look. Try again.").padding(.top, 10)
-                        }
-                        if studio.isLiveLook, let product = studio.selectedPiece?.product {
-                            selectedProduct(product).padding(.top, 12)
-                        }
-                        garments(look).padding(.top, 18)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
-                }
-                .defaultScrollAnchor(Self.debugScrollAnchor)
-                .safeAreaInset(edge: .bottom, spacing: 0) { footer(look) }
+                lookPage(scan: scan, look: look, hero: hero)
             } else {
                 emptyState
             }
@@ -136,6 +152,138 @@ struct StudioView: View {
         }
     }
 
+    #if DEBUG
+    /// FM_DEBUG_WARDROBE_MIX=/path.png (+ FM_DEBUG_WARDROBE_MIX_CATEGORY=pants|tshirt|shoes|outerwear, default
+    /// pants): puts that local image on the avatar as a wardrobe piece shortly after a look opens.
+    private func debugWardrobeMix() async {
+            let env = ProcessInfo.processInfo.environment
+            guard let path = env["FM_DEBUG_WARDROBE_MIX"], let image = UIImage(contentsOfFile: path), studio.look != nil else { return }
+            try? await Task.sleep(for: .seconds(Double(env["FM_DEBUG_WARDROBE_MIX_DELAY"] ?? "") ?? 4))
+            let category = env["FM_DEBUG_WARDROBE_MIX_CATEGORY"].flatMap(WardrobeCategory.init(rawValue:)) ?? .pants
+            let item = WardrobeItem(id: UUID(), ownerID: auth.user?.id ?? UUID(), name: "My \(category.garment.title.lowercased()) (test)",
+                                    category: category, photoRevision: UUID(), originalPath: path, cleanedPath: nil,
+                                    thumbnailPath: path, prefersCleaned: false, rowVersion: UUID(), createdAt: .now, updatedAt: .now)
+            studio.addToMix(item, image: image, avatar: avatar.avatarImage)
+    }
+    #endif
+
+    private func lookPage(scan: OutfitScan, look: WorkingLook, hero: HeroFrame) -> some View {
+        ScrollViewReader { proxy in
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                lookHeader.padding(.top, 10).padding(.bottom, 8)
+                if studio.isLiveLook {
+                    ShoppingDepartmentPicker(title: "Shop this scan for", identifier: "scanShoppingDepartment", selection: Binding(
+                        get: { studio.shoppingDepartment }, set: studio.setShoppingDepartment
+                    ))
+                    .fmCard(padding: 10)
+                    .padding(.bottom, 8)
+                    budgetControl.padding(.bottom, 12)
+                }
+                Picker("Preview view", selection: $mode) {
+                    Text("Try On").tag(PreviewMode.tryOn)
+                    Text("Scanned Outfit").tag(PreviewMode.street)
+                }
+                .pickerStyle(.segmented)
+                .padding(.bottom, 12)
+                .id(Self.previewAnchor)
+                heroArea(scan: scan, hero: hero, look: look)
+                    .onScrollVisibilityChange(threshold: 0.3) { heroVisible = $0 }
+                if saveLookFailed {
+                    NoticeRow(tone: .caution, text: "Couldn't save this look. Try again.").padding(.top, 10)
+                }
+                if studio.isLiveLook {
+                    outfitBoard(look).padding(.top, 14)
+                }
+                if studio.isLiveLook, let product = studio.selectedPiece?.product {
+                    selectedProduct(product).padding(.top, 12)
+                }
+                garments(look).padding(.top, 18)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
+        }
+        .defaultScrollAnchor(Self.debugScrollAnchor)
+        .overlay(alignment: .bottom) {
+            if let phase = pillPhase {
+                TryOnProgressPill(phase: phase, thumbnail: pillThumbnail) { scrollTarget = Self.previewAnchor }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.25), value: pillPhase)
+        .safeAreaInset(edge: .bottom, spacing: 0) { footer(look) }
+        .onChange(of: scrollTarget) {
+            guard let target = scrollTarget else { return }
+            withAnimation(.smooth(duration: 0.45)) { proxy.scrollTo(target, anchor: .top) }
+            if target == Self.previewAnchor, case .ready(_, _, let signature) = studio.preview { seenSignature = signature }
+            scrollTarget = nil
+        }
+        }
+    }
+
+    // MARK: Try-on progress
+
+    /// The signature of a finished render of the avatar, once one is on screen.
+    private var readySignature: String? {
+        if case .ready(_, _, let signature) = studio.preview, studio.isDressingAvatar { return signature }
+        return nil
+    }
+
+    /// The floating pill's state: only while the preview is out of view and there's news about it.
+    private var pillPhase: TryOnProgressPill.Phase? {
+        guard !heroVisible, studio.isDressingAvatar || mode == .tryOn else { return nil }
+        switch studio.preview {
+        case .rendering: return .rendering
+        case .ready(_, _, let signature): return signature == seenSignature ? nil : .ready
+        case .failed(_, let signature): return signature == seenSignature ? nil : .failed
+        default: return nil
+        }
+    }
+
+    private var pillThumbnail: UIImage? {
+        if case .ready(let image, _, _) = studio.preview { return image }
+        return studio.tryOnSource
+    }
+
+    /// "Jacket + your Pants": what the avatar is being dressed in.
+    private var outfitSummary: String? {
+        guard studio.isDressingAvatar else { return nil }
+        var parts: [String] = []
+        if let listing = studio.avatarTryOn { parts.append("the scanned \(listing.category.family.badgeTitle.lowercased())") }
+        for slot in AvatarOutfitSlot.bodyOrder where slot != studio.scannedSlot {
+            if studio.wardrobeMix[slot] != nil { parts.append("your \(slot.family.badgeTitle.lowercased())") }
+        }
+        return parts.isEmpty ? nil : ListFormatter.localizedString(byJoining: parts)
+    }
+
+    // MARK: Outfit board
+
+    private func outfitBoard(_ look: WorkingLook) -> some View {
+        var options: [AvatarOutfitSlot: WorkingLook.Piece] = [:]
+        for piece in look.pieces {
+            guard let slot = BackendOutfitTryOnRenderer.slot(for: piece.detected.category), options[slot] == nil,
+                  case .found(let product)? = studio.matchStates[piece.id], product.image != nil else { continue }
+            options[slot] = piece
+        }
+        return AvatarOutfitBoard(
+            listing: studio.avatarTryOn, scannedSlot: studio.scannedSlot, mix: studio.wardrobeMix,
+            scannedOptions: options, hasAvatar: avatar.avatarImage != nil,
+            tryScanned: { tryOnAvatar($0) },
+            showScanned: {
+                guard let id = studio.avatarTryOn?.pieceID else { return }
+                studio.select(id)
+                scrollTarget = id.uuidString
+            },
+            pickFromWardrobe: { slot in
+                guard avatar.avatarImage != nil else { needsAvatar = true; return }
+                mixRequest = WardrobeMixRequest(slot: slot)
+            },
+            remove: { studio.removeFromMix($0) },
+            removeListing: { studio.removeAvatarListing() })
+    }
+
     private func wardrobeTryOn(_ item: WardrobeItem) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -186,11 +334,24 @@ struct StudioView: View {
     }
 
     private func tryOnAvatar(_ piece: WorkingLook.Piece) {
+        // Already on the avatar: just bring the preview into view.
+        if avatarState(for: piece) != .off {
+            mode = .tryOn
+            scrollTarget = Self.previewAnchor
+            return
+        }
         if studio.tryOnAvatar(pieceID: piece.id, avatar: avatar.avatarImage) {
             withAnimation(.snappy(duration: 0.2)) { mode = .tryOn }
         } else if avatar.avatarImage == nil {
             needsAvatar = true
         }
+    }
+
+    /// Whether this card's chosen listing is the one on the avatar, and how far its render is.
+    private func avatarState(for piece: WorkingLook.Piece) -> AvatarCardState {
+        guard let listing = studio.avatarTryOn, listing.pieceID == piece.id, listing.listingID == piece.product?.id else { return .off }
+        if case .rendering = studio.preview { return .rendering }
+        return .on
     }
 
     private var defaultMode: PreviewMode {
@@ -293,10 +454,14 @@ struct StudioView: View {
             switch mode {
             case .tryOn:
                 TryOnHero(preview: studio.preview, source: studio.tryOnSource, avatarListing: studio.avatarTryOn,
+                          outfitSummary: outfitSummary,
                           addPhoto: { addPhoto = true }, retry: studio.retryPreview)
             case .street:
                 HeroCapture(hero: hero, look: look, selectedID: studio.selectedPieceID,
-                            tooltip: studio.selectedPiece.flatMap(tooltip))
+                            tooltip: studio.selectedPiece.flatMap(tooltip),
+                            labels: studio.isLiveLook ? studio.matchGarmentLabels : [:]) { id in
+                    withAnimation(.snappy(duration: 0.2)) { studio.select(id) }
+                }
             }
         }
         // Most of the screen, with the top of the garment row still in view.
@@ -328,11 +493,12 @@ struct StudioView: View {
     /// Top-left of the hero: what the image is, then the latest swap.
     private func heroChips(scan: OutfitScan) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if mode == .tryOn, let status = TryOnHero.status(preview: studio.preview, source: studio.tryOnSource, avatarListing: studio.avatarTryOn) {
+            if mode == .tryOn, let status = TryOnHero.status(preview: studio.preview, source: studio.tryOnSource, avatarListing: studio.avatarTryOn,
+                                                                dressingAvatar: studio.isDressingAvatar) {
                 FMChip(text: status.text, dot: status.isTryOn ? .fmLime : Color.fmOutline.opacity(0.55))
                     .accessibilityIdentifier("tryOnStatus")
             }
-            if mode == .tryOn, let listing = studio.avatarTryOn { ListingChip(listing: listing) }
+            if mode == .tryOn, studio.wardrobeMix.isEmpty, let listing = studio.avatarTryOn { ListingChip(listing: listing) }
             if let lastSwap = studio.lastSwap {
                 FMChip(text: "\(lastSwap.category.title) Swapped", dot: .fmLime, icon: "arrow.triangle.2.circlepath")
                     .accessibilityIdentifier("swapBadge")
@@ -410,10 +576,12 @@ struct StudioView: View {
             if look.pieces.isEmpty {
                 NoGarmentsCard()
             } else if studio.isLiveLook {
+                let ordered = Self.headToToe(look.pieces)
+                garmentJumpBar(ordered)
                 // One full-width box per garment, stacked, so each one's chosen product photo is large and none
                 // is hidden off to the side. The selected garment's other results follow its box.
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(look.pieces) { piece in
+                    ForEach(ordered) { piece in
                         let listings = studio.matchLists[piece.id] ?? []
                         let close = listings.filter { !$0.isAlternative }
                         let alternatives = listings.filter(\.isAlternative)
@@ -428,8 +596,10 @@ struct StudioView: View {
                                           retry: { studio.findMatch(for: piece.id) },
                                           clearBrand: { studio.clearMatchBrand(for: piece.id) },
                                           showMore: { matchListPiece = piece },
-                                          tryOnAvatar: { tryOnAvatar(piece) })
-                            .id(piece.id)
+                                          tryOnAvatar: { tryOnAvatar(piece) },
+                                          avatarState: avatarState(for: piece),
+                                          viewOnAvatar: { scrollTarget = Self.previewAnchor })
+                            .id(piece.id.uuidString)
                         if piece.id == studio.selectedPieceID, close.count > 1 {
                             resultList(close, for: piece, title: "Close matches")
                         }
@@ -453,6 +623,66 @@ struct StudioView: View {
                 }
                 .scrollClipDisabled()
             }
+        }
+    }
+
+    /// Jacket → shirt → pants → shoes, whatever order detection found them in.
+    private static func headToToe(_ pieces: [WorkingLook.Piece]) -> [WorkingLook.Piece] {
+        pieces.enumerated().sorted { left, right in
+            left.element.detected.category.bodyOrder != right.element.detected.category.bodyOrder
+                ? left.element.detected.category.bodyOrder < right.element.detected.category.bodyOrder
+                : left.offset < right.offset
+        }.map(\.element)
+    }
+
+    /// One chip per garment in its own color, with how its search is going. Tapping one selects it and
+    /// scrolls to its card, so a long page of results is easy to move around.
+    private func garmentJumpBar(_ pieces: [WorkingLook.Piece]) -> some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(pieces) { piece in
+                    let category = piece.detected.category
+                    let selected = piece.id == studio.selectedPieceID
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) }
+                        scrollTarget = piece.id.uuidString
+                    } label: {
+                        HStack(spacing: 6) {
+                            GarmentGlyph(family: category.family, size: 13)
+                            Text(category.family == .other ? category.title : category.family.badgeTitle)
+                                .font(.system(size: 14, weight: .semibold))
+                            jumpStatus(for: piece)
+                        }
+                        .foregroundStyle(selected ? .white : category.tint)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 40)
+                        .background(selected ? category.tint : category.tint.opacity(0.1), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityHint("Shows its matches")
+                    .accessibilityIdentifier("jump-\(category.rawValue)")
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .scrollIndicators(.hidden)
+        .padding(.bottom, 6)
+    }
+
+    @ViewBuilder
+    private func jumpStatus(for piece: WorkingLook.Piece) -> some View {
+        switch studio.matchStates[piece.id] {
+        case .searching: ProgressView().controlSize(.mini)
+        case .found:
+            if studio.avatarTryOn?.pieceID == piece.id {
+                Image(systemName: "person.crop.rectangle.fill").font(.system(size: 11)).accessibilityLabel("On your avatar")
+            } else {
+                Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).accessibilityLabel("Match found")
+            }
+        case .failed, .noMatch, .budgetMissing:
+            Image(systemName: "exclamationmark").font(.system(size: 10, weight: .bold)).accessibilityLabel("No match")
+        case nil: EmptyView()
         }
     }
 
@@ -616,6 +846,9 @@ private struct HeroCapture: View {
     var look: WorkingLook
     var selectedID: UUID?
     var tooltip: String?
+    /// Names from search per piece ("Bomber jacket"), shown on its outline.
+    var labels: [UUID: String] = [:]
+    var select: (UUID) -> Void = { _ in }
 
     private var selected: WorkingLook.Piece? { look.pieces.first { $0.id == selectedID } }
 
@@ -631,36 +864,48 @@ private struct HeroCapture: View {
                     .accessibilityLabel(heroLabel)
                     .accessibilityIdentifier("heroPhoto")
 
-                if let selected, let bounds = selected.detected.bounds.flatMap(hero.convert) {
-                    // The hotspot sits inside the garment, a little in from its left edge.
-                    let point = CGPoint(x: fitted.minX + (bounds.minX + bounds.width * 0.18) * fitted.width,
-                                        y: fitted.minY + (bounds.minY + bounds.height * 0.3) * fitted.height)
-                    // Tooltip to the right of the hotspot, or to its left when the hotspot is on the right half.
-                    let onLeft = point.x > proxy.size.width * 0.55
-                    if let tooltip {
-                        HStack(spacing: 0) {
-                            if onLeft {
-                                Spacer(minLength: 8)
-                                FMTooltip(text: tooltip)
-                                Color.clear.frame(width: max(0, proxy.size.width - point.x + 16))
-                            } else {
-                                Color.clear.frame(width: max(0, point.x + 16))
-                                FMTooltip(text: tooltip)
-                                Spacer(minLength: 8)
+                // Every garment outlined in its own color, so jacket, shirt, pants and shoes are told apart at a glance.
+                // The selected one is drawn last, so its outline and label sit on top.
+                ForEach(look.pieces.filter { $0.id != selectedID } + look.pieces.filter { $0.id == selectedID }) { piece in
+                    if let bounds = piece.detected.bounds.flatMap(hero.convert) {
+                        let rect = CGRect(x: fitted.minX + bounds.minX * fitted.width, y: fitted.minY + bounds.minY * fitted.height,
+                                          width: bounds.width * fitted.width, height: bounds.height * fitted.height)
+                        let isSelected = piece.id == selectedID
+                        let tint = piece.detected.category.tint
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(tint.opacity(isSelected ? 0.10 : 0.04))
+                            .strokeBorder(tint, style: StrokeStyle(lineWidth: isSelected ? 3 : 1.8, dash: isSelected ? [] : [6, 4]))
+                            .frame(width: rect.width, height: rect.height)
+                            .overlay(alignment: .topLeading) {
+                                // Selected: the full name. Others: just their glyph, so nested garments
+                                // (a shirt under a jacket) don't stack labels on each other.
+                                Group {
+                                    if isSelected {
+                                        GarmentCategoryBadge(piece.detected.category, title: tooltip, solid: true)
+                                            .fixedSize()
+                                            .offset(x: -2, y: -12)
+                                    } else {
+                                        GarmentGlyph(family: piece.detected.category.family, size: 11)
+                                            .foregroundStyle(.white)
+                                            .frame(width: 24, height: 24)
+                                            .background(tint, in: Circle())
+                                            .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
+                                            .offset(x: -6, y: -8)
+                                    }
+                                }
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
                             }
-                        }
-                        .frame(width: proxy.size.width)
-                        .position(x: proxy.size.width / 2, y: point.y)
-                        .allowsHitTesting(false)
-                        .accessibilityIdentifier("garmentTooltip")
+                            .contentShape(Rectangle())
+                            .onTapGesture { select(piece.id) }
+                            .position(x: rect.midX, y: rect.midY)
+                            .accessibilityElement()
+                            .accessibilityLabel(piece.detected.category.title)
+                            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                            .accessibilityIdentifier("heroOutline-\(piece.detected.category.rawValue)")
                     }
-                    FMHotspot()
-                        .position(point)
-                        .allowsHitTesting(false)
-                        .accessibilityElement()
-                        .accessibilityLabel("Marked in photo: \(selected.detected.category.title)")
-                        .accessibilityIdentifier("garmentHighlight")
                 }
+
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
@@ -689,11 +934,18 @@ private struct GarmentCard: View {
                     .overlay(alignment: .bottom) {
                         if let tag { TagPill(text: tag).padding(4) }
                     }
+                    .overlay(alignment: .topLeading) {
+                        GarmentGlyph(family: piece.detected.category.family, size: 11)
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(piece.detected.category.tint, in: Circle())
+                            .padding(3)
+                    }
                     .padding(8)
-                    .background(Color.fmCard, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(piece.detected.category.tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(selected ? Color.fmCobalt : Color.fmHairline, lineWidth: selected ? 2.5 : 1)
+                            .strokeBorder(selected ? Color.fmCobalt : piece.detected.category.tint.opacity(0.35), lineWidth: selected ? 2.5 : 1)
                     )
                     .overlay(alignment: .topTrailing) {
                         if selected {
@@ -709,7 +961,7 @@ private struct GarmentCard: View {
                     .padding(.bottom, 6)
                 Text(piece.detected.category.title)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(selected ? Color.fmCobalt : Color.fmInk)
+                    .foregroundStyle(piece.detected.category.tint)
                     .lineLimit(1)
                 Text(nameLine)
                     .font(.system(size: 14, weight: selected ? .semibold : .regular))
@@ -769,10 +1021,13 @@ private struct RetailerMatchCard: View {
     var clearBrand: () -> Void
     var showMore: () -> Void = {}
     var tryOnAvatar: () -> Void = {}
+    var avatarState: AvatarCardState = .off
+    var viewOnAvatar: () -> Void = {}
 
     @Environment(\.openURL) private var openURL
 
     private var category: GarmentCategory { piece.detected.category }
+    private var tint: Color { category.tint }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -810,14 +1065,28 @@ private struct RetailerMatchCard: View {
                     }
                 }
                 .overlay(alignment: .topLeading) {
-                    if let product, product.isFixture { TagPill(text: "Test fixture").padding(6) }
+                    GarmentCategoryBadge(category, solid: true).padding(8)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if let product, product.isFixture { TagPill(text: "Test fixture").padding(8) }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if avatarState != .off, product?.isFixture != true {
+                        Label("On avatar", systemImage: "person.crop.rectangle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8).frame(minHeight: 24)
+                            .background(Color.fmCobalt, in: Capsule())
+                            .padding(8)
+                    }
                 }
             HStack(spacing: 6) {
                 Text(garmentLabel ?? category.title)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(selected ? AuthPalette.primary : AuthPalette.onSurface)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(AuthPalette.onSurface)
                 Spacer(minLength: 0)
             }
+            .padding(.leading, 6)
             if let brand, !brand.isEmpty {
                 HStack {
                     Label(brand, systemImage: "tag").foregroundStyle(Color.fmSecondary)
@@ -829,14 +1098,20 @@ private struct RetailerMatchCard: View {
                 }
                 .font(.caption)
             }
-            details
+            details.padding(.leading, 6)
         }
         .padding(8)
+        .padding(.leading, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.white, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        // The garment's color runs down the card's edge, so a jacket card never reads as a pants card.
+        .overlay(alignment: .leading) {
+            Rectangle().fill(tint).frame(width: 6)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(selected ? AuthPalette.primaryContainer : AuthPalette.containerHigh, lineWidth: selected ? 2.5 : 1)
+                .strokeBorder(selected ? AuthPalette.primaryContainer : tint.opacity(0.3), lineWidth: selected ? 2.5 : 1)
         )
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .onTapGesture(perform: select)
@@ -898,15 +1173,7 @@ private struct RetailerMatchCard: View {
                 }
                 // A try-on needs the product's photo.
                 if product.image != nil {
-                    Button(action: tryOnAvatar) {
-                        Label("Try on my avatar", systemImage: "person.crop.rectangle")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(minHeight: 36)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AuthPalette.primary)
-                    .accessibilityHint("Shows this listing with your full-body avatar")
-                    .accessibilityIdentifier("tryOnAvatar")
+                    avatarButton.padding(.top, 4)
                 }
                 if moreCount > 0 {
                     Button(action: showMore) {
@@ -957,6 +1224,44 @@ private struct RetailerMatchCard: View {
         }
     }
 
+    /// The card's main action. Once the piece is on the avatar it says so, and takes you to the preview.
+    @ViewBuilder
+    private var avatarButton: some View {
+        switch avatarState {
+        case .off:
+            Button(action: tryOnAvatar) {
+                Label("Try on my avatar", systemImage: "person.crop.rectangle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).frame(minHeight: 40)
+                    .background(.fmPrimaryGradient, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Puts this listing on your avatar. The preview at the top of Studio updates.")
+            .accessibilityIdentifier("tryOnAvatar")
+        case .rendering, .on:
+            Button(action: viewOnAvatar) {
+                HStack(spacing: 7) {
+                    if avatarState == .rendering {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.fmGreen)
+                    }
+                    Text(avatarState == .rendering ? "Dressing your avatar…" : "On your avatar")
+                    Image(systemName: "arrow.up").font(.system(size: 11, weight: .bold))
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.fmInk)
+                .padding(.horizontal, 14).frame(minHeight: 40)
+                .background(Color.fmFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.fmHairline))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Scrolls up to the try-on preview")
+            .accessibilityIdentifier("viewOnAvatar")
+        }
+    }
+
     private var noCloseMatchLabel: some View {
         Text("No close match found")
             .font(.system(size: 13, weight: .semibold))
@@ -974,6 +1279,9 @@ private struct RetailerMatchCard: View {
         .accessibilityIdentifier("retryMatch")
     }
 }
+
+/// A garment card's relation to the avatar preview.
+enum AvatarCardState: Equatable { case off, rendering, on }
 
 private extension GarmentCategory {
     /// "this jacket", "these pants".

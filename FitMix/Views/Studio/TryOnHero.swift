@@ -9,6 +9,8 @@ struct TryOnHero: View {
     /// Set after "Try on my avatar": `source` is the avatar and this listing is what goes on it.
     var avatarListing: AvatarTryOn? = nil
     var wardrobeItemName: String? = nil
+    /// "Jacket + your Pants": what is going on the avatar, for the progress card.
+    var outfitSummary: String? = nil
     var addPhoto: () -> Void
     var retry: () -> Void
 
@@ -23,14 +25,15 @@ struct TryOnHero: View {
     }
 
     /// What the hero is showing, for its status chip. Only a real try-on is called one.
-    static func status(preview: TryOnPreview, source: UIImage?, avatarListing: AvatarTryOn?) -> (text: String, isTryOn: Bool)? {
+    static func status(preview: TryOnPreview, source: UIImage?, avatarListing: AvatarTryOn?,
+                       dressingAvatar: Bool = false) -> (text: String, isTryOn: Bool)? {
         switch preview {
         case .ready(_, let isTryOn, _):
             return isTryOn ? ("Try-On", true) : ("Sample Preview", false)
         case .needsPhoto: return nil
         default:
             guard source != nil else { return nil }
-            return (avatarListing == nil ? "Original Photo" : "Your Avatar", false)
+            return (avatarListing == nil && !dressingAvatar ? "Original Photo" : "Your Avatar", false)
         }
     }
 
@@ -53,9 +56,12 @@ struct TryOnHero: View {
         case .ready(let image, let isTryOn, _):
             photo(image, label: isTryOn ? "You wearing the selected look" : "Stand-in preview, not a try-on")
         case .rendering, .waiting:
-            ZStack {
+            ZStack(alignment: .bottom) {
                 if let source { photo(source, label: "Your photo").opacity(0.55) }
-                statusCard(icon: nil, title: "Putting your look together…", detail: "Using your photo and the selected pieces.")
+                statusCard(icon: nil, title: outfitSummary == nil ? "Putting your look together…" : "Dressing your avatar…",
+                           detail: outfitSummary.map { "Adding \($0). This takes a few seconds." }
+                               ?? "Using your photo and the selected pieces.")
+                    .padding(.bottom, 14)
             }
             .accessibilityIdentifier("tryOnRendering")
         case .unavailable:

@@ -34,6 +34,16 @@ struct AvatarTryOn: Equatable {
     var productImage: UIImage?
 }
 
+/// A piece from the user's own wardrobe worn on the avatar together with the scanned listing
+/// ("Mix with your wardrobe"). One per avatar slot.
+struct WardrobeMixPiece: Identifiable {
+    let item: WardrobeItem
+    let slot: AvatarOutfitSlot
+    /// The wardrobe photo the renderer applies (the cleaned cutout when there is one).
+    let image: UIImage
+    var id: UUID { item.id }
+}
+
 struct TryOnRequest {
     /// The user's original full-body photo.
     let person: UIImage

@@ -61,6 +61,11 @@ final class StudioStore {
     @ObservationIgnored private var listingPhotos: [String: CGImage] = [:]
     /// The listing the user chose to try on their avatar, if any.
     private(set) var avatarTryOn: AvatarTryOn?
+    /// Wardrobe pieces worn on the avatar with the scanned listing, one per slot. A slot holds either the
+    /// scanned listing or a wardrobe piece: whichever the user chose last.
+    private(set) var wardrobeMix: [AvatarOutfitSlot: WardrobeMixPiece] = [:]
+    /// Bumped each time the user puts something on the avatar, so Studio can bring the preview into view.
+    private(set) var avatarChangeCount = 0
     private(set) var wardrobeItem: WardrobeItem?
     private(set) var wardrobeGarment: TryOnGarment?
     private(set) var wardrobePerson: UIImage?
@@ -110,6 +115,7 @@ final class StudioStore {
         matchingStart = nil
         listingPhotos = [:]
         avatarTryOn = nil
+        wardrobeMix = [:]
         wardrobeItem = nil
         wardrobeGarment = nil
         wardrobePerson = nil
@@ -451,7 +457,10 @@ final class StudioStore {
             handoff.productImage = photo
         }
         avatarTryOn = handoff
+        // The scanned listing takes its slot: a wardrobe piece there comes off.
+        if let slot = BackendOutfitTryOnRenderer.slot(for: handoff.category) { wardrobeMix[slot] = nil }
         tryOnSource = avatar
+        avatarChangeCount += 1
         refreshPreview()
         if handoff.productImage == nil, let url {
             Task { [weak self] in
@@ -463,6 +472,48 @@ final class StudioStore {
             }
         }
         return true
+    }
+
+    // MARK: Mix with your wardrobe
+
+    /// The avatar slot the scanned listing fills, if one is on the avatar.
+    var scannedSlot: AvatarOutfitSlot? {
+        avatarTryOn.flatMap { BackendOutfitTryOnRenderer.slot(for: $0.category) }
+    }
+
+    /// True when the avatar, not the try-on photo, is what the preview dresses.
+    var isDressingAvatar: Bool { avatarTryOn != nil || !wardrobeMix.isEmpty }
+
+    /// Puts a wardrobe piece on the avatar alongside the scanned listing. Replaces whatever was in its slot,
+    /// including the scanned listing. False for categories the avatar can't wear (accessories) or no avatar.
+    @discardableResult
+    func addToMix(_ item: WardrobeItem, image: UIImage, avatar: UIImage?) -> Bool {
+        guard let avatar, let slot = AvatarOutfitSlot(rawValue: item.category.rawValue) else { return false }
+        if scannedSlot == slot { avatarTryOn = nil }
+        wardrobeMix[slot] = WardrobeMixPiece(item: item, slot: slot, image: image)
+        tryOnSource = avatar
+        avatarChangeCount += 1
+        refreshPreview()
+        return true
+    }
+
+    func removeFromMix(_ slot: AvatarOutfitSlot) {
+        guard wardrobeMix.removeValue(forKey: slot) != nil else { return }
+        refreshPreview()
+    }
+
+    /// Takes the scanned listing off the avatar (wardrobe pieces stay).
+    func removeAvatarListing() {
+        guard avatarTryOn != nil else { return }
+        avatarTryOn = nil
+        refreshPreview()
+    }
+
+    /// Drops wardrobe pieces that belong to someone else (the account changed).
+    func clearMix(unlessOwnedBy ownerID: UUID?) {
+        let before = wardrobeMix.count
+        wardrobeMix = wardrobeMix.filter { $0.value.item.ownerID == ownerID }
+        if wardrobeMix.count != before { refreshPreview() }
     }
 
     /// Stops every running search (a new look is opening).
@@ -563,12 +614,23 @@ final class StudioStore {
                                 signature: "wardrobe:\(item.id.uuidString):\(item.photoRevision.uuidString):\(item.category.rawValue)")
         }
         guard let tryOnSource, let look, !look.pieces.isEmpty else { return nil }
-        if let avatarTryOn {
-            // Only the chosen listing goes on the avatar, identified by its listing id.
-            let garment = TryOnGarment(pieceID: avatarTryOn.pieceID, category: avatarTryOn.category, productID: avatarTryOn.listingID,
-                                       image: avatarTryOn.productImage, sourceBounds: nil, productImageURL: avatarTryOn.productImageURL)
-            return TryOnRequest(person: tryOnSource, garments: [garment],
-                                signature: "avatar:\(avatarTryOn.listingID):\(avatarTryOn.productImage == nil ? "pending" : "photo")")
+        if isDressingAvatar {
+            // The avatar wears the chosen listing (by its listing id) plus any wardrobe pieces, one per slot.
+            var garments: [TryOnGarment] = []
+            var parts: [String] = []
+            if let avatarTryOn {
+                garments.append(TryOnGarment(pieceID: avatarTryOn.pieceID, category: avatarTryOn.category, productID: avatarTryOn.listingID,
+                                             image: avatarTryOn.productImage, sourceBounds: nil, productImageURL: avatarTryOn.productImageURL))
+                parts.append("listing=\(avatarTryOn.listingID):\(avatarTryOn.productImage == nil ? "pending" : "photo")")
+            }
+            for slot in AvatarOutfitSlot.bodyOrder {
+                guard let piece = wardrobeMix[slot], slot != scannedSlot else { continue }
+                garments.append(TryOnGarment(pieceID: piece.item.id, category: piece.item.category.garment,
+                                             productID: "wardrobe-\(piece.item.id.uuidString)", image: piece.image, sourceBounds: nil))
+                parts.append("\(slot.rawValue)=\(piece.item.id.uuidString):\(piece.item.photoRevision.uuidString)")
+            }
+            return TryOnRequest(person: tryOnSource, garments: garments,
+                                signature: "avatar:" + parts.joined(separator: "|"))
         }
         // Every selected piece, as one outfit. By default each piece is the garment as scanned (its
         // cutout or crop); a retailer match is never needed. Only a piece the user explicitly swapped in
@@ -608,7 +670,7 @@ final class StudioStore {
         guard let request = currentRequest else { preview = .nothingSelected; return }
         guard let renderer = TryOnRenderers.current, renderer.supports(request) else { preview = .unavailable; return }
         // Wardrobe Try-On always shows its preview; a scanned look waits until Your Try-On is shown.
-        guard wardrobeItem != nil || avatarTryOn != nil || tryOnVisible else { preview = .waiting; return }
+        guard wardrobeItem != nil || isDressingAvatar || tryOnVisible else { preview = .waiting; return }
 
         let signature = request.signature
         preview = .rendering(signature: signature)
