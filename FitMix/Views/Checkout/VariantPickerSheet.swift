@@ -2,6 +2,9 @@ import SwiftUI
 
 /// Choose the exact store variant (size, colour) and quantity of a Shopify listing before adding it
 /// to the cart. Options and stock come from the store's public product data, loaded when this opens.
+/// A listing whose link only looks like a Shopify product page (many retailers use `/products/`), or a
+/// store whose data can't be loaded, can still be added without a store variant: the demo checkout
+/// takes any cart line.
 struct VariantPickerSheet: View {
     let product: CatalogProduct
     let link: ShopifyProductLink
@@ -26,7 +29,16 @@ struct VariantPickerSheet: View {
                 } else if let loadError {
                     ScrollView {
                         ProfileEmptyState(icon: "exclamationmark.triangle", title: "Couldn't load sizes", message: loadError) {
-                            Button("Try Again") { Task { await load() } }.buttonStyle(FMFilledButtonStyle())
+                            VStack(spacing: 10) {
+                                Button("Try Again") { Task { await load() } }.buttonStyle(FMFilledButtonStyle())
+                                Button("Add Without a Store Variant", action: addWithoutVariant)
+                                    .buttonStyle(FMOutlineButtonStyle())
+                                    .accessibilityIdentifier("variantAddWithoutVariant")
+                                Text("Adds this piece as listed, without a size from \(link.host). It can still go through FitMix's demo checkout, but not through the store's own checkout.")
+                                    .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         .padding(16)
                     }
@@ -58,6 +70,15 @@ struct VariantPickerSheet: View {
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    /// The store's product data couldn't be read: add the listing as it is, like any other retailer's.
+    private func addWithoutVariant() {
+        do {
+            try cart.add(product, size: nil)
+            CheckoutLog.record("added-without-variant", store: link.host, note: "product=\(product.id)")
+            dismiss()
+        } catch { failure = error.localizedDescription }
     }
 
     // MARK: Form

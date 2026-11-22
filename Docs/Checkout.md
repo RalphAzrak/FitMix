@@ -1,108 +1,118 @@
-# Checkout (FitMix's own pages, demo mode)
+# Checkout
 
-Cart → **Checkout** → **Payment** → **Order confirmed**. All three are native FitMix screens in the app's
-style, pushed on the cart's navigation stack. They don't open a pop-up, an Apple Pay sheet, or a store's web
-checkout.
+Home → **Scan Fits** → Studio Fit → **Shop This Look** → **Add to Cart** → **Cart** → **Checkout**.
 
-**Demo mode:** Pay runs `DemoPaymentProcessor`. No card details leave the phone, no money moves, and no store
-receives an order. Every page and order says so ("Demo"). A real provider can replace the processor (see
-"Going live" below) without changing the screens.
+Which checkout the cart opens depends on the build:
+
+| `FITMIX_CHECKOUT_MODE` (build setting → Info.plist `FMCheckoutMode`) | Configuration | Cart's Checkout |
+| --- | --- | --- |
+| `demo` | Debug (the FitMix scheme's Run action) | One full-page demo checkout for the whole cart: Order Review → Demo Payment → Order Summary |
+| `shopify` | Release (Archive, Profile) | Each Shopify store's own checkout inside FitMix (Shopify Checkout Kit), one store at a time |
+
+Debug builds can override it for one launch with `FM_DEBUG_CHECKOUT_MODE=demo|shopify`. A missing or unknown
+value means `demo`.
+
+## Demo checkout
+
+It runs entirely in FitMix. It never collects card details, charges money, calls Shopify, a payment provider
+or a retailer checkout, contacts a store or places a retailer order. It works offline; product photos load
+only when online. It takes **any** cart line: no Shopify variant ID, supported-store list, retailer checkout
+URL or fresh OpenAI/Trendtrack request is needed. Pieces without a listed price are allowed and counted.
 
 | Piece | Where |
 | --- | --- |
-| Delivery options, tax estimate, totals, card validation, `DemoOrder` | `FitMix/Models/Checkout.swift` |
-| `PaymentProcessor` protocol, `DemoPaymentProcessor` | `FitMix/Services/PaymentProcessor.swift` |
-| Orders per account (`orders.json`) | `FitMix/Services/OrderStore.swift` |
-| Checkout page (contact, ship to, delivery, summary), `CheckoutDraft`, `AddressFormFields` | `FitMix/Views/Checkout/CheckoutView.swift` |
-| Payment page (card, billing, total, Pay) | `FitMix/Views/Checkout/PaymentView.swift` |
-| Card fields, shared field style, demo banner | `FitMix/Views/Checkout/CardFields.swift` |
-| Confirmation, receipt, order detail | `FitMix/Views/Checkout/OrderConfirmationView.swift` |
-| Checkout button and its guards | `FitMix/Views/Checkout/CartView.swift` |
-| Order History | `OrderHistoryView` in `FitMix/Views/Profile/ProfileInfoViews.swift` |
+| Flow container, routes, Order Review, Demo Payment, Order Summary, shared line and totals views | `FitMix/Views/Checkout/CheckoutView.swift` |
+| Cart (the flow's first page), recent demo orders | `FitMix/Views/Checkout/CartView.swift` |
+| Opening the flow (bag icon, "View Cart") | `AppRouter.openCart` in `FitMix/Views/Shell/AppShell.swift` |
+| `DemoOrder`, per-currency totals, sample contact and delivery | `FitMix/Models/DemoOrder.swift` |
+| Saving demo orders | `FitMix/Services/DemoOrderStore.swift` |
+| Mode switch | `FitMix/Services/CheckoutMode.swift` |
+| Order History in Profile (lists the same demo orders) | `OrderHistoryView` in `FitMix/Views/Profile/ProfileInfoViews.swift` |
+| UI tests | `FitMixUITests/DemoCheckoutUITests.swift` |
 
-## The flow
+### Navigation
 
-1. **Cart.** **Checkout** is enabled only when every line has a price, in one currency. Otherwise the cart
-   says what to fix.
-2. **Checkout.**
-   - **Contact:** the email comes from the account, and a phone number is required.
-   - **Ship to:**
-     - The default saved address is filled in, and the menu offers the other saved addresses or a new one.
-     - The fields and rules are the same as Profile → Addresses (`ShippingAddress.errors()`,
-       `AddressFormat`). For example, a Canadian postal code must match the province.
-     - Signed in, **Save to my addresses** adds a new address to Profile. If saving fails, checkout still
-       continues and says so.
-   - **Delivery:** Standard ($8, 5–7 days) or Express ($20, 1–2 days). These are demo prices.
-   - **Summary:** the items and totals.
-   - **Continue** shows the problem under each field until they're all valid.
-3. **Payment.**
-   - **The card number** is grouped as it's typed, and the brand (Visa, Mastercard, Amex, Discover) is shown. It
-     must have the brand's length and pass the Luhn check.
-   - **Expiry** is MM/YY and not in the past. **The security code** is 3 digits, or 4 for Amex. **The name** is
-     required.
-   - **Billing** is the shipping address by default, or a separate address with the same rules.
-   - **Pay $X** shows "Processing payment…", and Back is blocked meanwhile.
-4. **Confirmation.**
-   - It shows the order number (`FM-12345`), the **Demo** tag, the items, the address, the card (brand ••••
-     last 4) and the totals.
-   - The paid lines leave the cart, and other lines stay.
-   - **Done** returns to the cart. **View in Order History** appears when the order was saved.
+The flow is one full-screen cover (`CheckoutFlowView`) holding a `NavigationStack`. **Cart** is the root, and
+**Order Review**, **Demo Payment** and **Order Summary** are pushed onto it (`CheckoutRoute`), never shown as
+sheets.
 
-## Totals
+- The bag icon (Home, Studio, Camera) and **View Cart** in Shop This Look open the same flow. Shop This Look is
+  a sheet, so **View Cart** closes it first, and the cart opens once it's gone. **Done** on the cart closes the
+  flow.
+- Back works normally on Order Review and Demo Payment. While the order is saving, Back is hidden.
+- After payment the stack is **replaced** by Order Summary: no Back button, the edge swipe does nothing, and
+  **Done** closes the flow. There is no way back to a payable screen.
 
-- **Subtotal:** the listed prices of the cart lines (what the listings showed when added).
-- **Delivery:** the option's price.
-- **Tax:** an **estimate** for Canadian addresses, on goods and delivery, by province. Examples: QC 14.975%
-  (GST + QST), ON 13% (HST), NS 14% (HST), AB 5% (GST). Outside Canada the total says "Calculated by the store".
-- **Total:** the sum, rounded to cents.
+### Steps
 
-## Card data
+1. **Cart**: lines grouped by store, with quantity controls, one **Checkout** button for every store together,
+   and the recent demo orders.
+2. **Order Review**: every line grouped by retailer, with photo, product name, quantity, size or variant, and
+   price. Totals are shown per currency (CAD, USD…), never converted or added together. A piece without a listed
+   price shows **Price unavailable** and is listed as "Not in any total", never counted as zero. **Continue to
+   Payment**.
+3. **Demo Payment**: **Demo mode**, the preset **Demo card •••• 4242** (a label, nothing to type), sample contact
+   and delivery details (fixed text, tagged **Sample**, never the account's), the totals, and one **Pay Demo
+   Order** button. The button is disabled while saving. Each visit to Demo Payment has a checkout ID: saving
+   again with the same ID returns the order already saved, so repeated taps can't create duplicates.
+4. Pay Demo Order approves locally, then saves one `DemoOrder` to disk **first**. The order holds a number like
+   `FM-261122-932C`, a timestamp, a snapshot of every line, totals per currency, the count of unpriced pieces
+   and the checkout ID. Only after the file is written are exactly those lines removed from the cart. If saving
+   fails, the cart is unchanged and the alert offers **Try Again**.
+5. **Order Summary**: **Demo order placed**, then the order number, date, payment status (**Approved · Demo card
+   •••• 4242 (demo, not charged)**), retailers, items grouped by retailer, and totals. The same page opens from
+   "Demo orders" in the cart and from Profile → Order History, also after a relaunch.
 
-- The card's digits live only in the payment page's state, and are cleared after the order.
-- They're never saved, logged or sent.
-- An order keeps only the brand and the last four digits.
-- The fields use iOS card content types, so autofill can offer saved cards.
+### Storage
 
-## Demo outcomes
+`Application Support/Accounts/<user-id>/demo-orders.json` when signed in, `Accounts/guest/demo-orders.json` when
+signed out, written atomically with complete file protection. There are no payment fields. Orders saved before
+totals were stored are still read; their totals are recomputed from the items.
 
-| Card | Result |
-| --- | --- |
-| `4242 4242 4242 4242`, any future date, any CVC | Approved |
-| Any other number that passes the checks | Approved |
-| `4000 0000 0000 0002` | **Declined**: the message shows on the payment page, and the cart and form stay |
+## Shopify store checkout (outside demo mode)
 
-## Orders
+`FitMix/Views/Checkout/ShopifyStoreCheckout.swift` and `FitMix/Services/RetailerCheckout.swift`. Under each
+store's lines the cart shows **Checkout at <store>** when every line is an exact Shopify variant, and opens
+that store's checkout with Shopify Checkout Kit. Closing it keeps the cart. Completing it removes what that
+store sold (`CartStore.completeCheckout`) and shows a receipt. Stores whose lines aren't Shopify variants
+can't be checked out this way.
 
-`OrderStore` saves orders per account in `Application Support/Accounts/<user-id>/orders.json`, with complete
-file protection, next to `cart.json`.
-- **Signed out:** the confirmation shows the order and says it isn't saved.
-- **Order History** (Profile) lists saved orders, newest first, each tagged **Demo**, and opens a detail page.
+## Adding any retailer's piece
 
-## Debug (Debug builds only)
+A listing whose link has `/products/<handle>` opens the Shopify variant picker. Many retailers that aren't on
+Shopify use that path too (Uniqlo, for one), and their product data can't be loaded. The picker then offers
+**Add Without a Store Variant**, which adds the listing as it is (no size). Such lines go through the demo
+checkout like any other, but not through a Shopify store checkout.
+
+## Debug launch arguments (Debug builds only)
 
 | Variable | What it does |
 | --- | --- |
-| `FM_DEBUG_SCREEN=checkout` | Opens the cart and goes straight to Checkout. An empty cart is first filled with two labelled sample pieces (CAD). |
-| `FM_DEBUG_CHECKOUT_DEMO=decline` | Every card is declined. |
+| `FM_DEBUG_CHECKOUT_MODE=demo\|shopify` | Overrides the build's checkout mode for one launch. |
+| `FM_DEBUG_CART_SEED=twostores` | Replaces the cart with two test fixtures: Kotn (CAD) and Uniqlo (USD, quantity 2). |
+| `FM_DEBUG_CART_SEED=multistore` | Replaces the cart with four stores in two currencies, including one piece without a price. |
+| `FM_DEBUG_CART_SEED=empty` | Empties the cart at launch. |
+| `FM_DEBUG_MATCH_FIXTURE=mixed` | Sample look matches: a real Uniqlo listing (not Shopify) and a real Frank And Oak listing (Shopify). |
+| `FM_DEBUG_CHECKOUT_PLACE=1` | Taps Checkout, Continue to Payment, then Pay Demo Order three times in a row. |
+| `FM_DEBUG_ORDER_SAVE_FAIL=1` | The first demo-order save fails, to check the cart stays intact and Try Again works. |
+| `FM_DEBUG_OPEN_ORDER=latest` | Opens the newest saved demo order's summary at launch. |
+| `FM_DEBUG_SCREEN=cart` | Opens the checkout flow at the cart. |
 
-## Going live
+Seeded pieces are labeled **Test fixture**. Seeding replaces the cart of whichever account is active.
 
-1. A payment provider has to be integrated. For example, **Stripe**:
-   - The backend creates a PaymentIntent and prices the order itself (never trusting the app's totals).
-   - The app collects the card with Stripe's own fields, so FitMix never handles raw card numbers.
-   - The provider's confirmation (a webhook) marks the order paid.
-2. A new `PaymentProcessor` wraps that, and `PaymentView.processor` uses it instead of the demo processor.
-3. **Who sells the goods** has to be decided first. Today the products belong to other stores, so FitMix
-   charging for them would make FitMix the merchant: refunds, shipping and tax become its job.
+## Tests (FitMixUITests, run with ⌘U on the FitMix scheme)
 
-## Shopify store checkout (no longer opened)
-
-The cart used to open each Shopify store's own checkout in a sheet (Shopify Checkout Kit, cart permalinks).
-That code is still in the app, but the cart doesn't open it any more: `RetailerCheckout.swift`, the
-`ShopifyCheckoutKit` package, and `CartStore.completeCheckout`.
-- The variant picker (`VariantPickerSheet`, `ShopifyProducts`) is still used, so Shopify lines keep their exact
-  variant.
-- To bring store checkout back, open `RetailerCheckout(group:)`'s URL with `ShopifyCheckout(checkout:)` again.
-  Git history has the previous `CartView`.
-- The `FM_DEBUG_CHECKOUT_OPEN`, `_CLOSE_AFTER`, `_SIMULATE_COMPLETE` and `_PREFILL` variables belonged to it,
-  and do nothing now. `FM_DEBUG_CHECKOUT_PICKS` (adding variants through the picker) is still read.
+- `testBagIconOpensFullPageCartAndBackWorksBeforePayment`: the bag icon opens the cart over the tab bar. Back
+  works from Order Review and from Demo Payment, and Done closes the flow.
+- `testViewCartFromShopThisLookLeavesTheSheet`: Studio sample look → Shop This Look → choose a size → Add to
+  Cart → View Cart. The cart opens full screen with the Shop This Look sheet gone.
+- `testUnpricedItemsAreShownAndLeftOutOfTotals`: four stores, CAD and USD totals, the unpriced piece named.
+- `testOneOrderFromTwoStoresSurvivesRepeatTapsAndRelaunch`: Kotn and Uniqlo, three taps on Pay Demo Order.
+  Exactly one new order is saved, the summary has no Back, the cart is emptied, and the same summary opens
+  after a relaunch.
+- `testFailedSaveKeepsTheCartAndRetryPlacesTheOrder`: a failed save shows the error, and Try Again places one
+  order.
+- `testShopifyAndNonShopifyRetailersInOneDemoOrder`: the normal app flow with `FM_DEBUG_MATCH_FIXTURE=mixed`.
+  Uniqlo is added without a store variant. Frank And Oak's real sizes are loaded from its store and an exact
+  variant is added. Checkout, Demo Payment and Pay Demo Order follow, and one order holds both retailers and
+  reopens after a relaunch. Adding Frank And Oak needs a network connection; the checkout itself doesn't.

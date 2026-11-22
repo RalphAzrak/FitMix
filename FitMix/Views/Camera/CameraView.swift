@@ -87,7 +87,7 @@ struct CameraView: View {
             try? await Task.sleep(for: .seconds(4))
             if !Task.isCancelled { offerManual = true }
         }
-        .sheet(isPresented: $showBag) { NavigationStack { CartView() } }
+        .fullScreenCover(isPresented: $showBag) { CheckoutFlowView() }
         .fullScreenCover(item: $manualFrame) { frame in
             ManualGarmentSelectView(frame: frame, initialCategory: Self.debugManualCategory, cancel: {
                 manualFrame = nil

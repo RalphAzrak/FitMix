@@ -1,303 +1,474 @@
 import SwiftUI
 
-/// What the shopper has entered so far, shared by the checkout and payment pages.
+// MARK: - The demo checkout flow
+//
+// Cart → Order Review → Demo Payment → Order Summary, as full-screen pushes in one navigation stack
+// (`CheckoutFlowView`). The bag icon and Shop This Look's "View Cart" both open this same flow. The
+// cart's Checkout button starts it in demo mode (`CheckoutMode.demo`).
+//
+// It is a demo: it runs entirely on the iPhone, works offline, never asks for card details, charges
+// nothing, contacts no payment provider, Shopify or store, and places no retailer order. It works for
+// any cart line: no Shopify variant, supported store, retailer checkout URL or fresh search is needed.
+// "Pay Demo Order" approves locally, saves one `DemoOrder`, and only then removes those lines from the
+// cart. See Docs/Checkout.md.
+
+/// A step pushed on top of the cart.
+enum CheckoutRoute: Hashable {
+    case checkout
+    case payment
+    /// A saved demo order. `justPlaced`: Payment just placed it, so Back is hidden and Done closes the flow.
+    case summary(UUID, justPlaced: Bool)
+}
+
+/// Drives the flow's navigation. Shared through the environment so each step can push the next.
 @Observable
-final class CheckoutDraft {
-    /// The cart lines being bought, as they were when checkout opened.
-    var items: [CartItem] = []
-    var contact = CheckoutContact()
-    var address = ShippingAddress()
-    /// The saved address the shipping fields came from, or nil for a new one.
-    var savedAddressID: UUID?
-    var saveAddress = false
-    var delivery: DeliveryOption = .standard
-    @ObservationIgnored private var loaded = false
+final class CheckoutNavigator {
+    var path: [CheckoutRoute]
+    @ObservationIgnored var close: () -> Void = {}
 
-    /// Fills the draft once: the cart's lines, the account's email, and the default saved address.
-    func load(items: [CartItem], email: String?, defaultAddress: ShippingAddress?) {
-        guard !loaded else { return }
-        loaded = true
-        self.items = items
-        contact.email = email ?? ""
-        if let defaultAddress { use(defaultAddress) } else { newAddress() }
+    init(path: [CheckoutRoute] = []) { self.path = path }
+}
+
+/// The whole flow, full screen. Cart is the root; the other steps are pushed.
+struct CheckoutFlowView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var navigator: CheckoutNavigator
+
+    init(startingAt path: [CheckoutRoute] = []) {
+        _navigator = State(initialValue: CheckoutNavigator(path: path))
     }
 
-    func use(_ saved: ShippingAddress) {
-        address = saved
-        savedAddressID = saved.id
-        saveAddress = false
-    }
-
-    func newAddress() {
-        let region = Locale.current.region?.identifier
-        address = ShippingAddress(countryCode: region.flatMap { code in AddressFormat.countries.contains { $0.code == code } ? code : nil } ?? "CA")
-        savedAddressID = nil
-    }
-
-    var totals: OrderTotals? {
-        guard let subtotal = CheckoutReadiness.subtotal(of: items) else { return nil }
-        return OrderTotals(currency: subtotal.currency, subtotal: subtotal.amount, delivery: delivery, address: address.normalized())
+    var body: some View {
+        @Bindable var navigator = navigator
+        NavigationStack(path: $navigator.path) {
+            CartView()
+                .navigationDestination(for: CheckoutRoute.self) { route in
+                    switch route {
+                    case .checkout: CheckoutView()
+                    case .payment: PaymentView()
+                    case .summary(let id, let justPlaced): OrderSummaryView(orderID: id, justPlaced: justPlaced)
+                    }
+                }
+        }
+        .environment(navigator)
+        .onAppear { navigator.close = { dismiss() } }
     }
 }
 
-/// Page 1 of FitMix's checkout: contact, shipping address, delivery, and the order summary.
-/// Continue goes to the payment page. Nothing is charged here.
+// MARK: - Checkout
+
+/// Order Review: every cart line, grouped by store, with totals per currency. Continue to Payment goes on.
 struct CheckoutView: View {
-    /// Closes checkout and returns to the cart (after an order, or from the confirmation).
-    var onFinish: () -> Void
-
     @Environment(CartStore.self) private var cart
-    @Environment(ProfileStore.self) private var profile
-    @Environment(AuthSession.self) private var auth
-    @State private var draft = CheckoutDraft()
-    @State private var attempted = false
-    @State private var showPayment = false
-    @State private var saveNotice: String?
-
-    private var contactErrors: [CheckoutContact.Field: String] { attempted ? draft.contact.errors() : [:] }
-    private var addressErrors: [ShippingAddress.Field: String] { attempted ? draft.address.errors() : [:] }
-    private var isValid: Bool { draft.contact.errors().isEmpty && draft.address.errors().isEmpty && draft.totals != nil }
-    private var canSaveAddresses: Bool { profile.accountID != nil && profile.state == .ready }
+    @Environment(CheckoutNavigator.self) private var navigator
 
     var body: some View {
+        Group {
+            if cart.isEmpty {
+                ScrollView {
+                    ProfileEmptyState(icon: "bag", title: "Nothing to check out", message: "Your cart is empty.").padding(16)
+                }
+            } else {
+                review
+            }
+        }
+        .background(Color.fmBackground.ignoresSafeArea())
+        .navigationTitle("Order Review")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await runDebugStep() }
+    }
+
+    private var review: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                CheckoutDemoBanner(text: "This checkout is a demo. No payment is taken, and no store receives an order.")
-                    .padding(.bottom, 8)
-                contactSection
-                shippingSection
-                deliverySection
-                summarySection
-                if attempted && !isValid {
-                    NoticeRow(tone: .caution, text: "Check the highlighted fields above.")
-                        .padding(.top, 4)
-                }
-                if let saveNotice { NoticeRow(tone: .caution, text: saveNotice).padding(.top, 4) }
-                Button(action: proceed) {
-                    Label("Continue to Payment", systemImage: "creditcard")
-                }
-                .buttonStyle(FMFilledButtonStyle())
-                .padding(.top, 12)
-                .accessibilityIdentifier("checkoutContinue")
+            VStack(alignment: .leading, spacing: 14) {
+                NoticeRow(tone: .info, text: "Demo checkout. Everything in your cart is ordered together, from every store, here in FitMix. Nothing is charged and no store receives this order.")
+                    .accessibilityIdentifier("checkoutDemoNotice")
+                StoreGroupsList(groups: cart.groups, image: cart.localImage(for:))
+                CurrencyTotalsCard(totals: cart.totals, unpriced: cart.unpricedPieces, pieces: cart.count, stores: cart.groups.count)
             }
             .padding(16)
         }
-        .scrollDismissesKeyboard(.interactively)
-        .background(Color.fmBackground.ignoresSafeArea())
-        .navigationTitle("Checkout")
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(isPresented: $showPayment) { PaymentView(draft: draft, onFinish: onFinish) }
-        .onAppear {
-            draft.load(items: cart.items, email: auth.user?.email, defaultAddress: profile.defaultAddress)
-        }
-    }
-
-    // MARK: Sections
-
-    private var contactSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FMSectionHeader(title: "Contact")
-            VStack(alignment: .leading, spacing: 14) {
-                CheckoutField(label: "Email", text: $draft.contact.email, prompt: "name@example.com", content: .emailAddress,
-                              keyboard: .emailAddress, capitalization: .never, error: contactErrors[.email],
-                              identifier: "checkoutEmail")
-                CheckoutField(label: "Phone", text: $draft.contact.phone, prompt: "514 555 0123", content: .telephoneNumber,
-                              keyboard: .phonePad, capitalization: .never, error: contactErrors[.phone],
-                              identifier: "checkoutPhone")
-            }
-            .fmCard()
-        }
-    }
-
-    private var shippingSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FMSectionHeader(title: "Ship to") {
-                if !profile.addresses.isEmpty { savedAddressMenu }
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                AddressFormFields(address: $draft.address, errors: addressErrors, prefix: "shipping")
-                if canSaveAddresses && draft.savedAddressID == nil {
-                    Toggle("Save to my addresses", isOn: $draft.saveAddress)
-                        .font(.system(size: 15))
-                        .tint(Color.fmCobalt)
-                        .accessibilityIdentifier("checkoutSaveAddress")
+        .safeAreaInset(edge: .bottom) {
+            BottomBar {
+                Button { navigator.path.append(.payment) } label: {
+                    Label("Continue to Payment", systemImage: "arrow.right")
                 }
+                .buttonStyle(FMFilledButtonStyle())
+                .disabled(cart.loadError != nil)
+                .accessibilityIdentifier("checkoutContinueToPayment")
             }
-            .fmCard()
         }
     }
 
-    private var savedAddressMenu: some View {
-        Menu {
-            ForEach(profile.addresses) { saved in
-                Button {
-                    draft.use(saved)
-                } label: {
-                    Text("\(saved.recipientName) · \(saved.streetLine)")
-                }
-            }
-            Divider()
-            Button("New address", systemImage: "plus") { draft.newAddress() }
-        } label: {
-            HStack(spacing: 4) {
-                Text(draft.savedAddressID == nil ? "New address" : "Saved addresses")
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold))
-            }
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Color.fmCobaltDeep)
-        }
-        .accessibilityIdentifier("checkoutSavedAddresses")
-    }
-
-    private var deliverySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FMSectionHeader(title: "Delivery")
-            VStack(spacing: 0) {
-                ForEach(DeliveryOption.allCases) { option in
-                    Button {
-                        draft.delivery = option
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: draft.delivery == option ? "largecircle.fill.circle" : "circle")
-                                .font(.system(size: 20))
-                                .foregroundStyle(draft.delivery == option ? Color.fmCobalt : Color.fmOutline)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
-                                Text(option.detail).font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
-                            }
-                            Spacer()
-                            Text(draft.totals.map { $0.format(option.price) } ?? "")
-                                .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(Color.fmInk)
-                        }
-                        .frame(minHeight: 52)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(draft.delivery == option ? .isSelected : [])
-                    .accessibilityIdentifier("checkoutDelivery-\(option.rawValue)")
-                    if option != DeliveryOption.allCases.last { Divider() }
-                }
-            }
-            .fmCard(padding: 12)
-        }
-    }
-
-    private var summarySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FMSectionHeader(title: "Order summary") {
-                let pieces = draft.items.reduce(0) { $0 + $1.quantity }
-                Text(pieces == 1 ? "1 piece" : "\(pieces) pieces")
-                    .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(draft.items) { item in
-                    OrderLineRow(line: DemoOrder.Line(item), currency: item.currencyCode)
-                }
-                if let totals = draft.totals {
-                    Divider()
-                    OrderTotalsView(totals: totals)
-                }
-            }
-            .fmCard()
-        }
-    }
-
-    // MARK: Actions
-
-    private func proceed() {
-        attempted = true
-        guard isValid else { return }
-        draft.address = draft.address.normalized()
-        saveNotice = nil
-        if draft.saveAddress && canSaveAddresses {
-            do {
-                try profile.saveAddress(draft.address)
-                draft.savedAddressID = draft.address.id
-                draft.saveAddress = false
-            } catch {
-                // Not saving the address never blocks checkout.
-                saveNotice = "This address couldn't be saved to your profile: \(error.localizedDescription) You can still continue."
-            }
-        }
-        showPayment = true
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` continues to Payment once the screen is up.
+    private func runDebugStep() async {
+        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty, navigator.path.last == .checkout else { return }
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        CheckoutLog.record("debug-continue-to-payment", store: "-")
+        navigator.path.append(.payment)
     }
 }
 
-/// Country, recipient, street, unit, city, province or state, and postal code, with the same rules as
-/// Profile → Addresses (`ShippingAddress.errors()`, `AddressFormat`).
-struct AddressFormFields: View {
-    @Binding var address: ShippingAddress
-    var errors: [ShippingAddress.Field: String]
-    /// Distinguishes shipping and billing fields for UI tests.
-    var prefix: String
+// MARK: - Payment
 
-    private var format: AddressFormat { address.format }
+/// Demo Payment: a preset, labelled demo payment method, sample contact and delivery details, and one
+/// Pay Demo Order button that approves locally. Never collects card details, never calls Shopify or a
+/// payment provider, never places a retailer order.
+struct PaymentView: View {
+    @Environment(CartStore.self) private var cart
+    @Environment(DemoOrderStore.self) private var orders
+    @Environment(CheckoutNavigator.self) private var navigator
+
+    /// This visit to Payment. Saving twice with the same ID returns the first order instead of a second.
+    @State private var checkoutID = UUID()
+    @State private var paying = false
+    @State private var failure: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                demoModeBanner
+                demoCard
+                sampleDetails
+                CurrencyTotalsCard(totals: cart.totals, unpriced: cart.unpricedPieces, pieces: cart.count, stores: cart.groups.count)
+                Text("Pay Demo Order approves this order on your iPhone. No card details are collected, no money is charged, and no payment provider, Shopify or store is contacted.")
+                    .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+        }
+        .background(Color.fmBackground.ignoresSafeArea())
+        .navigationTitle("Demo Payment")
+        .navigationBarTitleDisplayMode(.inline)
+        // While the order is saving, there's no going back to change the cart under it.
+        .navigationBarBackButtonHidden(paying)
+        .safeAreaInset(edge: .bottom) {
+            BottomBar {
+                Button(action: pay) {
+                    if paying {
+                        HStack(spacing: 8) { ProgressView().tint(.white); Text("Approving…") }
+                    } else {
+                        Label("Pay Demo Order", systemImage: "checkmark.shield")
+                    }
+                }
+                .buttonStyle(FMFilledButtonStyle())
+                .disabled(paying || cart.isEmpty || cart.loadError != nil)
+                .accessibilityIdentifier("paymentPayDemoOrder")
+            }
+        }
+        .task { await runDebugPay() }
+        .alert("Couldn't place the demo order", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("Try Again") { pay() }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(failure ?? "") }
+    }
+
+    private var demoModeBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "testtube.2").font(.system(size: 16, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Demo mode").font(.system(size: 15, weight: .bold))
+                Text("This payment is simulated. Nothing is charged.").font(.system(size: 13))
+            }
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Color.fmInk)
+        .padding(12)
+        .background(Color.fmLime.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.fmInk.opacity(0.15)))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("paymentDemoMode")
+    }
+
+    /// The preset demo card. It's a label, not a form: there is nothing to type and nothing is stored.
+    private var demoCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Eyebrow(text: "Pay with", color: .fmInk)
+            HStack(spacing: 12) {
+                Image(systemName: "creditcard.fill").font(.system(size: 22)).foregroundStyle(Color.fmCobalt)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Demo card •••• 4242").font(.system(size: 16, weight: .semibold).monospacedDigit()).foregroundStyle(Color.fmInk)
+                    Text("Preset for the demo. Not a real card.").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                }
+                Spacer()
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.fmCobalt)
+            }
+        }
+        .fmCard(padding: 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("paymentDemoCard")
+    }
+
+    /// Sample contact and delivery details, so the page reads like a checkout. Fixed text, not the
+    /// account's: nothing here is typed, saved or sent.
+    private var sampleDetails: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Eyebrow(text: "Contact & delivery", color: .fmInk)
+                Spacer()
+                TagPill(text: "Sample")
+            }
+            ForEach(DemoOrder.sampleDetails, id: \.self) { line in
+                Text(line).font(.system(size: 14)).foregroundStyle(Color.fmInk)
+            }
+            Text("Sample details for the demo. Nothing ships.").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+        }
+        .fmCard(padding: 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("paymentSampleDetails")
+    }
+
+    /// Approves locally, saves the order, and only once it's saved removes those exact lines from the cart.
+    private func pay() {
+        guard !paying else {
+            CheckoutLog.record("payment-tap-ignored", store: "-", note: "reason=already_saving")
+            return
+        }
+        paying = true
+        let items = cart.items
+        let checkoutID = checkoutID
+        CheckoutLog.record("payment-simulate", store: "-", note: "checkout=\(checkoutID.uuidString.prefix(8)) lines=\(items.count)")
+        Task {
+            // A short pause so "Approving…" is visible, like a real authorization. Nothing leaves the phone.
+            try? await Task.sleep(for: .milliseconds(900))
+            let order: DemoOrder
+            do {
+                order = try orders.place(items, checkoutID: checkoutID)
+            } catch {
+                CheckoutLog.record("demo-order-failed", store: "-", note: error.localizedDescription)
+                failure = error.localizedDescription  // cart untouched; Try Again saves with the same checkout ID
+                paying = false
+                return
+            }
+            CheckoutLog.record("demo-order-saved", store: "-", note: "number=\(order.number) lines=\(order.items.count) pieces=\(order.pieces) stores=\(Set(order.items.map(\.retailerKey)).count) totals=\(order.savedTotals.map(\.price.formatted)) file=\(orders.fileURL.path)")
+            var cartWarning: String?
+            do {
+                try cart.remove(ids: Set(items.map(\.id)))
+            } catch {
+                cartWarning = error.localizedDescription
+            }
+            CheckoutLog.record("cart-after-order", store: "-", note: "items=\(cart.items.count) orders=\(orders.orders.count)\(cartWarning.map { " warning=\($0)" } ?? "")")
+            // Replaces the stack: Order Summary, with nothing payable behind it.
+            navigator.path = [.summary(order.id, justPlaced: true)]
+        }
+    }
+
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` taps Pay Demo Order, then taps it again right away (and once more
+    /// while saving), as an impatient shopper would. Only one order may be saved.
+    private func runDebugPay() async {
+        guard DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty else { return }
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        pay()
+        pay()
+        try? await Task.sleep(for: .milliseconds(300))
+        pay()
+    }
+}
+
+// MARK: - Order Summary
+
+/// A saved demo order. Right after payment it replaces the whole flow: no Back to a payable screen, and
+/// Done closes the flow. From "Demo orders" in the cart it opens like any other page.
+struct OrderSummaryView: View {
+    var orderID: UUID
+    var justPlaced: Bool
+
+    @Environment(DemoOrderStore.self) private var orders
+    @Environment(CheckoutNavigator.self) private var navigator
+
+    var body: some View {
+        Group {
+            if let order = orders.order(id: orderID) {
+                ScrollView { DemoOrderSummary(order: order).padding(16) }
+            } else {
+                ScrollView {
+                    ProfileEmptyState(icon: "questionmark.folder", title: "Order not found",
+                                      message: "This demo order isn't saved on this iPhone for this account.").padding(16)
+                }
+            }
+        }
+        .background(Color.fmBackground.ignoresSafeArea())
+        .navigationTitle("Order Summary")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(justPlaced)
+        .safeAreaInset(edge: .bottom) {
+            if justPlaced {
+                BottomBar {
+                    Button("Done") { navigator.close() }
+                        .buttonStyle(FMFilledButtonStyle())
+                        .accessibilityIdentifier("orderSummaryDoneButton")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Shared pieces
+
+/// A label and its value on one line of the order summary.
+struct SummaryRow: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label).font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+            Spacer(minLength: 8)
+            Text(value).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk)
+                .multilineTextAlignment(.trailing)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A bottom action bar above the safe area.
+struct BottomBar<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 8) { content }
+            .padding(16)
+            .background(Color.fmBackground)
+            .overlay(alignment: .top) { Rectangle().fill(Color.fmHairline).frame(height: 1) }
+    }
+}
+
+/// Lines grouped by store, one card per store.
+struct StoreGroupsList: View {
+    var groups: [CartStore.RetailerGroup]
+    var image: (CartItem) -> UIImage? = { _ in nil }
+
+    var body: some View {
+        ForEach(groups) { group in
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Eyebrow(text: group.name, color: .fmInk)
+                    Spacer()
+                    Text(group.count == 1 ? "1 item" : "\(group.count) items").font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+                }
+                ForEach(group.items) { OrderLineRow(item: $0, image: image($0)) }
+            }
+            .fmCard(padding: 14)
+            .accessibilityIdentifier("store-\(group.id)")
+        }
+    }
+}
+
+/// One line as it's ordered: photo, title, size or variant, quantity, listed price.
+struct OrderLineRow: View {
+    var item: CartItem
+    var image: UIImage? = nil
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            GarmentTile(source: image.map { .image($0) } ?? item.imageURL.map { .remote($0) } ?? .none, category: item.category)
+                .frame(width: 52, height: 60)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(item.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk).lineLimit(2)
+                    if item.isFixture { TagPill(text: "Test fixture") }
+                }
+                Text(variant).font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                Text("Qty \(item.quantity)").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(item.lineTotal?.formatted ?? "Price unavailable")
+                    .font(.system(size: 14, weight: item.lineTotal == nil ? .regular : .bold))
+                    .foregroundStyle(item.lineTotal == nil ? Color.fmSecondary : Color.fmInk)
+                if item.quantity > 1, let unit = item.unitPrice {
+                    Text("\(unit.formatted) each").font(.system(size: 11)).foregroundStyle(Color.fmSecondary)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var variant: String {
+        if let line = item.shopify {
+            return (line.displayOptions + (line.colourFixedByListing ? ["Colour as pictured"] : [])).joined(separator: " · ")
+        }
+        return item.size.map { "Size \($0)" } ?? "Size not listed"
+    }
+}
+
+/// Totals per currency, never converted or added across currencies. Pieces without a price are named,
+/// never counted as zero.
+struct CurrencyTotalsCard: View {
+    var totals: [CurrencyTotal]
+    var unpriced: Int
+    var pieces: Int
+    var stores: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Eyebrow(text: totals.count > 1 ? "Totals by currency" : "Total", color: .fmInk)
+                Spacer()
+                Text("\(pieces == 1 ? "1 item" : "\(pieces) items") · \(stores == 1 ? "1 store" : "\(stores) stores")")
+                    .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+            }
+            if totals.isEmpty {
+                Text("Prices unavailable").font(.system(size: 15)).foregroundStyle(Color.fmSecondary)
+            }
+            ForEach(totals, id: \.price.currencyCode) { total in
+                HStack(alignment: .firstTextBaseline) {
+                    Text("\(total.price.currencyCode) · \(total.pieces == 1 ? "1 item" : "\(total.pieces) items")")
+                        .font(.system(size: 14)).foregroundStyle(Color.fmSecondary)
+                    Spacer()
+                    Text(total.price.formatted).font(.fmDisplay(22)).foregroundStyle(Color.fmInk)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("total-\(total.price.currencyCode)")
+            }
+            if totals.count > 1 {
+                Text("Each currency is totaled on its own. Nothing is converted.")
+                    .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+            }
+            if unpriced > 0 {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(unpriced == 1 ? "1 item · Price unavailable" : "\(unpriced) items · Price unavailable")
+                        .font(.system(size: 14)).foregroundStyle(Color.fmSecondary)
+                    Spacer()
+                    Text("Not in any total").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fmSecondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("total-unpriced")
+            }
+        }
+        .fmCard(padding: 14)
+    }
+}
+
+/// A placed demo order: headline, number, time, items by store, totals per currency.
+struct DemoOrderSummary: View {
+    var order: DemoOrder
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Country or region").font(.footnote.weight(.medium)).foregroundStyle(Color.fmSecondary)
-                Picker("Country or region", selection: country) {
-                    ForEach(AddressFormat.countries, id: \.code) { Text($0.name).tag($0.code) }
-                }
-                .pickerStyle(.navigationLink)
-                .padding(.horizontal, 14)
-                .frame(minHeight: 48)
-                .background(Color.fmFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .accessibilityIdentifier("\(prefix)Country")
+                Image(systemName: "checkmark.seal.fill").font(.system(size: 34)).foregroundStyle(Color.fmGreen)
+                Text("Demo order placed").font(.fmDisplay(28)).foregroundStyle(Color.fmInk)
+                    .accessibilityIdentifier("demoOrderHeadline")
+                Text("Order \(order.number)").font(.system(size: 17, weight: .semibold).monospacedDigit())
+                    .accessibilityIdentifier("demoOrderNumber")
+                Text("Nothing was charged, and no store received this order.")
+                    .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            CheckoutField(label: "Full name", text: $address.recipientName, content: .name, capitalization: .words,
-                          error: errors[.recipient], identifier: "\(prefix)Name")
-            CheckoutField(label: "Street address", text: $address.street, content: .streetAddressLine1, capitalization: .words,
-                          error: errors[.street], identifier: "\(prefix)Street")
-            CheckoutField(label: "Apartment, suite, or unit (optional)", text: $address.unit, content: .streetAddressLine2,
-                          capitalization: .words, error: errors[.unit], identifier: "\(prefix)Unit")
-            CheckoutField(label: format.cityLabel, text: $address.city, content: .addressCity, capitalization: .words,
-                          error: errors[.city], identifier: "\(prefix)City")
-            HStack(alignment: .top, spacing: 12) {
-                region
-                CheckoutField(label: format.postalLabel, text: $address.postalCode,
-                              prompt: format.postalPrompt.isEmpty ? nil : format.postalPrompt, content: .postalCode,
-                              keyboard: format.postalKeyboardIsNumeric ? .numbersAndPunctuation : .default,
-                              capitalization: .characters, error: errors[.postalCode], identifier: "\(prefix)Postal")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                SummaryRow(label: "Order number", value: order.number)
+                SummaryRow(label: "Date", value: order.placedAt.formatted(date: .abbreviated, time: .shortened))
+                SummaryRow(label: "Payment", value: "Approved · Demo card •••• 4242 (demo, not charged)")
+                    .accessibilityIdentifier("demoOrderPaymentStatus")
+                SummaryRow(label: order.retailers.count == 1 ? "Retailer" : "Retailers", value: order.retailers.joined(separator: ", "))
+                    .accessibilityIdentifier("demoOrderRetailers")
             }
-        }
-    }
-
-    /// Changing country clears a province or state picked from the old country's list.
-    private var country: Binding<String> {
-        Binding(get: { address.countryCode }, set: { new in
-            guard new != address.countryCode else { return }
-            if format.regions != nil || AddressFormat.for(new).regions != nil { address.region = "" }
-            address.countryCode = new
-        })
-    }
-
-    @ViewBuilder
-    private var region: some View {
-        if let regions = format.regions {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(format.regionLabel).font(.footnote.weight(.medium)).foregroundStyle(Color.fmSecondary)
-                Picker(format.regionLabel, selection: $address.region) {
-                    Text("Choose…").tag("")
-                    ForEach(regions, id: \.code) { Text($0.name).tag($0.code) }
-                }
-                .pickerStyle(.menu)
-                .tint(Color.fmInk)
-                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                .padding(.horizontal, 6)
-                .background(Color.fmFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(errors[.region] == nil ? Color.fmHairline : Color.fmError))
-                .accessibilityIdentifier("\(prefix)Region")
-                if let message = errors[.region] {
-                    Text(message).font(.footnote).foregroundStyle(Color.fmError).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        } else {
-            CheckoutField(label: format.regionLabel, text: $address.region, content: .addressState, capitalization: .words,
-                          error: errors[.region], identifier: "\(prefix)Region")
+            .fmCard(padding: 14)
+            StoreGroupsList(groups: CartStore.groups(of: order.items))
+            CurrencyTotalsCard(totals: order.savedTotals, unpriced: order.savedUnpricedPieces, pieces: order.pieces,
+                               stores: Set(order.items.map(\.retailerKey)).count)
         }
     }
 }

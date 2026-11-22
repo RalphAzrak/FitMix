@@ -161,7 +161,7 @@ enum ProductImage: Hashable {
     case remote(URL)
 }
 
-struct Price: Hashable {
+struct Price: Hashable, Codable, Sendable {
     var amount: Decimal
     /// ISO 4217, e.g. "USD".
     var currencyCode: String
