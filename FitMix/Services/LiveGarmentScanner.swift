@@ -32,6 +32,18 @@ nonisolated final class LiveScanFrame: @unchecked Sendable, Equatable {
     func isExpired(at time: Double) -> Bool { expiresAt.map { time >= $0 } ?? false }
 }
 
+/// A full-resolution frame frozen for manual selection, with what the detector found in it.
+nonisolated struct LiveManualFrame: @unchecked Sendable, Identifiable {
+    let id = UUID()
+    let image: CGImage
+    let date: Date
+    /// Detections in `image` (normalized, top-left), possibly empty.
+    let detections: [LiveDetection]
+    /// The tracked person's pose bounds, when someone was found.
+    let subjectBounds: CGRect?
+    var isTestPhoto = false
+}
+
 /// What the Camera screen shows over the live preview.
 nonisolated struct LiveScanState: Sendable, Equatable {
     /// Ready to tap, larger first, so smaller (inner) targets draw on top and win overlapping taps.
@@ -93,6 +105,8 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
 // MARK: - Tracker
 
 /// Stabilizes garment geometry on the locked person. Confirmation takes two matching detections.
+/// A confirmed garment that drops out for less than `staleAfter` is confirmed again by its next
+/// detection alone, so a brief miss doesn't cost another confirmation frame.
 nonisolated final class GarmentTracker {
     struct Track {
         var bounds: CGRect
@@ -102,7 +116,8 @@ nonisolated final class GarmentTracker {
     }
 
     static let minHits = 2
-    static let staleAfter = 0.6
+    /// How long a garment stays tappable after its last detection while the same person is tracked.
+    static let staleAfter = 1.0
     private var tracks: [GarmentCategory: Track] = [:]
 
     func update(_ detections: [LiveDetection], time: Double) -> [LiveDetection] {
@@ -165,15 +180,32 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     private var lastState = LiveScanState()
     private var recentFrames: [LiveScanFrame] = []
     private var firstSubjectFrame: Double?
+    /// Last analyzed frame in which the locked person was matched.
+    private var lastTrackedTime: Double?
+    /// The hint on screen, and a different one waiting to be seen often enough to replace it.
+    private var shownHint: LiveGarmentDetector.Hint?
+    private var pendingHint: (hint: LiveGarmentDetector.Hint?, count: Int)?
+    private var manualRequest: (@MainActor @Sendable (LiveManualFrame?) -> Void)?
+    private var stillImage: CGImage?
+    private var lastStillResult: LiveGarmentDetector.Result?
     private var loggedFirstTarget = false
     /// Per garment, for the performance overlay: seconds from the subject's first frame to tappable.
     private var tappableAfter: [GarmentCategory: Double] = [:]
     private let signposter = OSSignposter(subsystem: "app.fitmix", category: "LiveGarmentScanner")
     private let log = Logger(subsystem: "app.fitmix", category: "LiveGarmentScanner")
 
-    /// Between analyses while nothing is waiting to be confirmed; keeps the phone cool.
+    /// Between analyses while targets are on screen and nothing is waiting to be confirmed; keeps the phone cool.
     private static let minInterval = 0.12
+    /// Between analyses while nothing is tappable yet, so the first garments appear sooner.
+    private static let searchInterval = 0.066
     private static let snapshotInterval = 0.24
+    /// With no match for the tracked person this long (they left, or the scanner lost them to someone
+    /// else), their targets are cleared rather than left on screen.
+    static let subjectLostAfter = 0.45
+    /// Sooner when someone else is in view instead, so one person's targets never sit on another.
+    static let subjectReplacedAfter = 0.25
+    /// A new hint must be seen in this many analyzed frames in a row before it replaces the shown one.
+    private static let hintConfirmFrames = 3
     static let rearPortraitOrientation: CGImagePropertyOrientation = .right
     static let perfEnabled: Bool = {
         #if DEBUG
@@ -201,6 +233,24 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             self.run = run
             self.paused = paused
             clear()
+            // Load Vision's models while the camera starts, not on the first frame with a person.
+            if !paused, loadedDetector == nil { detector.warmUp() }
+        }
+    }
+
+    /// Freezes the next camera frame (or the debug still) for manual selection, with its detections.
+    func captureManualFrame(completion: @escaping @MainActor @Sendable (LiveManualFrame?) -> Void) {
+        queue.async { [self] in
+            if holdingStill, let stillImage {
+                let result = lastStillResult
+                let frame = LiveManualFrame(image: stillImage, date: .now, detections: result?.detections ?? [],
+                                            subjectBounds: result?.subjectBounds, isTestPhoto: true)
+                DispatchQueue.main.async { completion(frame) }
+            } else if paused {
+                DispatchQueue.main.async { completion(nil) }
+            } else {
+                manualRequest = completion
+            }
         }
     }
 
@@ -208,8 +258,9 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         guard !paused, !holdingStill else { return }
         let time = CACurrentMediaTime()
         let elapsed = time - lastRun
-        let early = elapsed < Self.minInterval
-        guard !early || (!ranEarly && elapsed >= 0.06 && tracker.isConfirming(since: lastRun)),
+        let early = elapsed < (lastState.targets.isEmpty ? Self.searchInterval : Self.minInterval)
+        let manual = manualRequest
+        guard manual != nil || !early || (!ranEarly && elapsed >= 0.06 && tracker.isConfirming(since: lastRun)),
               let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let date = Date.now
         lastRun = time
@@ -228,6 +279,14 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         signposter.endInterval("Analyze frame", analysis,
                               "total \(result.timings.total) ms, pose \(result.timings.pose) ms, mask \(result.timings.mask) ms, model \(result.timings.model) ms, classify \(result.timings.classify) ms")
 
+        if let manual {
+            manualRequest = nil
+            let image = Self.context.createCGImage(upright, from: upright.extent, format: .RGBA8,
+                                                   colorSpace: CGColorSpace(name: CGColorSpace.sRGB), deferred: false)
+            let frame = image.map { LiveManualFrame(image: $0, date: date, detections: result.detections, subjectBounds: result.subjectBounds) }
+            DispatchQueue.main.async { manual(frame) }
+        }
+
         process(result, size: upright.extent.size, time: time, date: date) {
             let copy = signposter.beginInterval("Copy selectable frame")
             // Own only selectable frames, leaving camera buffers in AVFoundation's pool.
@@ -244,13 +303,15 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             self.run = run
             clear()
             holdingStill = true
+            stillImage = image
             let start = CACurrentMediaTime()
             let size = CGSize(width: image.width, height: image.height)
             for i in 0..<GarmentTracker.minHits {
                 let time = start + Double(i) * Self.minInterval
                 let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
-                let result = replay.map { LiveGarmentDetector.Result(detections: $0) }
+                let result = replay.map { LiveGarmentDetector.Result(detections: $0, trackedSubject: true) }
                     ?? detector.detect(handler, time: time) { image }
+                lastStillResult = result
                 process(result, size: size, time: time, date: .now) { image }
             }
         }
@@ -268,8 +329,16 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             loggedFirstTarget = false
             tappableAfter = [:]
         }
+        if result.trackedSubject { lastTrackedTime = time }
+        // Targets ride out brief misses on the same person, but go once that person is gone.
+        let lostAfter = result.peopleInView > 0 ? Self.subjectReplacedAfter : Self.subjectLostAfter
+        let subjectLost = lastTrackedTime.map { time - $0 >= lostAfter } ?? true
+        if subjectLost, !lastState.targets.isEmpty {
+            recentFrames.removeAll()
+            log.info("Targets cleared: tracked person lost")
+        }
         let stable = tracker.update(result.detections, time: time)
-        var targets = result.acquiredSubject ? [] : lastState.targets.filter { !$0.frame.isExpired(at: now) }
+        var targets = result.acquiredSubject || subjectLost ? [] : lastState.targets.filter { !$0.frame.isExpired(at: now) }
         let byCategory = Dictionary(uniqueKeysWithValues: targets.map { ($0.category, $0) })
         let shouldSnapshot = stable.contains { detection in
             guard let target = byCategory[detection.category] else { return true }
@@ -309,11 +378,32 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             return a == b ? $0.category.rawValue < $1.category.rawValue : a > b
         }
         measureTappable(targets)
-        var state = LiveScanState(targets: targets, frameSize: size, hint: result.hint, unavailable: result.failed)
+        // Shoes already tappable at the frame's edge: "feet are cut off" would contradict them.
+        let hint = result.hint == .includeFeet && targets.contains { $0.category == .shoes } ? nil : result.hint
+        var state = LiveScanState(targets: targets, frameSize: size, hint: steadyHint(hint), unavailable: result.failed)
         if Self.perfEnabled { state.perf = LivePerf(frame: result.timings, tappableAfter: tappableAfter) }
         guard state != lastState else { return }
         lastState = state
         publish(state, run)
+    }
+
+    /// Hints change only once a new one has held for a few frames, so the text doesn't flicker.
+    private func steadyHint(_ hint: LiveGarmentDetector.Hint?) -> LiveGarmentDetector.Hint? {
+        if hint == shownHint {
+            pendingHint = nil
+        } else if let pending = pendingHint, pending.hint == hint {
+            pendingHint = (hint, pending.count + 1)
+        } else {
+            pendingHint = (hint, 1)
+        }
+        // "Point at an outfit" goes as soon as someone is found, and comes back at once when nothing is shown.
+        let immediate = shownHint == nil && lastState.targets.isEmpty || shownHint == .noPerson
+            || hint == .noPerson && lastState.targets.isEmpty
+        if let pending = pendingHint, pending.count >= Self.hintConfirmFrames || immediate {
+            shownHint = pending.hint
+            pendingHint = nil
+        }
+        return shownHint
     }
 
     /// Time from the subject's first frame to each garment being tappable, once per subject.
@@ -338,6 +428,15 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         firstSubjectFrame = nil
         loggedFirstTarget = false
         tappableAfter = [:]
+        lastTrackedTime = nil
+        shownHint = nil
+        pendingHint = nil
+        stillImage = nil
+        lastStillResult = nil
+        if let manualRequest {
+            self.manualRequest = nil
+            DispatchQueue.main.async { manualRequest(nil) }
+        }
         lastState = LiveScanState()
     }
 

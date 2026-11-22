@@ -348,6 +348,22 @@ final class CameraController {
         }
     }
 
+    /// Freezes the current frame for manual garment selection. Nil if the camera isn't running.
+    func captureManualFrame(completion: @escaping @MainActor (LiveManualFrame?) -> Void) {
+        guard active, !isSelecting, phase == .live || stillFrame != nil else {
+            completion(nil)
+            return
+        }
+        let run = analysisRun
+        analyzer.captureManualFrame { [weak self] frame in
+            guard let self, self.active, self.analysisRun == run else {
+                completion(nil)
+                return
+            }
+            completion(frame)
+        }
+    }
+
     #if DEBUG
     /// Debug builds: show a photo in place of the preview and analyze it like a live frame.
     func analyzeStill(_ image: UIImage, replay: [LiveDetection]? = nil) {

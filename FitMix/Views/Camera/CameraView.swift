@@ -4,7 +4,9 @@ import UIKit
 
 /// Camera: live rear-camera preview with a tappable target on each garment found in the feed
 /// (Jacket, T-shirt, Pants, Shoes). There is no shutter: tapping a target selects that one garment
-/// and hands it, with the frame it was detected in, to Studio. See Docs/LiveGarmentMatch.md.
+/// and hands it, with the frame it was detected in, to Studio. If a garment isn't found, **Select
+/// manually** freezes the frame so the user can pick the category and crop themselves; Studio gets the
+/// same hand-off. See Docs/LiveGarmentMatch.md.
 struct CameraView: View {
     /// Leaves Camera without a scan. Studio keeps whatever look it had.
     var close: () -> Void
@@ -20,11 +22,16 @@ struct CameraView: View {
     @State private var showBag = false
     /// Set on the first selection, so a double tap can't open Studio twice.
     @State private var confirmed = false
+    /// The frozen frame shown for manual selection.
+    @State private var manualFrame: LiveManualFrame?
+    @State private var capturingManual = false
+    /// Shown after a few seconds of live preview without a tappable garment.
+    @State private var offerManual = false
     #if DEBUG
     @State private var fixtureError: String?
     #endif
 
-    private var covered: Bool { showAccount || showBag }
+    private var covered: Bool { showAccount || showBag || manualFrame != nil }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,6 +51,12 @@ struct CameraView: View {
             await camera.activate()
         }
         #if DEBUG
+        // FM_DEBUG_MANUAL=<category>: open manual selection on that category once the frame is analyzed.
+        .task(id: camera.stillFrame != nil || camera.phase == .live) {
+            guard Self.debugManualCategory != nil, camera.stillFrame != nil || camera.phase == .live else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            openManualSelection()
+        }
         // FM_DEBUG_AUTO_SELECT=shoes: once that target is ready, select it the way a tap does.
         .onChange(of: camera.scan.targets) { _, targets in
             if let wanted = ProcessInfo.processInfo.environment["FM_DEBUG_AUTO_SELECT"],
@@ -65,10 +78,37 @@ struct CameraView: View {
         }
         // Pause behind the bag and account screens instead of running the camera unseen.
         .onChange(of: covered) { _, covered in
-            if covered { camera.deactivate(release: false) } else { Task { await camera.activate() } }
+            if covered { camera.deactivate(release: false) } else if !confirmed { Task { await camera.activate() } }
+        }
+        // Nothing tappable for a while: point out manual selection.
+        .task(id: camera.scan.targets.isEmpty && camera.phase == .live) {
+            offerManual = false
+            guard camera.scan.targets.isEmpty, camera.phase == .live else { return }
+            try? await Task.sleep(for: .seconds(4))
+            if !Task.isCancelled { offerManual = true }
         }
         .sheet(isPresented: $showBag) { NavigationStack { CartView() } }
+        .fullScreenCover(item: $manualFrame) { frame in
+            ManualGarmentSelectView(frame: frame, initialCategory: Self.debugManualCategory, cancel: {
+                manualFrame = nil
+            }, use: { selection in
+                guard !confirmed else { return }
+                confirmed = true
+                manualFrame = nil
+                select(selection)
+            })
+        }
         .fullScreenCover(isPresented: $showAccount) { AccountFlowView() }
+    }
+
+    private func openManualSelection() {
+        guard !confirmed, !capturingManual, manualFrame == nil else { return }
+        capturingManual = true
+        camera.captureManualFrame { frame in
+            capturingManual = false
+            guard !confirmed else { return }
+            manualFrame = frame
+        }
     }
 
     private func choose(_ target: LiveTarget) {
@@ -210,7 +250,7 @@ struct CameraView: View {
     private func hintText(_ hint: LiveGarmentDetector.Hint?) -> String? {
         switch hint {
         case .noPerson: "Point at an outfit"
-        case .includeFeet: "Step back to include the shoes"
+        case .includeFeet: "Feet are cut off. Step back or tilt down to include the shoes"
         case .includeUpperBody: "Include shoulders and hips to find tops"
         case .holdSteady: "Hold steady and keep the outfit in view"
         case .clearerView: "Face the camera and find brighter light"
@@ -227,10 +267,61 @@ struct CameraView: View {
                 Spacer()
                 if camera.phase == .live, !camera.capabilities.zoomPresets.isEmpty { zoomControl }
                 Spacer()
-                Color.clear.frame(width: 52, height: 1)
+                manualButton.frame(width: 52)
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
+            .overlay(alignment: .top) {
+                if offerManual, !confirmed {
+                    Button(action: openManualSelection) {
+                        Label("Not finding it? Select manually", systemImage: "crop")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.fmInk)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 40)
+                            .background(.white, in: Capsule())
+                            .fmFloatingShadow()
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .offset(y: -52)
+                    .transition(.opacity)
+                    .accessibilityIdentifier("offerManualSelect")
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: offerManual)
+        } else if camera.stillFrame != nil {
+            HStack {
+                Spacer()
+                manualButton.frame(width: 52)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+        }
+    }
+
+    /// Freezes the frame so the user can pick a garment the scanner missed.
+    @ViewBuilder
+    private var manualButton: some View {
+        if camera.phase == .live || camera.stillFrame != nil {
+            Button(action: openManualSelection) {
+                Group {
+                    if capturingManual {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "crop").font(.system(size: 18, weight: .medium)).foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 48, height: 48)
+                .background(.black.opacity(0.45), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(confirmed || camera.isSelecting)
+            .accessibilityLabel("Select a garment manually")
+            .accessibilityHint("Freezes the frame so you can choose the garment and its crop")
+            .accessibilityIdentifier("manualSelect")
+        } else {
+            Color.clear.frame(width: 48, height: 48)
         }
     }
 
@@ -346,6 +437,15 @@ struct CameraView: View {
         case .starting, .live, .interrupted:
             ("camera", "", "")
         }
+    }
+
+    /// Debug builds: FM_DEBUG_MANUAL=<category> preselects that category in manual selection.
+    private static var debugManualCategory: GarmentCategory? {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["FM_DEBUG_MANUAL"].flatMap(GarmentCategory.init(rawValue:))
+        #else
+        nil
+        #endif
     }
 
     // MARK: Debug sample scans (FM_DEBUG_SAMPLE_SCANS=1 / FM_DEBUG_SCAN_FIXTURE / FM_DEBUG_CAPTURE_PHOTO)
