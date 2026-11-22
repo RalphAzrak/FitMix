@@ -21,7 +21,7 @@ garment-and-brand pair is searched once and then cached, so credits are only spe
 |---|---|---|
 | 1 | Skeleton, `MOCK_MODE`, `/health`, all endpoints with mock data | ✅ done |
 | 2 | Real OpenAI description + Google Shopping links | ✅ done |
-| 3 | SegFormer segmentation (per-garment crops) | planned |
+| 3 | SegFormer segmentation (per-garment crops) | ✅ done |
 | 4 | FashionCLIP catalog matching + demo catalog | planned |
 | 5 | Google Lens (via Supabase signed links) + re-ranking | planned |
 | 6 | `/refine` on real search + image-hash cache | planned |
@@ -30,10 +30,14 @@ Without `MOCK_MODE=1`, each step runs when its key is present, and steps that ar
 are skipped (they're `null` in `/health` → `components`). With neither `OPENAI_API_KEY` nor `SERPAPI_KEY`,
 `/analyze` answers `503 not_configured`.
 
-**What stage 2 does:**
-- **Crops** (`crops`) are described one per crop, all in one OpenAI call.
-- **A photo** (`image`) is described as a whole until segmentation exists: the model lists each garment it
-  sees, and every garment's `crop_url` shows the whole photo (`source_label: "whole_photo"`).
+**What runs today (after stage 3):**
+- **A photo** (`image`) is segmented by SegFormer into upper clothes, dress, skirt, pants and shoes. Each
+  garment is cut out onto white, and pieces under `MIN_GARMENT_AREA` of the photo are dropped (shoes need half
+  that). All the crops are then described in one OpenAI call. The model merges a jacket and the top under it
+  into "upper clothes", so the LLM decides between `top` and `jacket` and sets `layered_over_top`.
+- **Crops** (`crops`) skip segmentation and are described the same way.
+- If the segmentation model can't load, or `SEGMENTATION=0`, photos are described as a whole instead: the LLM
+  lists the garments, and each `crop_url` shows the whole photo (`source_label: "whole_photo"`). The log says why.
 - **`/search`** returns Google Shopping links for the garment's `search_query`. Their `score` follows Google's
   order (1.0 for the first, then falling) until image re-ranking arrives in stage 5.
 - `catalog_matches` stays empty until stage 4.
@@ -69,7 +73,9 @@ For the Mac that runs the service (Apple Silicon recommended: the models then ru
    MOCK_MODE=1 ./run.sh     # demo data, whatever .env says
    ```
    The first run creates a private Python environment in `.venv` and installs the requirements. From stage 3
-   on, the first real run also downloads about 1 GB of models into `~/.cache/huggingface`. Keep the window open:
+   on, the first real run also downloads the models into `~/.cache/huggingface`: about 110 MB for segmentation
+   (stage 3), plus about 600 MB for FashionCLIP (stage 4). Startup then takes several seconds while they load,
+   and `/health` shows where they run (`"segmenter": "segformer (mps)"` on an Apple Silicon Mac). Keep the window open:
    the service runs at `http://localhost:8790` and logs how long each step takes.
 5. **Check that it works.** In a second Terminal window:
    ```bash

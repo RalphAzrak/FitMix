@@ -44,6 +44,9 @@ class Settings:
     # Online re-ranking: score = image_weight * cosine + attr_weight * attribute_match.
     rerank_image_weight: float = 0.8
     rerank_attr_weight: float = 0.2
+    # Garment segmentation for photos. Off: photos are described as a whole instead.
+    segmentation: bool = True
+    segmentation_model: str = "mattmdjaga/segformer_b2_clothes"
     # Garments covering less than this fraction of the photo are dropped (e.g. shoes cut off at the edge).
     min_garment_area: float = 0.01
     catalog_top_k: int = 5
@@ -77,6 +80,8 @@ class Settings:
             signed_url_seconds=_int(env, "SIGNED_URL_SECONDS", d.signed_url_seconds),
             rerank_image_weight=_float(env, "RERANK_IMAGE_WEIGHT", d.rerank_image_weight),
             rerank_attr_weight=_float(env, "RERANK_ATTR_WEIGHT", d.rerank_attr_weight),
+            segmentation=_flag(env.get("SEGMENTATION", "1")),
+            segmentation_model=env.get("SEGMENTATION_MODEL", "").strip() or d.segmentation_model,
             min_garment_area=_float(env, "MIN_GARMENT_AREA", d.min_garment_area),
             catalog_top_k=_int(env, "CATALOG_TOP_K", d.catalog_top_k),
             online_top_k=_int(env, "ONLINE_TOP_K", d.online_top_k),

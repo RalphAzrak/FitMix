@@ -59,8 +59,23 @@ def build_pipeline(settings: Settings) -> Pipeline | None:
         online = ShoppingSearch(client, top_k=settings.online_top_k)
     if describer is None and online is None:
         return None
-    # Segmentation (stage 3), embeddings and the catalog (stage 4) aren't built yet.
-    return Pipeline(None, describer, None, None, online, catalog_top_k=settings.catalog_top_k)
+    segmenter = load_segmenter(settings) if describer is not None else None
+    # Embeddings and the catalog (stage 4) aren't built yet.
+    return Pipeline(segmenter, describer, None, None, online, catalog_top_k=settings.catalog_top_k)
+
+
+def load_segmenter(settings: Settings):
+    """The SegFormer segmenter, loaded once at startup. If it can't load, photos are described as a whole."""
+    if not settings.segmentation:
+        return None
+    try:
+        from .segment import SegFormerSegmenter
+
+        return SegFormerSegmenter(settings.segmentation_model, settings.min_garment_area)
+    except Exception as error:
+        log.error("segmentation is off: the model %s couldn't load (%s: %s). Photos will be described as a whole.",
+                  settings.segmentation_model, type(error).__name__, error)
+        return None
 
 
 def create_app(settings: Settings | None = None, pipeline: Pipeline | None = None) -> FastAPI:

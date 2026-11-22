@@ -257,10 +257,10 @@ def test_normalize_url_ignores_tracking_and_case():
 
 def test_build_pipeline_uses_the_keys_present():
     assert build_pipeline(Settings()) is None
-    both = build_pipeline(Settings(openai_api_key="k", serpapi_key="s"))
+    both = build_pipeline(Settings(openai_api_key="k", serpapi_key="s", segmentation=False))
     assert both.components() == {"segmenter": None, "describer": "openai", "embedder": None, "catalog": None,
                                  "online_search": "serpapi-shopping"}
-    only_openai = build_pipeline(Settings(openai_api_key="k"))
+    only_openai = build_pipeline(Settings(openai_api_key="k", segmentation=False))
     assert only_openai.online is None and only_openai.describer is not None
 
 
