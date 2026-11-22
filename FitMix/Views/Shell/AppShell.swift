@@ -21,8 +21,13 @@ import SwiftUI
     var authPreview: AuthView.Mode?
     var showOutfit = false
     var addClothing = false
+    /// The checkout flow (Cart → Order Review → Demo Payment → Order Summary in demo mode), full screen. Open it with `openCart`.
     var showCart = false
+    /// What the checkout flow opens on, below the cart (e.g. a saved order's summary).
+    var cartStartPath: [CheckoutRoute] = []
     var showShopLook = false
+    /// Set when "View Cart" is tapped in Shop This Look: the cart opens once that sheet has closed.
+    @ObservationIgnored private var cartAfterShopLook = false
     var showMetricsEditor = false
     /// Set when sign-in or sign-up finishes and there is no avatar yet; opens the avatar flow once Account closes.
     var setupAfterAuth = false
@@ -32,6 +37,25 @@ import SwiftUI
         tab = .closet
         addClothing = true
     }
+
+    /// Opens the checkout flow, full screen. From Shop This Look (a sheet), that sheet closes first, so
+    /// the cart and the rest of checkout take the whole screen rather than stacking on the sheet.
+    func openCart(at path: [CheckoutRoute] = []) {
+        cartStartPath = path
+        if showShopLook {
+            cartAfterShopLook = true
+            showShopLook = false
+        } else {
+            showCart = true
+        }
+    }
+
+    /// Shop This Look's sheet finished closing.
+    func shopLookDismissed() {
+        guard cartAfterShopLook else { return }
+        cartAfterShopLook = false
+        showCart = true
+    }
     func openAccount() { authPreview = .signIn }
 }
 
@@ -40,6 +64,8 @@ struct AppShell: View {
     @Environment(AvatarStore.self) private var store
     @Environment(StudioStore.self) private var studio
     @Environment(AuthSession.self) private var auth
+    @Environment(CartStore.self) private var cart
+    @Environment(DemoOrderStore.self) private var orders
     @State private var router = AppRouter()
     @State private var wardrobeVisited = false
 
@@ -109,8 +135,13 @@ struct AppShell: View {
             }
         }
         .sheet(isPresented: $router.showMetricsEditor) { MetricsEditorSheet() }
-        .sheet(isPresented: $router.showCart) { NavigationStack { CartView() } }
-        .sheet(isPresented: $router.showShopLook) { ShoppingReviewView() }
+        // Presented content sits outside `.environment(router)` above, so it gets the router explicitly.
+        .fullScreenCover(isPresented: $router.showCart) {
+            CheckoutFlowView(startingAt: router.cartStartPath).environment(router)
+        }
+        .sheet(isPresented: $router.showShopLook, onDismiss: router.shopLookDismissed) {
+            ShoppingReviewView().environment(router)
+        }
         .alert("Couldn't save", isPresented: Binding(get: { store.storageErrorMessage != nil && router.flow == nil },
                                                     set: { if !$0 { store.storageErrorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -122,13 +153,27 @@ struct AppShell: View {
         }
         .onAppear {
             if auth.hasOpenAuthLink { showAuthLink() }
+            #if DEBUG
+            // FM_DEBUG_OPEN_ORDER=latest: opens the newest saved demo order's summary (checks it survives a relaunch).
+            if ProcessInfo.processInfo.environment["FM_DEBUG_OPEN_ORDER"] == "latest" {
+                Task {
+                    try? await Task.sleep(for: .seconds(1))
+                    if let latest = orders.orders.first {
+                        CheckoutLog.record("debug-open-order", store: "-", note: "number=\(latest.number) orders=\(orders.orders.count)")
+                        router.openCart(at: [.summary(latest.id, justPlaced: false)])
+                    } else {
+                        CheckoutLog.record("debug-open-order", store: "-", note: "none saved")
+                    }
+                }
+            }
+            #endif
             switch Self.debugScreen {
             case "setup": router.flow = store.resumeStep
             case "generate": router.flow = .generate
             case "metrics": router.showMetricsEditor = true
             case "auth", "profile": router.authPreview = .signIn
             case "auth-create": router.authPreview = .createAccount
-            case "cart", "checkout": router.showCart = true  // "checkout" also opens CartView's checkout
+            case "cart", "checkout": router.openCart()
             case "shop": router.showShopLook = true
             case "studio": router.tab = .studio
             #if DEBUG

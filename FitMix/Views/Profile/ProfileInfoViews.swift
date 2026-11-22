@@ -19,10 +19,10 @@ struct PaymentMethodsView: View {
     }
 }
 
-/// Orders placed through FitMix's checkout, newest first. They're demo orders (no payment, no store
-/// order) and are labelled that way. Purchases made on retailer sites never appear here.
+/// Demo orders placed through FitMix's demo checkout, newest first. Nothing was paid and no store
+/// received them, and they're labelled that way. Purchases made on retailer sites never appear here.
 struct OrderHistoryView: View {
-    @Environment(OrderStore.self) private var orders
+    @Environment(DemoOrderStore.self) private var orders
 
     var body: some View {
         ScrollView {
@@ -32,13 +32,18 @@ struct OrderHistoryView: View {
                 }
                 if orders.orders.isEmpty {
                     ProfileEmptyState(icon: "bag", title: "No orders yet",
-                                      message: "Orders placed through FitMix will appear here.")
+                                      message: "Demo orders placed through FitMix will appear here.")
                 } else {
                     VStack(spacing: 12) {
                         ForEach(orders.orders) { order in
-                            NavigationLink { OrderDetailView(order: order) } label: { row(order) }
+                            NavigationLink {
+                                ScrollView { DemoOrderSummary(order: order).padding(16) }
+                                    .background(AuthPalette.surface.ignoresSafeArea())
+                                    .navigationTitle("Order Summary")
+                                    .navigationBarTitleDisplayMode(.inline)
+                            } label: { row(order) }
                                 .buttonStyle(.plain)
-                                .accessibilityIdentifier("order-\(order.id)")
+                                .accessibilityIdentifier("order-\(order.number)")
                         }
                     }
                 }
@@ -57,14 +62,14 @@ struct OrderHistoryView: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text("Order \(order.id)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
+                    Text("Order \(order.number)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
                     TagPill(text: "Demo")
                 }
-                Text(order.placedAt.formatted(date: .abbreviated, time: .omitted) + " · " + (order.itemCount == 1 ? "1 piece" : "\(order.itemCount) pieces"))
+                Text(order.placedAt.formatted(date: .abbreviated, time: .omitted) + " · " + (order.pieces == 1 ? "1 piece" : "\(order.pieces) pieces"))
                     .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
             }
             Spacer()
-            Text(order.totals.format(order.totals.total))
+            Text(order.savedTotals.isEmpty ? "No prices" : order.savedTotals.map(\.price.formatted).joined(separator: " · "))
                 .font(.system(size: 15, weight: .bold).monospacedDigit())
                 .foregroundStyle(Color.fmInk)
             Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fmOutline)

@@ -12,12 +12,11 @@ import SwiftUI
     @State private var profile = ProfileStore()
     /// The cart. Saved per account when signed in; in memory only when signed out.
     @State private var cart = CartStore()
-    /// Orders from FitMix's (demo) checkout, saved per account.
-    @State private var orders = OrderStore()
+    /// Demo orders placed from the cart. Saved on this iPhone (per account, or as guest).
+    @State private var orders = DemoOrderStore()
 
     init() {
         FMFonts.register()
-        CheckoutLog.configure()
     }
 
     var body: some Scene {
@@ -51,6 +50,10 @@ import SwiftUI
                     profile.activate(accountID: id)
                     cart.activate(accountID: id)
                     orders.activate(accountID: id)
+                    #if DEBUG
+                    // FM_DEBUG_CART_SEED replaces whichever cart just loaded (guest, then the signed-in account).
+                    if let seed = DebugCheckoutScript.current?.seed { DemoCheckoutFixtures.seed(seed, into: cart) }
+                    #endif
                 }
                 // Studio always renders from the current try-on photo, including after it's replaced or removed.
                 .onChange(of: store.bodyPhoto) { _, photo in studio.useTryOnPhoto(photo) }

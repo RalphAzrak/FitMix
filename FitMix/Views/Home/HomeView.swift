@@ -60,7 +60,7 @@ struct HomeView: View {
 
     private var header: some View {
         FMTopBar {
-            FMBagButton(count: cart.count) { router.showCart = true }
+            FMBagButton(count: cart.count) { router.openCart() }
             Button { showProfile = true } label: {
                 Group {
                     if let user = auth.user {

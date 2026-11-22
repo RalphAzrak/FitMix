@@ -20,10 +20,11 @@ enum CartStoreError: LocalizedError, Equatable {
 /// memory only. Those items move into the account's cart when the user signs in. Signing out
 /// clears the cart from memory; the saved file comes back when that account signs in again.
 ///
-/// Lines are grouped by retailer for display. Checkout is FitMix's own (demo) checkout
-/// (`CheckoutView`); a paid order removes exactly its lines (`completeOrder`). `subtotal` is the sum
-/// of the prices the listings showed when they were added. `completeCheckout` and `receipts` belong to
-/// the Shopify store checkout (`RetailerCheckout`), which the cart no longer opens.
+/// Lines are grouped by store for display. In demo mode (`CheckoutMode.demo`) the whole cart checks out
+/// together in FitMix's own demo checkout (`CheckoutView`), which saves a `DemoOrder` on this iPhone and
+/// then removes exactly the ordered lines (`remove(ids:)`). Outside demo mode each Shopify store has its
+/// own Checkout Kit checkout (`RetailerCheckout`); `completeCheckout` removes what that store sold and
+/// keeps a receipt. Totals are the listed prices, per currency.
 @Observable
 final class CartStore {
     static let maxQuantity = 10
@@ -62,13 +63,17 @@ final class CartStore {
         var id: String
         var name: String
         var items: [CartItem]
-        /// Every line is an exact Shopify variant, so this store can be checked out in FitMix.
+        /// Every line is an exact Shopify variant, so this store can be checked out with Checkout Kit
+        /// (outside demo mode). The demo checkout needs nothing of the kind.
         var canCheckOutInApp: Bool { items.allSatisfy { $0.shopify != nil } }
         var count: Int { items.reduce(0) { $0 + $1.quantity } }
     }
 
     /// Lines grouped by store, in the order each store was first added.
-    var groups: [RetailerGroup] {
+    var groups: [RetailerGroup] { Self.groups(of: items) }
+
+    /// Any lines (the cart's, or a saved order's) grouped by store, in the order each store first appears.
+    nonisolated static func groups(of items: [CartItem]) -> [RetailerGroup] {
         var order: [String] = []
         var byKey: [String: [CartItem]] = [:]
         for item in items {
@@ -81,7 +86,7 @@ final class CartStore {
         }
     }
 
-    /// Receipts of checkouts completed in this session, newest first.
+    /// Receipts of Shopify store checkouts completed in this session, newest first (outside demo mode).
     private(set) var receipts: [CheckoutReceipt] = []
 
     // MARK: Account switching
@@ -146,13 +151,6 @@ final class CartStore {
             }
         }
     }
-
-    /// An order from FitMix's own checkout was paid: removes exactly the lines it contained. Lines added
-    /// meanwhile (none can be, while checkout is open) would stay.
-    func completeOrder(itemIDs: Set<UUID>) throws {
-        try update { items in items.removeAll { itemIDs.contains($0.id) } }
-    }
-
     func setQuantity(_ quantity: Int, for id: UUID) throws {
         guard items.contains(where: { $0.id == id }) else { throw CartStoreError.notFound }
         let clamped = min(max(quantity, 1), Self.maxQuantity)
@@ -164,6 +162,11 @@ final class CartStore {
     func remove(id: UUID) throws {
         guard items.contains(where: { $0.id == id }) else { throw CartStoreError.notFound }
         try update { items in items.removeAll { $0.id == id } }
+    }
+
+    /// Removes these lines (the ones a demo order just saved). Lines added since stay.
+    func remove(ids: Set<UUID>) throws {
+        try update { items in items.removeAll { ids.contains($0.id) } }
     }
 
     /// Empties the cart. Also deletes a saved cart that couldn't be read.
@@ -185,17 +188,9 @@ final class CartStore {
 
     // MARK: Totals
 
-    /// Sum of the listed prices of the items that have one, if they share a currency.
-    var subtotal: (price: Price, pricedCount: Int)? {
-        let priced = items.compactMap(\.lineTotal)
-        guard let currency = priced.first?.currencyCode, priced.allSatisfy({ $0.currencyCode == currency }) else { return nil }
-        let sum = priced.reduce(Decimal.zero) { $0 + $1.amount }
-        return (Price(amount: sum, currencyCode: currency), items.filter { $0.unitPrice != nil }.count)
-    }
-
-    var hasMixedCurrencies: Bool {
-        Set(items.compactMap(\.currencyCode)).count > 1
-    }
+    /// Listed prices per currency, never converted or added across currencies.
+    var totals: [CurrencyTotal] { CartItem.totals(of: items) }
+    var unpricedPieces: Int { CartItem.unpricedPieces(in: items) }
 
     // MARK: Disk
 

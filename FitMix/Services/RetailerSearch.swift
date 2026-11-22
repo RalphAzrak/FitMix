@@ -318,7 +318,35 @@ nonisolated enum ListingPhoto {
 /// Development-only stand-in for the backend. Every listing is marked as a fixture and Studio labels it
 /// "Test fixture"; none of its names, prices or links are real.
 nonisolated struct FixtureRetailerSearch: RetailerSearching {
-    enum Mode: String { case match, branded, nomatch, error, slow, budget }
+    /// FM_DEBUG_MATCH_FIXTURE=shopify: one real Shopify listing for the T-shirt and one for the pants.
+    static let shopifyListings: [GarmentCategory: RetailerListing] = [
+        .tshirt: RetailerListing(
+            id: "shopify-kotn-womens-shrunken-tee-in-black-v2", title: "Women's Shrunken Tee in Black", retailer: "Kotn",
+            seller: nil, imageURL: URL(string: "https://cdn.shopify.com/s/files/1/0932/1356/files/WOMENS_SHRUNKEN_TEE_BLACK_02.jpg"),
+            listingURL: URL(string: "https://kotn.com/products/womens-shrunken-tee-in-black-v2"),
+            price: 48, currency: "CAD", tier: .similar, brand: "Kotn",
+            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", isFixture: false),
+        .pants: RetailerListing(
+            id: "shopify-frankandoak-mens-woven-pants-classic-navy", title: "Essential Slim Chino Pant", retailer: "Frank And Oak",
+            seller: nil, imageURL: URL(string: "https://cdn.shopify.com/s/files/1/0553/7100/6130/files/2MWP0001FE-BLUE-2698.jpg"),
+            listingURL: URL(string: "https://www.frankandoak.com/products/mens-woven-pants-classic-navy-2mwp0001fe-dcnavy"),
+            price: 81.75, currency: "CAD", tier: .similar, brand: "Frank And Oak",
+            evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", isFixture: false),
+    ]
+
+    /// FM_DEBUG_MATCH_FIXTURE=mixed: a real listing from a retailer that isn't on Shopify (Uniqlo) for the
+    /// T-shirt, and the real Shopify listing (Frank And Oak) for the pants, so one cart mixes both kinds.
+    static let mixedListings: [GarmentCategory: RetailerListing] = [
+        .tshirt: RetailerListing(
+            id: "uniqlo-airism-cotton-oversized-tee", title: "Unisex AIRism Cotton Oversized T-Shirt", retailer: "Uniqlo",
+            seller: nil, imageURL: URL(string: "https://image.uniqlo.com/UQ/ST3/us/imagesgoods/465185/item/usgoods_39_465185_3x4.jpg"),
+            listingURL: URL(string: "https://www.uniqlo.com/us/en/products/E465185-000/00"),
+            price: Decimal(string: "24.90"), currency: "USD", tier: .similar, brand: "Uniqlo",
+            evidence: ["Debug: hand-picked real listing from a retailer not on Shopify, not found by visual search"], provider: "debug-mixed", isFixture: false),
+        .pants: shopifyListings[.pants]!,
+    ]
+
+    enum Mode: String { case match, branded, nomatch, error, slow, shopify, mixed, budget }
     let mode: Mode
 
     init?(mode: String) {
@@ -347,6 +375,15 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
                             evidence: evidence, provider: "fixture", isFixture: true)
         }
         switch mode {
+        case .shopify:
+            // Real product pages on two Shopify stores, hand-picked because no visual search provider is
+            // configured here. Everything after this (product mapping, variant lookup, cart, checkout)
+            // is the real path. Labeled as hand-picked in the evidence.
+            guard let listing = Self.shopifyListings[request.category] else { return .noMatch }
+            return .matches([listing])
+        case .mixed:
+            guard let listing = Self.mixedListings[request.category] else { return .noMatch }
+            return .matches([listing])
         case .nomatch: return .noMatch
         case .error: throw RetailerSearchError.providerBusy("Test fixture: the product search is temporarily unavailable.")
         case .branded:
