@@ -7,9 +7,12 @@ extension Color {
 struct WardrobeView: View {
     @Environment(AuthSession.self) private var auth
     @Environment(AppRouter.self) private var router
+    @Environment(CartStore.self) private var cart
 
     var body: some View {
         VStack(spacing: 0) {
+            // The same top bar as Home and Studio, so every tab opens the same way.
+            FMTopBar { FMBagButton(count: cart.count) { router.openCart() } }
             if let user = auth.user {
                 WardrobeCollection(store: WardrobeStore(client: auth.client, ownerID: user.id))
                     .id(user.id)
@@ -60,10 +63,17 @@ private struct WardrobeCollection: View {
         }
     }
 
+    /// What the wardrobe holds, under the title: "12 pieces", or what the page is for while it is empty.
+    private var summary: String {
+        if store.items.isEmpty { return store.loading ? "Loading your clothes…" : "Your own clothes, ready to try on" }
+        return store.items.count == 1 ? "1 piece" : "\(store.items.count) pieces"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            FMPageHeading(title: "Wardrobe")
-                .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 10)
+            FMPageHeading(title: "Wardrobe", detail: summary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 10)
             collection
             FMActionShelf {
                 Button("Add Clothing", systemImage: "plus") { add = true }
@@ -140,6 +150,7 @@ private struct WardrobeCollection: View {
                         WardrobeMessage(icon: filter?.garment.symbol ?? "tshirt",
                                         title: filter == nil ? "Your wardrobe is empty" : "Nothing in this category",
                                         message: filter == nil ? "Take a photo of something you own or pick one from your library." : nil)
+                        if filter == nil { WardrobePhotoTips() }
                     }
                 } else {
                     Text(visibleItems.count == 1 ? "1 item" : "\(visibleItems.count) items")
@@ -249,6 +260,35 @@ struct WardrobeRemotePhoto: View {
     }
 }
 
+/// Shown with an empty wardrobe: what makes a clothing photo work, before the first one is taken.
+struct WardrobePhotoTips: View {
+    private let tips = [("square.dashed", "One piece per photo"),
+                        ("rectangle.portrait", "Laid flat or on a hanger"),
+                        ("sun.max", "Plain background, even light")]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("FOR A GOOD PHOTO").font(.fmEyebrow).tracking(1.1).foregroundStyle(Color.fmCobaltDeep)
+            ForEach(tips, id: \.1) { icon, text in
+                HStack(spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color.fmCobaltDeep)
+                        .frame(width: 30, height: 30)
+                        .background(Color.fmCobalt.opacity(0.10), in: Circle())
+                        .accessibilityHidden(true)
+                    Text(text).font(.subheadline).foregroundStyle(Color.fmInk)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.fmHairline))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct WardrobeMessage: View {
     let icon: String
     let title: String
@@ -270,7 +310,8 @@ struct WardrobeMessage: View {
         .multilineTextAlignment(.center)
         .padding(24)
         .frame(maxWidth: .infinity)
-        .background(.white, in: RoundedRectangle(cornerRadius: 20))
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.fmHairline))
     }
 }
 

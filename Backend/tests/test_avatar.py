@@ -101,6 +101,11 @@ def test_limits_how_many_avatars_one_client_can_make_per_hour():
     assert [post(c).status_code for _ in range(3)] == [200, 200, 429]
 
 
+def test_a_limit_of_zero_means_no_limit():
+    c = client(Recorder(), rate_limit_per_hour=0)
+    assert {post(c).status_code for _ in range(30)} == {200}
+
+
 def test_mock_mode_returns_a_picture_without_a_key(monkeypatch):
     async def no_wait(_):
         return None

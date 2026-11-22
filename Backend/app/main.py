@@ -228,7 +228,8 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             window = recent[(bucket, client)]
             while window and now - window[0] > 3600:
                 window.popleft()
-            if len(window) >= limit:
+            # A limit of 0 means no limit.
+            if limit > 0 and len(window) >= limit:
                 raise ApiError(429, "rate_limited", too_many)
             window.append(now)
             return client

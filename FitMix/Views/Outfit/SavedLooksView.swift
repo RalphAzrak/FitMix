@@ -5,14 +5,24 @@ struct SavedLooksView: View {
     @Environment(AuthSession.self) private var auth
     @Environment(SavedLookStore.self) private var library
     @Environment(AvatarOutfitSelection.self) private var outfit
+    @Environment(CartStore.self) private var cart
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var selected: SavedLook?
     @State private var openBuilder = false
 
+    /// How many looks are kept, and where: "3 looks · Saved on this iPhone".
+    private var summary: String {
+        if library.looks.isEmpty { return "Outfits you want to come back to" }
+        return "\(library.looks.count == 1 ? "1 look" : "\(library.looks.count) looks") · Saved on this iPhone"
+    }
+
     var body: some View {
+        VStack(spacing: 0) {
+        // The same top bar as Home and Studio, so every tab opens the same way.
+        FMTopBar { FMBagButton(count: cart.count) { router.openCart() } }
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                FMPageHeading(title: "Saved Looks", detail: library.looks.isEmpty ? nil : "Saved on this iPhone")
+                FMPageHeading(title: "Saved Looks", detail: summary)
                 if let error = library.error {
                     WardrobeRetry(message: error) { library.reload() }
                 } else if case .restoring = auth.state {
@@ -24,6 +34,10 @@ struct SavedLooksView: View {
                         if auth.user == nil { router.openAccount() } else { router.showOutfit = true }
                     }
                     .buttonStyle(FMFilledButtonStyle())
+                    // Looks are also saved from a scan, so that way in is offered too.
+                    Button("Scan an Outfit", systemImage: "camera.viewfinder", action: router.openCamera)
+                        .buttonStyle(FMOutlineButtonStyle())
+                        .accessibilityIdentifier("saved-scan")
                 } else {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12),
                                              count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 12) {
@@ -48,6 +62,7 @@ struct SavedLooksView: View {
                 }
             }
             .padding(18)
+        }
         }
         .background(Color.fmCanvas)
         .sheet(item: $selected, onDismiss: {
