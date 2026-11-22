@@ -52,7 +52,7 @@ struct TryOnHero: View {
             .padding(20)
         case .ready(let image, let isTryOn, _):
             photo(image, label: isTryOn ? "You wearing the selected look" : "Stand-in preview, not a try-on")
-        case .rendering:
+        case .rendering, .waiting:
             ZStack {
                 if let source { photo(source, label: "Your photo").opacity(0.55) }
                 statusCard(icon: nil, title: "Putting your look together…", detail: "Using your photo and the selected pieces.")

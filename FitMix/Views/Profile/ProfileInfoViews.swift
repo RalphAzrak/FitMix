@@ -80,8 +80,9 @@ struct OrderHistoryView: View {
 }
 
 /// How FitMix stores the try-on photo and the account's details, stated only as far as the app
-/// actually does it today. Update this text if a try-on renderer that uploads photos is added
-/// (`TryOnRenderers.current`) or if sizes and addresses move to the server.
+/// actually does it today. The try-on photo is uploaded only for avatar creation and for a Studio
+/// try-on (`TryOnRenderers.current`); update this text if that changes or if sizes and addresses
+/// move to the server.
 struct PrivacyDataView: View {
     @Environment(ProfileStore.self) private var profile
     @State private var confirmDeleteSaved = false
@@ -92,8 +93,8 @@ struct PrivacyDataView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 block(title: "Your try-on photo", icon: "figure.stand", paragraphs: [
-                    "Your try-on photo is saved only on this iPhone, inside FitMix. It's encrypted while your iPhone is locked and isn't included in iCloud or computer backups. FitMix doesn't upload it.",
-                    "FitMix uses it on this iPhone to check that your full body is visible, to shape your avatar, and as the starting picture when you try on outfits in Studio.",
+                    "Your try-on photo is saved only on this iPhone, inside FitMix. It's encrypted while your iPhone is locked and isn't included in iCloud or computer backups.",
+                    "FitMix uses it on this iPhone to check that your full body is visible. When you create your avatar, or open Your Try-On in Studio, a copy is sent with the garments to the FitMix server, which asks OpenAI to create the image and sends it back. The server doesn't keep your photo.",
                     "It belongs to this iPhone, not to your account. It stays here when you sign out, and anyone who uses FitMix on this iPhone can see it. Remove it any time from My Try-On Photo in Profile.",
                 ])
                 block(title: "Sizes and addresses", icon: "ruler", paragraphs: [
