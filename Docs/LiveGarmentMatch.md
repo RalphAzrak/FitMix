@@ -70,6 +70,11 @@ Vision has no clothing detector. Two engines produce the same output:
   garment (one category per request). It keeps fixed-price listings only, so the price shown is what the item
   sells for, not a bid. It then drops any listing whose eBay category isn't that garment, and ranks by eBay's
   visual order, nudged by the colour and any brand word read on the garment.
+- **Google Lens instead of eBay:** with `FITMIX_MATCH_PROVIDER=vision`, the backend forwards the crop to the
+  FitMix vision service, which searches **Google Lens and Google Shopping** and re-ranks the results by how
+  alike they look. The card then shows that service's best match, with the shop's name as the retailer. The
+  app is unchanged, and still only the crop leaves the phone. Setup: `Backend/README.md`, "Google Lens matches
+  through the vision service".
 - **Card contents:** the listing's own product image, title, retailer ("eBay · seller"), listed price and
   currency, and **View listing**, all taken from the listing. A missing price reads **Price unavailable**.
   Results are always **Similar match**, because image search alone isn't evidence of the exact product.

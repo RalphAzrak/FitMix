@@ -3,7 +3,8 @@
 - `POST /v1/avatar`: the app posts the user's photos; this server adds the instruction and calls OpenAI's Image
   Edits API.
 - `POST /v1/garment-match`: the app posts one garment's crop and category; this server searches a retailer
-  catalog (eBay Browse API) and returns real listings in that category.
+  catalog (eBay Browse API) and returns real listings in that category, or, with FITMIX_MATCH_PROVIDER=vision,
+  forwards the crop to the FitMix vision service (Google Lens + Google Shopping, re-ranked).
 
 Provider keys live only in this process's environment. Images are held in memory for the length of one request:
 they are never written to disk and never logged.
@@ -28,6 +29,7 @@ from fastapi.responses import JSONResponse, Response
 from .mock import placeholder_png
 from .prompt import build_prompt
 from .retail import CATEGORIES, EbayMatcher, FixtureMatcher, Matcher, MatchError
+from .vision import VisionMatcher
 
 log = logging.getLogger("fitmix")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,8 +55,11 @@ class Settings:
     ebay_client_id: str = field(default="", repr=False)
     ebay_client_secret: str = field(default="", repr=False)
     ebay_marketplace: str = "EBAY_US"
-    # "ebay" (real listings, needs the keys above) or "fixture" (labeled test data, no keys, nothing sent).
+    # "ebay" (real listings, needs the keys above), "fixture" (labeled test data, no keys, nothing sent), or
+    # "vision" (Google Lens + Shopping through the FitMix vision service in vision-service/).
     match_provider: str = "ebay"
+    vision_service_url: str = "http://localhost:8790"
+    vision_app_token: str = field(default="", repr=False)
     match_rate_limit_per_hour: int = 120
 
     @staticmethod
@@ -74,6 +79,8 @@ class Settings:
             ebay_marketplace=env.get("EBAY_MARKETPLACE_ID", "").strip() or Settings.ebay_marketplace,
             match_provider=env.get("FITMIX_MATCH_PROVIDER", "").strip().lower() or Settings.match_provider,
             match_rate_limit_per_hour=int(env.get("FITMIX_MATCH_RATE_LIMIT_PER_HOUR", "") or Settings.match_rate_limit_per_hour),
+            vision_service_url=env.get("VISION_SERVICE_URL", "").strip() or Settings.vision_service_url,
+            vision_app_token=env.get("VISION_APP_TOKEN", "").strip(),
         )
 
 
@@ -148,6 +155,8 @@ class OpenAIGenerator:
 def default_matcher(settings: Settings) -> Matcher | None:
     if settings.match_provider == "fixture":
         return FixtureMatcher()
+    if settings.match_provider == "vision":
+        return VisionMatcher(settings.vision_service_url, settings.vision_app_token)
     if settings.match_provider == "ebay" and settings.ebay_client_id and settings.ebay_client_secret:
         return EbayMatcher(settings.ebay_client_id, settings.ebay_client_secret, settings.ebay_marketplace)
     return None
