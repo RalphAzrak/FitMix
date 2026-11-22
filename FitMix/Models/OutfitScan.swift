@@ -110,7 +110,7 @@ struct CatalogProduct: Identifiable, Hashable {
         switch match {
         case .exact: "Exact match"
         case .brand: brand.map { "Likely from \($0)" } ?? "Likely same brand"
-        case .similar: visualScore == nil ? "Similar match" : "Closest match"
+        case .similar: "Similar match"
         }
     }
 

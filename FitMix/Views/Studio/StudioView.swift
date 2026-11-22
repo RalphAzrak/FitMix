@@ -55,6 +55,7 @@ struct StudioView: View {
         .sheet(item: $swapPiece) { SwapPickerSheet(piece: $0) }
         .sheet(item: $matchListPiece) { piece in
             MatchListSheet(category: piece.detected.category, listings: studio.matchLists[piece.id] ?? [],
+                           budgetCurrency: studio.outfitBudget == nil ? nil : OutfitBudget.currency,
                            chosenID: studio.matchStates[piece.id].flatMap { if case .found(let p) = $0 { p.id } else { nil } }) { product in
                 guard studio.chooseListing(product, for: piece.id) else { return false }
                 matchListPiece = nil
@@ -813,9 +814,11 @@ private extension GarmentCategory {
 private struct MatchListSheet: View {
     var category: GarmentCategory
     var listings: [CatalogProduct]
+    var budgetCurrency: String?
     var chosenID: String?
     var choose: (CatalogProduct) -> Bool
     @State private var swapRejected = false
+    @State private var swapMessage = ""
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -823,7 +826,15 @@ private struct MatchListSheet: View {
     var body: some View {
         NavigationStack {
             List(listings) { product in
-                Button { swapRejected = !choose(product) } label: {
+                Button {
+                    guard !choose(product) else { return }
+                    if let budgetCurrency, product.price?.currencyCode != budgetCurrency {
+                        swapMessage = "This listing is priced outside your \(budgetCurrency) budget"
+                    } else {
+                        swapMessage = "This swap exceeds your outfit budget"
+                    }
+                    swapRejected = true
+                } label: {
                     HStack(alignment: .top, spacing: 12) {
                         GarmentTile(source: product.image.tileSource, category: category)
                             .frame(width: 72, height: 72)
@@ -861,7 +872,7 @@ private struct MatchListSheet: View {
                 .accessibilityAddTraits(product.id == chosenID ? .isSelected : [])
             }
             .listStyle(.plain)
-            .alert("This swap exceeds your outfit budget", isPresented: $swapRejected) {
+            .alert(swapMessage, isPresented: $swapRejected) {
                 Button("OK", role: .cancel) {}
             }
             .navigationTitle("Matches")
