@@ -7,6 +7,7 @@ import SwiftUI
     /// The current Studio look; survives leaving and reopening Studio during the session.
     @State private var studio = StudioStore()
     @State private var outfit = AvatarOutfitSelection()
+    @State private var savedLooks = SavedLookStore()
     /// The signed-in account's sizes and addresses. Follows whoever is signed in.
     @State private var profile = ProfileStore()
     /// The cart. Saved per account when signed in; in memory only when signed out.
@@ -26,6 +27,7 @@ import SwiftUI
                 .environment(auth)
                 .environment(studio)
                 .environment(outfit)
+                .environment(savedLooks)
                 .environment(profile)
                 .environment(cart)
                 .environment(orders)
@@ -45,6 +47,7 @@ import SwiftUI
                 .onChange(of: auth.user?.id, initial: true) { _, id in
                     if studio.wardrobeItem?.ownerID != id { studio.closeWardrobeItem() }
                     outfit.activate(ownerID: id)
+                    savedLooks.activate(ownerID: id)
                     profile.activate(accountID: id)
                     cart.activate(accountID: id)
                     orders.activate(accountID: id)

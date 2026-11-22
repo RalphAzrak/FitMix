@@ -133,18 +133,17 @@ final class AvatarStore {
         case .failed(let message): return .error(message)
         case .idle: break
         }
-        if profile.candidate != nil { return .reviewPending }
+        if profile.hasCurrentCandidate { return .reviewPending }
         if profile.avatar != nil { return .ready }
         return profile.setupStarted ? .setupInProgress : .empty
     }
 
     /// Where the creation flow should open so the user carries on from where they were.
     var resumeStep: SetupStep {
-        if profile.candidate != nil { return .review }
+        if profile.hasCurrentCandidate { return .review }
         if !profile.hasBodyPhoto { return .bodyPhoto }
         switch profile.currentStep {
-        case .review: return .generate
-        case .generate where !profile.readyToGenerate: return .measurements
+        case .review, .generate: return profile.readyToGenerate ? .generate : .measurements
         default: return profile.currentStep
         }
     }
@@ -272,11 +271,13 @@ final class AvatarStore {
         }
         generation = .generating
         let files = files, generator = generator, includeSelfie = profile.hasSelfie
+        let regenerate = profile.avatar != nil || profile.candidate != nil
         generationTask = Task { [weak self] in
             do {
                 // A photo chosen a moment ago may still be on its way to disk.
                 await self?.photoSaveTask?.value
-                let request = try await AvatarStore.makeRequest(files: files, includeSelfie: includeSelfie, heightCm: heightCm, weightKg: weightKg)
+                var request = try await AvatarStore.makeRequest(files: files, includeSelfie: includeSelfie, heightCm: heightCm, weightKg: weightKg)
+                request.regenerate = regenerate
                 try Task.checkCancellation()
                 let data = try await generator.generate(request)
                 try Task.checkCancellation()
@@ -310,7 +311,7 @@ final class AvatarStore {
     /// Makes the reviewed portrait the user's avatar. Until this succeeds the previous avatar stays in place.
     @discardableResult
     func acceptCandidate() -> Bool {
-        guard let record = profile.candidate, let portrait = candidateImage else { return false }
+        guard profile.hasCurrentCandidate, let record = profile.candidate, let portrait = candidateImage else { return false }
         let manager = FileManager.default
         do {
             if manager.fileExists(atPath: files.avatar.path) {

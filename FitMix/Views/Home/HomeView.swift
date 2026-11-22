@@ -17,14 +17,12 @@ struct HomeView: View {
                 header
                 GeometryReader { viewport in
                     let width = max(0, min(viewport.size.width - 28, 580))
-                    let portraitHeight = min(width * 1.44, max(322, viewport.size.height - 192))
+                    let controlsHeight: CGFloat = typeSize.isAccessibilitySize ? 280 : 190
+                    let portraitHeight = min(width * 1.35, max(250, viewport.size.height - controlsHeight))
 
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
-                            Text("Fitting Room")
-                                .font(.fmDisplay(37, relativeTo: .largeTitle))
-                                .foregroundStyle(Color.fmInk)
-                                .accessibilityAddTraits(.isHeader)
+                            FMPageHeading(title: "Fitting Room")
                             statusBanner
                             HomePortrait(
                                 portrait: store.avatarImage,
@@ -33,8 +31,9 @@ struct HomeView: View {
                                 openProfile: { showProfile = true },
                                 createAvatar: { router.flow = store.resumeStep }
                             )
-                            .frame(height: portraitHeight)
-                            outfitButton
+                            .frame(minHeight: portraitHeight,
+                                   maxHeight: store.profile.avatar == nil ? nil : portraitHeight)
+                            if store.profile.avatar != nil { outfitButton }
                             shortcuts
                         }
                         .frame(width: width)
@@ -44,7 +43,7 @@ struct HomeView: View {
                     }
                 }
             }
-            .background(Color(hex: 0xF8F6F1).ignoresSafeArea())
+            .background(Color.fmCanvas.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(isPresented: $showProfile) {
                 AvatarProfileView(changeAvatar: { router.flow = $0 }, editMetrics: { router.showMetricsEditor = true },
@@ -62,9 +61,7 @@ struct HomeView: View {
     private var header: some View {
         FMTopBar {
             FMBagButton(count: cart.count) { router.showCart = true }
-            // Opens the account Profile when signed in, otherwise Sign In (see AccountFlowView).
-            // The avatar's Profile opens from the avatar on Home.
-            Button(action: router.openAccount) {
+            Button { showProfile = true } label: {
                 Group {
                     if let user = auth.user {
                         Text(user.initials)
@@ -85,7 +82,7 @@ struct HomeView: View {
                 .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(auth.user == nil ? "Sign in" : "Account")
+            .accessibilityLabel("Profile")
             .accessibilityIdentifier("accountButton")
         }
     }
@@ -113,8 +110,8 @@ struct HomeView: View {
                     .background(.white.opacity(0.15), in: Circle())
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Outfit").font(.headline)
-                    Text("Style your avatar").font(.subheadline).foregroundStyle(.white.opacity(0.88))
+                    Text(auth.user?.firstName.map { "Dress \($0)" } ?? "Build a Look").font(.headline)
+                    Text("Try on clothes from your wardrobe").font(.subheadline).foregroundStyle(.white.opacity(0.88))
                 }
                 Spacer(minLength: 4)
                 Image(systemName: "arrow.right").font(.body.weight(.semibold)).accessibilityHidden(true)
@@ -132,10 +129,8 @@ struct HomeView: View {
     private var shortcuts: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10),
                                  count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 10) {
-            shortcut("Wardrobe", icon: "square.grid.2x2", id: "closet") { router.tab = .closet }
-            shortcut("Studio", icon: "tshirt", id: "studio") { router.tab = .studio }
-            shortcut("Scan Fits", icon: "camera.viewfinder", id: "scan", action: router.openCamera)
-            shortcut("Shop This Look", icon: "bag", id: "shop") { router.showShopLook = true }
+            shortcut("Add Clothing", icon: "plus", id: "add-clothing", action: router.openAddClothing)
+            shortcut("Scan Outfit", icon: "camera.viewfinder", id: "scan", action: router.openCamera)
         }
     }
 
@@ -207,18 +202,6 @@ private struct HomePortrait: View {
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: portrait == nil)
-        .overlay(alignment: .topTrailing) {
-            HStack(spacing: 7) {
-                Text("My Avatar").font(.caption.weight(.semibold))
-                Image(systemName: "arrow.up.right").font(.caption2.weight(.semibold))
-            }
-            .foregroundStyle(Color.fmInk)
-            .padding(.horizontal, 13)
-            .frame(minHeight: 44)
-            .background(.white.opacity(0.94), in: Capsule())
-            .padding(12)
-            .accessibilityHidden(true)
-        }
     }
 
     private var emptyPanel: some View {

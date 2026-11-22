@@ -26,11 +26,11 @@ struct TryOnHero: View {
     static func status(preview: TryOnPreview, source: UIImage?, avatarListing: AvatarTryOn?) -> (text: String, isTryOn: Bool)? {
         switch preview {
         case .ready(_, let isTryOn, _):
-            return isTryOn ? ("Try-On", true) : ("Stand-in · Not a Try-On", false)
+            return isTryOn ? ("Try-On", true) : ("Sample Preview", false)
         case .needsPhoto: return nil
         default:
             guard source != nil else { return nil }
-            return (avatarListing == nil ? "Your Photo · Not a Try-On" : "Your Avatar · Not a Try-On", false)
+            return (avatarListing == nil ? "Original Photo" : "Your Avatar", false)
         }
     }
 
@@ -55,7 +55,7 @@ struct TryOnHero: View {
         case .rendering:
             ZStack {
                 if let source { photo(source, label: "Your photo").opacity(0.55) }
-                statusCard(icon: nil, title: "Putting the look on you…", detail: "This uses your original photo and every piece you've selected.")
+                statusCard(icon: nil, title: "Putting your look together…", detail: "Using your photo and the selected pieces.")
             }
             .accessibilityIdentifier("tryOnRendering")
         case .unavailable:
@@ -63,15 +63,15 @@ struct TryOnHero: View {
                 if let source { photo(source, label: avatarListing == nil ? "Your photo as taken" : "Your avatar") }
                 if let avatarListing {
                     statusCard(icon: "hourglass", title: "Try-on isn't available yet",
-                               detail: "This is your avatar. \(avatarListing.productName) is ready to try on, but FitMix can't generate the try-on image yet.")
+                               detail: "\(avatarListing.productName) is selected. The preview shows your saved avatar.")
                         .padding(.bottom, 14)
                 } else if let wardrobeItemName {
                     statusCard(icon: "hourglass", title: "Try-on isn't available yet",
-                               detail: "\(wardrobeItemName) is ready in Studio. FitMix can’t generate the try-on image yet.")
+                               detail: "\(wardrobeItemName) is selected. The preview shows your original photo.")
                         .padding(.bottom, 14)
                 } else {
                     statusCard(icon: "hourglass", title: "Try-on isn't available yet",
-                               detail: "This is your photo as you took it. FitMix can't put the selected clothes on it yet. Switch to Street Look to see the outfit.")
+                               detail: "Switch to Scanned Outfit to see the clothes from your scan.")
                         .padding(.bottom, 14)
                 }
             }

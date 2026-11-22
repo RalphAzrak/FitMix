@@ -239,7 +239,7 @@ enum SampleScans {
         let garments = scan.garments.compactMap { garment -> LiveGarmentSelection.Garment? in
             let live: GarmentCategory = garment.category == .top ? .tshirt : garment.category
             guard GarmentCategory.liveScannable.contains(live), let bounds = garment.bounds,
-                  let crop = LiveGarmentSelection.crop(frame, to: bounds) else { return nil }
+                  let crop = LiveGarmentSelection.crop(frame, to: bounds, padding: 0) else { return nil }
             return LiveGarmentSelection.Garment(category: live, bounds: bounds, crop: crop)
         }
         guard garments.contains(where: { $0.category == category }) else { return nil }

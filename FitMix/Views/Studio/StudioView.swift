@@ -16,15 +16,20 @@ struct StudioView: View {
     @Environment(ProfileStore.self) private var profile
     @Environment(AppRouter.self) private var router
     @Environment(CartStore.self) private var cart
+    @Environment(AuthSession.self) private var auth
+    @Environment(SavedLookStore.self) private var library
 
     @State private var swapPiece: WorkingLook.Piece?
     @State private var showZoom = false
-    @State private var showLiveTwinInfo = false
     @State private var mode: PreviewMode = .tryOn
     @State private var addPhoto = false
     @State private var matchListPiece: WorkingLook.Piece?
+    @State private var refinementPiece: WorkingLook.Piece?
     @State private var needsAvatar = false
     @State private var showBudget = false
+    @State private var savingLook = false
+    @State private var savedLookKey: String?
+    @State private var saveLookFailed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,7 +40,19 @@ struct StudioView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         lookHeader.padding(.top, 10).padding(.bottom, 8)
+                        if studio.isLiveLook {
+                            budgetControl.padding(.bottom, 12)
+                        }
+                        Picker("Preview view", selection: $mode) {
+                            Text("Try On").tag(PreviewMode.tryOn)
+                            Text("Scanned Outfit").tag(PreviewMode.street)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.bottom, 12)
                         heroArea(scan: scan, hero: hero, look: look)
+                        if saveLookFailed {
+                            NoticeRow(tone: .caution, text: "Couldn't save this look. Try again.").padding(.top, 10)
+                        }
                         if studio.isLiveLook, let product = studio.selectedPiece?.product {
                             selectedProduct(product).padding(.top, 12)
                         }
@@ -44,12 +61,13 @@ struct StudioView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
                 }
+                .defaultScrollAnchor(Self.debugScrollAnchor)
                 .safeAreaInset(edge: .bottom, spacing: 0) { footer(look) }
             } else {
                 emptyState
             }
         }
-        .background(Color.fmBackground.ignoresSafeArea())
+        .background(Color.fmCanvas.ignoresSafeArea())
         .preferredColorScheme(.light)
         .sheet(isPresented: $showBudget) { OutfitBudgetSheet(cap: studio.outfitBudget, save: studio.setBudget) }
         .sheet(item: $swapPiece) { SwapPickerSheet(piece: $0) }
@@ -60,6 +78,17 @@ struct StudioView: View {
                 guard studio.chooseListing(product, for: piece.id) else { return false }
                 matchListPiece = nil
                 return true
+            }
+        }
+        .sheet(item: $refinementPiece) { piece in
+            if let scan = studio.scan, let detected = piece.detected.bounds,
+               let bounds = studio.matchCropBounds[piece.id] {
+                MatchRefinementSheet(frame: scan.image, category: piece.detected.category,
+                                     detectedBounds: detected, initialBounds: bounds,
+                                     brand: studio.matchBrands[piece.id] ?? "",
+                                     description: studio.matchDescriptions[piece.id]) { bounds, brand in
+                    studio.refineMatch(pieceID: piece.id, scanID: scan.id, bounds: bounds, brand: brand)
+                }
             }
         }
         #if DEBUG
@@ -82,7 +111,7 @@ struct StudioView: View {
                 ZoomableImageView(image: image, focus: nil, focusLabel: nil)
             } else if let hero = studio.hero {
                 ZoomableImageView(image: hero.image, focus: studio.selectedPiece?.detected.bounds.flatMap(hero.convert),
-                                  focusLabel: studio.selectedPiece.map { $0.detected.category.title })
+                                  focusLabel: studio.selectedPiece.map { studio.matchGarmentLabels[$0.id] ?? $0.detected.category.title })
             }
         }
         .sheet(isPresented: $addPhoto) {
@@ -91,20 +120,19 @@ struct StudioView: View {
         .onAppear { mode = defaultMode }
         // A new look opens on the try-on view when there's something to try on.
         .onChange(of: studio.lookNumber) { mode = defaultMode }
-        .alert("Live Twin isn't available yet", isPresented: $showLiveTwinInfo) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(liveTwinMessage)
+        .onChange(of: auth.user?.id) {
+            savedLookKey = nil
+            saveLookFailed = false
         }
     }
 
     private func wardrobeTryOn(_ item: WardrobeItem) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                FMTitleLine(title: item.title, caption: "Wardrobe Try-On")
+                FMPageHeading(title: item.title, detail: "Wardrobe Try-On")
                 TryOnHero(preview: studio.preview, source: studio.wardrobePerson, wardrobeItemName: item.title,
                           addPhoto: { addPhoto = true }, retry: studio.retryPreview)
-                    .frame(height: 380)
+                    .containerRelativeFrame(.vertical) { height, _ in min(470, max(315, height * 0.65)) }
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                 if let image = studio.wardrobeGarment?.image {
                     HStack(spacing: 12) {
@@ -118,13 +146,35 @@ struct StudioView: View {
                         }
                     }
                 }
-                Button("Close Wardrobe Try-On") { studio.closeWardrobeItem() }.buttonStyle(FMOutlineButtonStyle())
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { wardrobeTryOnActions }
+                    VStack(alignment: .leading, spacing: 10) { wardrobeTryOnActions }
+                }
             }
             .padding(16)
         }
     }
 
+    @ViewBuilder
+    private var wardrobeTryOnActions: some View {
+        Button("Back to Wardrobe", systemImage: "square.grid.2x2") { router.tab = .closet }
+            .buttonStyle(FMOutlineButtonStyle())
+        Button("Close Try-On") { studio.closeWardrobeItem() }
+            .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+    }
+
     /// "Try on my avatar" on a found card: the chosen listing plus the user's full-body avatar go to try-on.
+    /// Debug: FM_DEBUG_STUDIO_SCROLL=0.6 opens Studio scrolled that far down the page (1 is the bottom), for
+    /// screenshots of the garments below the photo.
+    private static var debugScrollAnchor: UnitPoint? {
+        #if DEBUG
+        if let position = ProcessInfo.processInfo.environment["FM_DEBUG_STUDIO_SCROLL"].flatMap(Double.init) {
+            return UnitPoint(x: 0.5, y: min(max(position, 0), 1))
+        }
+        #endif
+        return nil
+    }
+
     private func tryOnAvatar(_ piece: WorkingLook.Piece) {
         if studio.tryOnAvatar(pieceID: piece.id, avatar: avatar.avatarImage) {
             withAnimation(.snappy(duration: 0.2)) { mode = .tryOn }
@@ -148,28 +198,71 @@ struct StudioView: View {
     // MARK: Look header
 
     private var lookHeader: some View {
-        HStack(alignment: .center, spacing: 8) {
-            FMTitleLine(title: String(format: "Look %02d", studio.lookNumber), caption: "Studio Fit")
-            Spacer(minLength: 4)
-            Button { showLiveTwinInfo = true } label: {
-                // Gray dot: Live Twin is off until dressing the avatar is connected. Lime means live.
-                FMChip(text: "Live Twin", dot: Color.fmOutline.opacity(0.55), style: .soft)
-                    .frame(minHeight: 44)
+        HStack(spacing: 8) {
+            FMPageHeading(title: "Studio")
+            if let snapshot = studioSnapshot {
+                FMRoundIconButton(systemName: savedLookKey == snapshot.key ? "bookmark.fill" : "bookmark",
+                                  label: savedLookKey == snapshot.key ? "Look saved" : "Save Look") {
+                    guard auth.user != nil else { router.openAccount(); return }
+                    Task { await saveLook(snapshot) }
+                }
+                .disabled(savingLook || savedLookKey == snapshot.key)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Live Twin")
-            .accessibilityValue("Not available")
-            .accessibilityHint("Explains why your avatar preview isn't shown")
+            if isRefinementAvailable, let piece = studio.selectedPiece {
+                FMRoundIconButton(systemName: "crop", label: "Refine Search") { refinementPiece = piece }
+                    .accessibilityHint("Adjust the garment crop or filter by brand")
+                    .accessibilityIdentifier("refine-match")
+            }
             optionsMenu
+        }
+    }
+
+    private var isRefinementAvailable: Bool {
+        studio.isLiveLook && studio.selectedPieceID.flatMap { studio.matchCropBounds[$0] } != nil
+    }
+
+    private struct Snapshot {
+        let image: UIImage
+        let key: String
+        let kind: SavedLook.Kind
+        let pieces: [SavedLook.Piece]
+    }
+
+    private var studioSnapshot: Snapshot? {
+        let pieces = (studio.look?.pieces ?? []).map {
+            SavedLook.Piece(slot: nil, itemID: nil, name: $0.product?.name ?? $0.detected.category.title)
+        }
+        if mode == .street, let scan = studio.scan, let hero = studio.hero {
+            let originalPieces = (studio.look?.pieces ?? []).map {
+                SavedLook.Piece(slot: nil, itemID: nil, name: $0.detected.category.title)
+            }
+            return Snapshot(image: hero.image, key: scan.id.uuidString, kind: .scan, pieces: originalPieces)
+        }
+        if case .ready(let image, true, let signature) = studio.preview {
+            let previewPieces = studio.avatarTryOn.map {
+                [SavedLook.Piece(slot: nil, itemID: nil, name: $0.productName)]
+            } ?? pieces
+            return Snapshot(image: image, key: signature, kind: .preview, pieces: previewPieces)
+        }
+        return nil
+    }
+
+    private func saveLook(_ snapshot: Snapshot) async {
+        guard !savingLook, savedLookKey != snapshot.key else { return }
+        savingLook = true
+        saveLookFailed = false
+        defer { savingLook = false }
+        do {
+            _ = try await library.save(image: snapshot.image, pieces: snapshot.pieces, ownerID: auth.user?.id,
+                                       kind: snapshot.kind)
+            savedLookKey = snapshot.key
+        } catch {
+            saveLookFailed = true
         }
     }
 
     private var optionsMenu: some View {
         Menu {
-            Picker("View", selection: $mode.animation(.snappy(duration: 0.2))) {
-                Label("Your Try-On", systemImage: "person.crop.rectangle").tag(PreviewMode.tryOn)
-                Label("Street Look", systemImage: "photo").tag(PreviewMode.street)
-            }
             Button { addPhoto = true } label: { Label("Change Try-On Photo", systemImage: "camera") }
             if !studio.isLiveLook, let selected = studio.selectedPiece {
                 Button { swapPiece = selected } label: {
@@ -181,11 +274,6 @@ struct StudioView: View {
         }
         .accessibilityLabel("Look options")
         .accessibilityIdentifier("studioOptions")
-    }
-
-    private var liveTwinMessage: String {
-        let base = "Live Twin would show this look on your avatar. Dressing the avatar isn't connected yet. Your Try-On uses your photo instead, and Street Look shows the scanned outfit."
-        return avatar.profile.avatar != nil ? base : base + " You also need to create your avatar in My Avatar first."
     }
 
     // MARK: Hero
@@ -208,11 +296,6 @@ struct StudioView: View {
         .overlay(alignment: .topLeading) { heroChips(scan: scan).padding(12) }
         .overlay(alignment: .bottomTrailing) {
             VStack(spacing: 12) {
-                FMFloatingButton(systemName: "arrow.counterclockwise",
-                                 label: mode == .tryOn ? "Show Street Look" : "Show Your Try-On") {
-                    withAnimation(.snappy(duration: 0.25)) { mode = mode == .tryOn ? .street : .tryOn }
-                }
-                .accessibilityIdentifier("switchView")
                 if mode == .street || tryOnImage != nil {
                     FMFloatingButton(systemName: "plus.magnifyingglass", label: "Zoom photo") { showZoom = true }
                 }
@@ -258,6 +341,7 @@ struct StudioView: View {
 
     /// "W32 L30 · Raw Denim": the user's saved size for this kind of piece (from Profile), then its name.
     private func tooltip(for piece: WorkingLook.Piece) -> String? {
+        if studio.isLiveLook { return studio.matchGarmentLabels[piece.id] ?? piece.detected.category.title }
         let sizing = profile.sizing
         let size: String? = switch piece.detected.category {
         case .jacket, .tshirt, .top, .dress: sizing.top?.rawValue
@@ -277,8 +361,8 @@ struct StudioView: View {
                 Text(product.name).font(.system(size: 14, weight: .semibold))
                 Text(product.visualMatchLabel)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(AuthPalette.primary)
-                if let retailer = product.retailer, let price = product.price {
-                    Text("\(retailer) · \(price.formatted) \(price.currencyCode)")
+                if let retailer = product.retailer {
+                    Text(product.price.map { "\(retailer) · \($0.formatted) \($0.currencyCode)" } ?? retailer)
                         .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                 }
             }
@@ -294,7 +378,7 @@ struct StudioView: View {
 
     private func garments(_ look: WorkingLook) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            FMSectionHeader(title: "Layers & Garments") {
+            FMSectionHeader(title: "Garments") {
                 if !look.pieces.isEmpty, !studio.isLiveLook {
                     let selected = studio.selectedPiece
                     Button("Swap item") { swapPiece = selected }
@@ -316,25 +400,32 @@ struct StudioView: View {
             if look.pieces.isEmpty {
                 NoGarmentsCard()
             } else if studio.isLiveLook {
-                ScrollViewReader { reader in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 10) {
-                            ForEach(look.pieces) { piece in
-                                RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
-                                                  state: studio.matchStates[piece.id],
-                                                  crop: studio.cropPreviews[piece.id],
-                                                  moreCount: studio.matchLists[piece.id]?.filter { $0.id != piece.product?.id }.count ?? 0,
-                                                  select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
-                                                  retry: { studio.findMatch(for: piece.id) },
-                                                  showMore: { matchListPiece = piece },
-                                                  tryOnAvatar: { tryOnAvatar(piece) })
-                                    .containerRelativeFrame(.horizontal, count: 5, span: 3, spacing: 10)
-                                    .id(piece.id)
-                            }
+                // One full-width box per garment, stacked, so each one's chosen product photo is large and none
+                // is hidden off to the side. The selected garment's other results follow its box.
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(look.pieces) { piece in
+                        RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
+                                          state: studio.matchStates[piece.id],
+                                          crop: studio.cropPreviews[piece.id],
+                                          garmentLabel: studio.matchGarmentLabels[piece.id],
+                                          moreCount: studio.matchLists[piece.id]?.filter { $0.id != piece.product?.id }.count ?? 0,
+                                          select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
+                                          brand: studio.matchBrands[piece.id],
+                                          retry: { studio.findMatch(for: piece.id) },
+                                          clearBrand: { studio.clearMatchBrand(for: piece.id) },
+                                          showMore: { matchListPiece = piece },
+                                          tryOnAvatar: { tryOnAvatar(piece) })
+                            .id(piece.id)
+                        if piece.id == studio.selectedPieceID, let listings = studio.matchLists[piece.id], listings.count > 1 {
+                            MatchResultsList(category: piece.detected.category, listings: listings, chosenID: piece.product?.id,
+                                             choose: { studio.chooseListing($0, for: piece.id) },
+                                             tryOn: { product in
+                                                 guard studio.chooseListing(product, for: piece.id) else { return false }
+                                                 tryOnAvatar(piece)
+                                                 return true
+                                             })
                         }
                     }
-                    .scrollClipDisabled()
-                    .onAppear { if let id = studio.selectedPieceID { reader.scrollTo(id, anchor: .center) } }
                 }
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -354,57 +445,96 @@ struct StudioView: View {
         }
     }
 
-    // MARK: Footer
+    // MARK: Budget and shopping
 
-    private func footer(_ look: WorkingLook) -> some View {
-        VStack(spacing: 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("Total Outfit").font(.system(size: 17, weight: .bold)).foregroundStyle(Color.fmInk)
-                Text(look.pieces.count == 1 ? "1 piece" : "\(look.pieces.count) pieces")
-                    .font(.system(size: 15)).foregroundStyle(Color.fmSecondary)
-                Spacer()
-                if studio.outfitBudget == nil || !studio.isLiveLook { PriceSummary(look: look) }
-            }
-            .accessibilityElement(children: .combine)
-            if studio.isLiveLook {
-                HStack(alignment: .top, spacing: 8) {
+    private var budgetControl: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { showBudget = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: studio.outfitBudget == nil ? "dollarsign.circle" : "checkmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.fmCobalt)
+                        .frame(width: 40, height: 40)
+                        .background(Color.fmCobalt.opacity(0.10), in: Circle())
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 4) {
                         if let cap = studio.outfitBudget {
-                            let subtotal = Price(amount: studio.budgetSubtotal, currencyCode: OutfitBudget.currency)
-                            let limit = Price(amount: cap, currencyCode: OutfitBudget.currency)
-                            Text("\(subtotal.formatted) of \(limit.formatted) CAD")
-                                .font(.system(size: 14, weight: .semibold))
+                            let format = Decimal.FormatStyle.Currency(code: OutfitBudget.currency)
+                                .presentation(.narrow).precision(.fractionLength(0...2))
+                            let subtotal = studio.budgetSubtotal.formatted(format)
+                            let limit = cap.formatted(format)
+                            Text("Outfit budget").font(.subheadline.weight(.semibold))
+                            Text("\(subtotal) of \(limit) \(OutfitBudget.currency)")
+                                .font(.caption)
+                                .foregroundStyle(Color.fmSecondary)
                                 .accessibilityIdentifier("budgetSubtotal")
-                            if studio.isExpandingBudget {
-                                Label("Checking lower-priced listings", systemImage: "magnifyingglass")
-                            } else if !studio.missingBudgetPieces.isEmpty {
-                                Text("Missing: \(studio.missingBudgetPieces.map(\.title).joined(separator: ", "))")
-                                    .accessibilityIdentifier("budgetMissing")
-                            }
-                            if studio.budgetSearchFailed {
-                                Button("Retry budget search", action: studio.retryBudgetSearch)
-                            }
+                        } else {
+                            Text("Set Outfit Budget").font(.subheadline.weight(.semibold))
+                            Text("Find a look within your limit")
+                                .font(.caption)
+                                .foregroundStyle(Color.fmSecondary)
                         }
-                        Text("Before tax and shipping")
                     }
-                    .font(.system(size: 12))
-                    .foregroundStyle(AuthPalette.secondary)
-                    Spacer(minLength: 0)
-                    Button { showBudget = true } label: {
-                        Label("Budget", systemImage: "dollarsign.circle")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(minHeight: 34)
+                    .foregroundStyle(Color.fmInk)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if studio.outfitBudget != nil {
+                        Text("Edit").font(.subheadline.weight(.semibold)).foregroundStyle(Color.fmCobalt)
+                    } else {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.fmCobalt)
+                            .accessibilityHidden(true)
                     }
-                    .foregroundStyle(AuthPalette.primary)
-                    .accessibilityIdentifier("outfitBudgetButton")
+                }
+                .padding(10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("outfitBudgetButton")
+
+            if studio.outfitBudget != nil {
+                if studio.isExpandingBudget || studio.matchStates.values.contains(.searching) {
+                    Label("Checking matches for this budget", systemImage: "magnifyingglass")
+                        .font(.caption)
+                        .foregroundStyle(Color.fmSecondary)
+                        .padding([.horizontal, .bottom], 10)
+                } else if !studio.missingBudgetPieces.isEmpty {
+                    Text("Still missing: \(studio.missingBudgetPieces.map(\.title).joined(separator: ", "))")
+                        .font(.caption)
+                        .foregroundStyle(Color.fmSecondary)
+                        .accessibilityIdentifier("budgetMissing")
+                        .padding([.horizontal, .bottom], 10)
+                }
+                if studio.budgetSearchFailed {
+                    Button("Retry budget search", action: studio.retryBudgetSearch)
+                        .font(.caption.weight(.semibold))
+                        .padding([.horizontal, .bottom], 10)
                 }
             }
-            HStack(spacing: 12) {
-                Button(action: openCamera) {
-                    Label("Camera", systemImage: "camera")
+        }
+        .background(Color.fmCobalt.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.fmCobalt.opacity(0.18)))
+    }
+
+    private func footer(_ look: WorkingLook) -> some View {
+        VStack(spacing: 8) {
+            if studio.outfitBudget == nil || !studio.isLiveLook {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Matched subtotal").font(.subheadline.weight(.semibold))
+                        Spacer()
+                        PriceSummary(look: look)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Matched subtotal").font(.subheadline.weight(.semibold))
+                        PriceSummary(look: look)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(FMOutlineButtonStyle())
-                .frame(maxWidth: 150)
+                .accessibilityElement(children: .combine)
+            }
+            HStack(spacing: 10) {
+                FMRoundIconButton(systemName: "camera", label: "Open Camera", action: openCamera)
                 Button { router.showShopLook = true } label: {
                     Label("Shop This Look", systemImage: "bag")
                 }
@@ -413,8 +543,7 @@ struct StudioView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.vertical, 10)
         .background(Color.fmBackground)
     }
 
@@ -423,7 +552,7 @@ struct StudioView: View {
     private var emptyState: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                FMTitleLine(title: "Studio", caption: "No look yet")
+                FMPageHeading(title: "Studio")
                 VStack(spacing: 14) {
                     Image(systemName: "camera.viewfinder")
                         .font(.system(size: 30, weight: .medium))
@@ -432,16 +561,16 @@ struct StudioView: View {
                         .background(.white, in: Circle())
                         .fmFloatingShadow()
                         .accessibilityHidden(true)
-                    Text("No scan yet")
+                    Text("Scan an outfit")
                         .font(.fmDisplay(28))
                         .foregroundStyle(Color.fmInk)
                         .accessibilityAddTraits(.isHeader)
-                    Text("Scan an outfit you spot with the Camera. It opens here, piece by piece, ready to swap and shop.")
+                    Text("Find individual garments in a look and explore ways to wear them.")
                         .font(.system(size: 15))
                         .foregroundStyle(Color.fmSecondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(action: openCamera) { Label("Open Camera", systemImage: "camera") }
+                    Button(action: openCamera) { Label("Scan Outfit", systemImage: "camera") }
                         .buttonStyle(FMFilledButtonStyle())
                         .padding(.top, 6)
                 }
@@ -609,10 +738,13 @@ private struct RetailerMatchCard: View {
     var state: RetailerMatchState?
     /// The garment crop the user tapped (the search input).
     var crop: UIImage?
+    var garmentLabel: String?
     /// How many other ranked listings there are.
     var moreCount: Int = 0
     var select: () -> Void
+    var brand: String?
     var retry: () -> Void
+    var clearBrand: () -> Void
     var showMore: () -> Void = {}
     var tryOnAvatar: () -> Void = {}
 
@@ -624,7 +756,7 @@ private struct RetailerMatchCard: View {
         VStack(alignment: .leading, spacing: 8) {
             GarmentTile(source: tileSource, category: category)
                 .frame(maxWidth: .infinity)
-                .frame(height: 112)
+                .frame(height: 240)
                 .overlay(alignment: .bottom) {
                     // The tapped garment stays fully visible while searching: only a small badge on top.
                     if state == .searching {
@@ -646,11 +778,12 @@ private struct RetailerMatchCard: View {
                     if product != nil, let crop {
                         Image(uiImage: crop)
                             .resizable().scaledToFill()
-                            .frame(width: 34, height: 34)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(.white, lineWidth: 2))
-                            .padding(5)
-                            .accessibilityLabel("Your scanned \(category.title.lowercased())")
+                            .frame(width: 68, height: 68)
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(.white, lineWidth: 2))
+                            .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+                            .padding(8)
+                            .accessibilityLabel("Your scanned \((garmentLabel ?? category.title).lowercased())")
                             .accessibilityIdentifier("scannedCrop")
                     }
                 }
@@ -658,10 +791,21 @@ private struct RetailerMatchCard: View {
                     if let product, product.isFixture { TagPill(text: "Test fixture").padding(6) }
                 }
             HStack(spacing: 6) {
-                Text(category.title)
+                Text(garmentLabel ?? category.title)
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(selected ? AuthPalette.primary : AuthPalette.onSurface)
                 Spacer(minLength: 0)
+            }
+            if let brand, !brand.isEmpty {
+                HStack {
+                    Label(brand, systemImage: "tag").foregroundStyle(Color.fmSecondary)
+                    Spacer(minLength: 0)
+                    Button("Clear Brand", systemImage: "xmark.circle", action: clearBrand)
+                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                        .buttonStyle(.plain).foregroundStyle(Color.fmCobalt)
+                        .accessibilityIdentifier("clear-match-brand")
+                }
+                .font(.caption)
             }
             details
         }
@@ -729,15 +873,18 @@ private struct RetailerMatchCard: View {
                     .accessibilityHint("Opens the listing at \(product.retailer ?? "the retailer")")
                     .accessibilityIdentifier("viewListing")
                 }
-                Button(action: tryOnAvatar) {
-                    Label("Try on my avatar", systemImage: "person.crop.rectangle")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(minHeight: 36)
+                // A try-on needs the product's photo.
+                if product.image != nil {
+                    Button(action: tryOnAvatar) {
+                        Label("Try on my avatar", systemImage: "person.crop.rectangle")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(minHeight: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AuthPalette.primary)
+                    .accessibilityHint("Shows this listing with your full-body avatar")
+                    .accessibilityIdentifier("tryOnAvatar")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(AuthPalette.primary)
-                .accessibilityHint("Shows this listing with your full-body avatar")
-                .accessibilityIdentifier("tryOnAvatar")
                 if moreCount > 0 {
                     Button(action: showMore) {
                         Label("More matches (\(moreCount))", systemImage: "list.bullet")
@@ -750,12 +897,12 @@ private struct RetailerMatchCard: View {
                 }
             }
         case .searching:
-            Text("Searching retailers for \(category.searchNoun) only.")
+            Text("Searching the web for \(category.searchNoun) only.")
                 .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         case .noMatch:
             VStack(alignment: .leading, spacing: 4) {
-                Text("No retailer match found")
+                Text("No close match found")
                     .font(.system(size: 13, weight: .semibold))
                     .accessibilityIdentifier("noMatch")
                 retryButton
@@ -781,9 +928,11 @@ private struct RetailerMatchCard: View {
                 }
             }
         case nil:
-            Text("Tap to find \(category.searchNoun) at retailers.")
-                .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Button("Find Similar", systemImage: "magnifyingglass", action: select)
+                .font(.subheadline.weight(.semibold))
+                .frame(minHeight: 44)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.fmCobalt)
         }
     }
 
@@ -807,6 +956,86 @@ private extension GarmentCategory {
         case .tshirt: "this T-shirt"
         default: "this \(title.lowercased())"
         }
+    }
+}
+
+/// Every result for the selected garment, listed under the cards so none is hidden behind a button.
+/// Tapping one puts it on the garment's card.
+private struct MatchResultsList: View {
+    var category: GarmentCategory
+    var listings: [CatalogProduct]
+    var chosenID: String?
+    var choose: (CatalogProduct) -> Bool
+    /// Puts the item on the card and shows it on the user's avatar. False when the budget rules it out.
+    var tryOn: (CatalogProduct) -> Bool
+    @State private var rejected = false
+
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(listings.count) results for \(category.searchNoun)")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(AuthPalette.onSurface)
+                .accessibilityAddTraits(.isHeader)
+            ForEach(listings) { product in
+                HStack(alignment: .top, spacing: 10) {
+                    GarmentTile(source: product.image.tileSource, category: category)
+                        .frame(width: 64, height: 64)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(product.visualMatchLabel)
+                                .font(.system(size: 11, weight: .semibold)).foregroundStyle(AuthPalette.primary)
+                            if product.id == chosenID {
+                                Image(systemName: "checkmark.circle.fill").font(.system(size: 12))
+                                    .foregroundStyle(AuthPalette.primaryContainer)
+                                    .accessibilityLabel("Shown on the card")
+                            }
+                        }
+                        Text(product.name)
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(AuthPalette.onSurface)
+                            .lineLimit(2)
+                        Text([product.retailer, product.price.map { "\($0.formatted) \($0.currencyCode)" }]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary).lineLimit(1)
+                        HStack(spacing: 16) {
+                            Button { if !tryOn(product) { rejected = true } } label: {
+                                Label("Try on", systemImage: "person.crop.rectangle").frame(minHeight: 36)
+                            }
+                            .accessibilityHint("Shows this item on your avatar")
+                            .accessibilityIdentifier("tryOn-\(product.id)")
+                            if let url = product.retailerURL {
+                                Button { openURL(url) } label: {
+                                    Label("View", systemImage: "arrow.up.right.square").frame(minHeight: 36)
+                                }
+                                .accessibilityLabel("View at \(product.retailer ?? "the store")")
+                            }
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(AuthPalette.primary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(8)
+                .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(product.id == chosenID ? AuthPalette.primaryContainer : AuthPalette.containerHigh,
+                                      lineWidth: product.id == chosenID ? 2 : 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { if !choose(product) { rejected = true } }
+                .accessibilityElement(children: .contain)
+                .accessibilityAction(named: "Show on the card") { if !choose(product) { rejected = true } }
+                .accessibilityIdentifier("result-\(product.id)")
+            }
+        }
+        .padding(.top, 6)
+        .alert("This item doesn't fit your outfit budget", isPresented: $rejected) {
+            Button("OK", role: .cancel) {}
+        }
+        .accessibilityIdentifier("matchResults")
     }
 }
 

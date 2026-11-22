@@ -10,11 +10,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import Settings, create_app
-from app.outfit_match import DiscoveryPage, Hit, OpenAIVisualSearch, OutfitMatcher, TrendtrackImageSearch
-from app.retailer_product import PublicRetailerHTTP, RetailerVerifier, verified_offers
+from app.outfit_match import (DiscoveryPage, Hit, OpenAIVisualSearch, OpenAIWebSearch, OutfitMatcher, Rating,
+                              WebProduct, web_hits)
+from app.retailer_product import PublicRetailerHTTP, RetailerVerifier, page_listing, verified_offers
 
 SEARCH_ID = "9b1a67f9-9477-48e5-8a6c-11b70245e1d9"
-SHOP_ID = "3f8aa146-6f96-46e8-9781-64db5166f9a8"
 
 
 def jpeg(color):
@@ -40,110 +40,170 @@ class RetailerPages:
         host = httpx.URL(url).host
         if mime == "text/html":
             pages = {
-                "frankandoak.com": product_page("Black boxy jacket, identical wording"),
+                "plain.example": product_page("Black boxy jacket, identical wording"),
                 "independent.example": product_page("The Elm"),
                 "alternate.example": product_page("The Branch", amount="42", code="ELM-5473"),
                 "soldout.example": product_page("Unavailable jacket", availability="OutOfStock"),
             }
             return url, pages[host]
-        return url, jpeg((220, 200, 150) if host == "frankandoak.com" else (18, 18, 18))
+        return url, jpeg((220, 200, 150) if host == "plain.example" else (18, 18, 18))
 
 
-def trendtrack(request):
-    if request.method == "GET":
-        assert request.url.path == f"/v1/products/{SHOP_ID}:42"
-        return httpx.Response(200, json={"data": {"url": "https://independent.example/garment/elm"}})
-
-    assert request.url.path == "/v1/products/image-search"
-    if request.headers["content-type"].startswith("multipart/form-data"):
-        assert CROP in request.content and b'name="image"; filename="garment.jpg"' in request.content
-        assert b"Black boxy jacket" not in request.content
-        rows = [
-            {"product": {"url": "https://frankandoak.com/products/example"}, "shop": {"domain": "frankandoak.com"}},
-            {"product": {"shopifyId": 42}, "shop": {"id": SHOP_ID, "domain": "independent.example", "name": "Independent"}},
-            {"product": {"url": "https://soldout.example/products/example"}, "shop": {"domain": "soldout.example"}},
-        ]
-    else:
-        assert json.loads(request.content)["searchId"] == SEARCH_ID
-        assert json.loads(request.content)["offset"] == 12
-        rows = [{"product": {"url": "https://alternate.example/products/branch"}, "shop": {"domain": "alternate.example"}}]
-    return httpx.Response(200, json={"data": rows, "meta": {"searchId": SEARCH_ID}, "pagination": {"total": 24}})
+def reply(data, sources=None):
+    item = {"id": "msg_test", "type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": json.dumps(data), "annotations": []}]}
+    tool = [{"id": "ws_test", "type": "web_search_call", "status": "completed",
+             "action": {"type": "search", "query": "garment", "sources": [{"type": "url", "url": url} for url in sources]}}] if sources else []
+    return httpx.Response(200, json={"id": "resp_test", "object": "response",
+                                     "created_at": 0, "status": "completed", "output": [*tool, item]})
 
 
 def model(request):
     payload = json.loads(request.content)
     assert payload["store"] is False
+    content = payload["input"][0]["content"]
+    assert base64.b64decode(content[1]["image_url"].split(",")[1]) == CROP
     if "tools" in payload:
-        assert payload["tool_choice"]["name"] == "discover_products_by_image"
-        assert payload["tools"][0]["parameters"]["properties"] == {}
-        item = {"id": "fc_test", "type": "function_call", "call_id": "call_test",
-                "name": "discover_products_by_image", "arguments": "{ }", "status": "completed"}
-    else:
-        content = payload["input"][0]["content"]
-        assert base64.b64decode(content[1]["image_url"].split(",")[1]) == CROP
-        assert "The Elm" not in request.content.decode() and "identical wording" not in request.content.decode()
-        photos = [base64.b64decode(photo["image_url"].split(",")[1]) for photo in content[3::2]]
-        ratings = []
-        for index, photo in enumerate(photos):
-            red = Image.open(io.BytesIO(photo)).getpixel((16, 16))[0]
-            ratings.append({"index": index, "same_category": True, "color": 35 if red < 30 else 12,
-                            "cut": 29, "pattern": 18, "details": 10})
-        item = {"id": "msg_test", "type": "message", "role": "assistant", "status": "completed",
-                "content": [{"type": "output_text", "text": json.dumps({"ratings": ratings}), "annotations": []}]}
-    return httpx.Response(200, json={"id": "resp_test", "object": "response",
-                                     "created_at": 0, "status": "completed", "output": [item]})
+        # The web search gets the garment photo itself, and no list of stores to stay within.
+        assert [tool["type"] for tool in payload["tools"]] == ["web_search"]
+        assert payload["include"] == ["web_search_call.action.sources"]
+        assert "allowed_domains" not in request.content.decode()
+        return reply({"products": [
+            {"url": "https://plain.example/products/example", "store": None},
+            {"url": "https://independent.example/garment/elm", "store": "Independent"},
+            {"url": "https://soldout.example/products/example", "store": "Sold Out Shop"},
+            {"url": "http://insecure.example/products/example", "store": "Insecure"},
+            {"url": "https://invented.example/products/example", "store": "Unsourced"},
+            {"url": "https://plain.example/products/example?colourId=99", "store": "Unsourced colorway"},
+        ]}, sources=["https://plain.example/products/example?utm_source=openai",
+                      "https://independent.example/garment/elm",
+                      "https://soldout.example/products/example"])
+    assert "The Elm" not in request.content.decode() and "identical wording" not in request.content.decode()
+    photos = [base64.b64decode(photo["image_url"].split(",")[1]) for photo in payload["input"][1]["content"][2::2]]
+    ratings = []
+    for index, photo in enumerate(photos):
+        close = Image.open(io.BytesIO(photo)).getpixel((16, 16))[0] < 30
+        ratings.append({"index": index, "same_category": True, "color": 15 if close else 3,
+                        "cut": 24, "pattern": 17, "details": 36 if close else 25,
+                        "detail_evidence": "plain", "product_plain": True, "product_text": None})
+    return reply({"ratings": ratings})
 
 
-def test_actual_image_tool_contract_photo_ranking_and_budget_pagination():
-    discovery_http = httpx.AsyncClient(base_url="https://api.trendtrack.io", transport=httpx.MockTransport(trendtrack))
+def test_web_search_from_the_photo_ranks_pages_by_their_photos():
     model_http = httpx.AsyncClient(transport=httpx.MockTransport(model))
     ai = OpenAIVisualSearch("", "gpt-4.1-mini", openai.AsyncOpenAI(api_key="fixture", http_client=model_http))
-    matcher = OutfitMatcher(ai, TrendtrackImageSearch("fixture", discovery_http), RetailerVerifier(RetailerPages()))
+    matcher = OutfitMatcher(ai, OpenAIWebSearch(ai), RetailerVerifier(RetailerPages()))
     with TestClient(create_app(Settings(mock=True), outfit=matcher)) as client:
-        result = client.post("/v1/outfit-match", data={"category": "jacket", "text": "ELM-5473"},
+        result = client.post("/v1/outfit-match", data={"category": "jacket", "text": "ELM-5473", "mode": "photo"},
                              files={"crop": ("garment.jpg", CROP, "image/jpeg")})
         assert result.status_code == 200, result.text
         data = result.json()
-        listings = data["results"]
-        assert [(p["retailer"], p["match"], p["visual_score"]) for p in listings] == [
-            ("Independent", "similar", 92), ("frankandoak.com", "similar", 69),
+        assert [(p["retailer"], p["match"], p["visual_score"], p["provider"]) for p in data["results"]] == [
+            ("Independent", "similar", 92, "web"), ("plain.example", "similar", 69, "web"),
         ]
+        # Each result carries the product photo that was compared, so the app can always show it.
+        shades = [Image.open(io.BytesIO(base64.b64decode(p["thumbnail"]))).getpixel((16, 16))[0] for p in data["results"]]
+        assert shades[0] < 30 and shades[1] > 200
+        # A web search has no second page: a budget follow-up answers with nothing more.
         expanded = client.post("/v1/outfit-match", data={
             "category": "jacket", "search_id": data["search_id"], "max_price": "60",
         })
         assert expanded.status_code == 200, expanded.text
-        assert [(p["title"], p["match"], p["price"]) for p in expanded.json()["results"]] == [
-            ("The Branch", "exact", {"value": "42", "currency": "CAD"}),
-        ]
+        assert expanded.json()["status"] == "no_match" and expanded.json()["results"] == []
 
 
-def test_exact_identity_sorts_ahead_of_a_higher_visual_score_and_keeps_foreign_currency():
+def test_web_hits_keep_public_https_pages_and_a_few_per_store():
+    found = [WebProduct(url=f"https://shop.example/products/{i}", store="Shop  Example") for i in range(4)]
+    found += [WebProduct(url="http://shop.example/p", store=None), WebProduct(url="not a url", store=None),
+              WebProduct(url="https://www.other.example/p#reviews", store=None)]
+    assert [(hit.url, hit.name) for hit in web_hits(found)] == [
+        ("https://shop.example/products/0", "Shop Example"), ("https://shop.example/products/1", "Shop Example"),
+        ("https://www.other.example/p", "other.example"),
+    ]
+
+
+def test_matcher_reads_at_most_a_few_pages_per_store():
+    read = []
+
+    class Search:
+        async def page(self, *_):
+            return DiscoveryPage([Hit(f"https://independent.example/garment/{i}", "www.independent.example", "")
+                                  for i in range(5)], None, None)
+
+    class Pages(RetailerPages):
+        async def get(self, url, mime, limit):
+            if mime == "text/html":
+                read.append(url)
+            return await super().get(url, mime, limit)
+
+    class Rank:
+        async def rank(self, category, crop, media, photos, description, attributes):
+            return [Rating(index=index, same_category=True, color=15, cut=25, pattern=20, details=38,
+                           detail_evidence="match", product_plain=None, product_text=None)
+                    for index in range(len(photos))]
+
+    matcher = OutfitMatcher(Rank(), Search(), RetailerVerifier(Pages()), per_store=2)
+    _, results, _ = asyncio.run(matcher.match("jacket", CROP, "image/jpeg", [], None, None, mode="photo"))
+    assert len(read) == 2 and len(results) == 2
+
+
+def test_a_page_without_a_structured_offer_is_listed_from_its_own_title_and_photo():
+    url = "https://store.example/item/42"
+    page = ('<meta property="og:type" content="product.item">'
+            '<meta content="Black lightning tee &amp; more" property="og:title">'
+            "<meta property='og:image' content='/photos/tee.jpg'>")
+    listing = page_listing(page, url, "Store")
+    assert (listing.title, listing.image_url, listing.amount, listing.url, listing.retailer) == (
+        "Black lightning tee & more", "https://store.example/photos/tee.jpg", None, url, "Store")
+    assert listing.result(70)["price"] is None
+    priced = page_listing(page + '<meta property="product:price:amount" content="19.99">'
+                                 '<meta property="product:price:currency" content="usd">', url, "")
+    assert (str(priced.amount), priced.currency, priced.retailer) == ("19.99", "USD", "store.example")
+    # A product record that doesn't say whether it is in stock is still a listing, with its stated price.
+    unknown_stock = product_page("Plain tee").decode().replace('"availability": "https://schema.org/InStock"', '"note": ""')
+    assert not verified_offers(unknown_stock, url, "", set())
+    listed = page_listing(unknown_stock, url, "")
+    assert (listed.title, listed.image_url, str(listed.amount), listed.currency) == (
+        "Plain tee", "https://store.example/product.jpg", "80", "CAD")
+    # Not about one product, sold out, or without a photo: nothing to show.
+    assert page_listing('<meta property="og:type" content="website"><meta property="og:title" content="Tees">'
+                        '<meta property="og:image" content="/logo.png">', url, "") is None
+    assert page_listing(product_page("Sold", availability="OutOfStock").decode(), url, "") is None
+    assert page_listing('<meta property="og:type" content="product"><meta property="og:title" content="Tee">', url, "") is None
+
+
+def test_visual_score_ranks_ahead_of_exact_identity_and_keeps_foreign_currency():
     class Search:
         async def page(self, *_):
             return DiscoveryPage([
-                Hit("https://frankandoak.com/products/example", "frankandoak.com", ""),
+                Hit("https://plain.example/products/example", "plain.example", ""),
                 Hit("https://independent.example/garment/elm", "independent.example", ""),
+                Hit("https://alternate.example/products/branch", "alternate.example", ""),
             ], None, None)
 
     class Rank:
-        async def discover(self, category, tool):
-            return await tool()
-
-        async def rank(self, category, crop, media, photos):
-            return [SimpleNamespace(index=0, same_category=True, score=67),
-                    SimpleNamespace(index=1, same_category=True, score=98)]
+        async def rank(self, category, crop, media, photos, description, attributes):
+            return [
+                Rating(index=0, same_category=True, color=12, cut=19, pattern=14, details=22,
+                       detail_evidence="unclear", product_plain=None, product_text=None),
+                Rating(index=1, same_category=True, color=15, cut=25, pattern=20, details=38,
+                       detail_evidence="match", product_plain=None, product_text=None),
+                Rating(index=2, same_category=True, color=10, cut=20, pattern=14, details=20,
+                       detail_evidence="unclear", product_plain=None, product_text=None),
+            ]
 
     class USDStore(RetailerPages):
         async def get(self, url, mime, limit):
-            if mime == "text/html" and "frankandoak" in url:
+            if mime == "text/html" and "plain.example" in url:
                 return url, product_page("Exact product", code="ELM-5473", currency="USD")
             return await super().get(url, mime, limit)
 
     matcher = OutfitMatcher(Rank(), Search(), RetailerVerifier(USDStore()))
-    _, results = asyncio.run(matcher.match("jacket", CROP, "image/jpeg", ["ELM-5473"], None, None))
+    _, results, _ = asyncio.run(matcher.match("jacket", CROP, "image/jpeg", ["ELM-5473"], None, None, mode="photo"))
     assert [(p["match"], p["visual_score"], p["price"]["currency"]) for p in results] == [
-        ("exact", 67, "USD"), ("similar", 98, "CAD")
+        ("similar", 98, "CAD"), ("exact", 67, "USD")
     ]
+    assert [p["best_match"] for p in results] == [True, False]
 
 
 def test_out_of_stock_unpriced_and_wrong_product_offers_are_rejected():
@@ -154,12 +214,15 @@ def test_out_of_stock_unpriced_and_wrong_product_offers_are_rejected():
     assert not verified_offers(wrong_page, url, "", set())
 
 
-def test_missing_configuration_returns_unavailable_without_alternate_discovery():
+def test_only_the_openai_key_is_needed_and_its_absence_is_reported():
     with TestClient(create_app(Settings(mock=True))) as client:
-        assert client.get("/health").json()["outfit_match"]["ready"] is False
-        reply = client.post("/v1/outfit-match", data={"category": "jacket"}, files={"crop": ("garment.jpg", CROP)})
-        assert reply.status_code == 503
-        assert "TRENDTRACK_API_KEY" in reply.json()["error"]["message"]
+        assert client.get("/health").json()["outfit_match"] == {
+            "ready": False, "currency": "CAD", "discovery": "openai_web_search"}
+        answer = client.post("/v1/outfit-match", data={"category": "jacket"}, files={"crop": ("garment.jpg", CROP)})
+        assert answer.status_code == 503
+        assert answer.json()["error"]["message"] == "Set OPENAI_API_KEY on the FitMix backend."
+    with TestClient(create_app(Settings(mock=True, api_key="fixture"))) as client:
+        assert client.get("/health").json()["outfit_match"]["ready"] is True
 
 
 def test_verified_retailer_fetch_pins_dns_and_rechecks_redirects():
@@ -188,15 +251,12 @@ def test_unverified_or_wrong_category_pages_result_in_an_honest_miss():
                                  SEARCH_ID, None)
 
     class Rank:
-        async def discover(self, category, tool):
-            return await tool()
-
-        async def rank(self, category, crop, media, photos):
+        async def rank(self, category, crop, media, photos, description, attributes):
             return [SimpleNamespace(index=0, same_category=False, score=99)]
 
     matcher = OutfitMatcher(Rank(), Search(), RetailerVerifier(RetailerPages()))
     with TestClient(create_app(Settings(mock=True), outfit=matcher)) as client:
-        response = client.post("/v1/outfit-match", data={"category": "jacket"},
+        response = client.post("/v1/outfit-match", data={"category": "jacket", "mode": "photo"},
                                files={"crop": ("garment.jpg", CROP, "image/jpeg")})
         assert response.status_code == 200
         assert response.json()["status"] == "no_match"

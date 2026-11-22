@@ -11,6 +11,7 @@ struct AvatarProfileView: View {
     var changeAvatar: (SetupStep) -> Void
     var editMetrics: () -> Void
     var openAccount: () -> Void
+    var outfitSelection: [WardrobeItem]? = nil
 
     @Environment(AvatarStore.self) private var store
     @Environment(AuthSession.self) private var auth
@@ -32,16 +33,17 @@ struct AvatarProfileView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Profile")
-                    .font(.fmSerif(38))
-                    .foregroundStyle(Color.fmInk)
-                    .accessibilityAddTraits(.isHeader)
+                FMPageHeading(title: outfitSelection == nil ? "Profile" : "3D Avatar")
                 avatarSection
-                photoSection
-                BodyMetricsCard(edit: editMetrics)
-                if store.homeState == .ready, store.profile.measurementsChangedSinceAvatar { measurementsChanged }
-                accountSection
-                privacy
+                if let outfitSelection {
+                    selectedOutfit(outfitSelection)
+                } else {
+                    BodyMetricsCard(edit: editMetrics)
+                    if store.homeState == .ready, store.profile.measurementsChangedSinceAvatar { measurementsChanged }
+                    photoSection
+                    accountSection
+                    privacy
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 4)
@@ -52,12 +54,15 @@ struct AvatarProfileView: View {
         // a number from 0 to 1 opens it that far down.
         .defaultScrollAnchor(Self.debugScrollAnchor)
         #endif
-        .background(Color.fmBackground.ignoresSafeArea())
-        .navigationTitle("Profile")
+        .background(Color.fmCanvas.ignoresSafeArea())
+        .navigationTitle(outfitSelection == nil ? "Profile" : "3D Avatar")
+        .onAppear {
+            if outfitSelection != nil { show3D = store.model3DURL != nil }
+        }
         .navigationBarTitleDisplayMode(.inline)
         // The page has its own large title; the bar keeps only the back button.
         .toolbar { ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1).accessibilityHidden(true) } }
-        .toolbarBackground(Color.fmBackground, for: .navigationBar)
+        .toolbarBackground(Color.fmCanvas, for: .navigationBar)
         #if DEBUG
         // FM_DEBUG_PROFILE=change-reuse | change-update | review | ask | photo | replace | 3d | build3d takes the
         // matching action straight away ("replace" treats the saved photo as one just picked).
@@ -128,6 +133,22 @@ struct AvatarProfileView: View {
     }
     #endif
 
+    private func selectedOutfit(_ items: [WardrobeItem]) -> some View {
+        AvatarProfileSection(title: "Selected Clothes") {
+            Text("This list shows the clothes in your outfit. Your 3D avatar is shown in its base look.")
+                .font(.subheadline)
+                .foregroundStyle(Color.fmSecondary)
+            if items.isEmpty {
+                Text("No clothes selected").font(.subheadline)
+            }
+            ForEach(items) { item in
+                Label(item.title, systemImage: item.category.garment.symbol)
+                    .font(.subheadline.weight(.medium))
+                    .accessibilityIdentifier("outfit-3d-item-\(item.id.uuidString)")
+            }
+        }
+    }
+
     // MARK: My Avatar
 
     private var avatarSection: some View {
@@ -146,14 +167,14 @@ struct AvatarProfileView: View {
                     Avatar3DView(modelURL: model, placeholder: store.avatarImage)
                         .aspectRatio(2.0 / 3.0, contentMode: .fit)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .frame(maxHeight: 420)
+                        .frame(maxHeight: outfitSelection == nil ? 305 : 420)
                 } else if let portrait = store.avatarImage {
                     // The whole figure in the portrait's own shape: no backdrop bars, nothing cropped.
                     Image(uiImage: portrait)
                         .resizable()
                         .scaledToFit()
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .frame(maxHeight: 420)
+                        .frame(maxHeight: outfitSelection == nil ? 305 : 420)
                         .id(record?.createdAt)
                         .transition(.opacity)
                         .accessibilityLabel("Your full-body avatar portrait")
@@ -179,12 +200,17 @@ struct AvatarProfileView: View {
 
             if let record {
                 Text(show3D && store.profile.model3D != nil ? model3DCaption
-                                                             : "AI-generated portrait. \(record.madeFromText(units: store.profile.units))")
+                                                             : "Your portrait. \(record.madeFromText(units: store.profile.units))")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.fmSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             avatarActions
+            if outfitSelection != nil && store.model3DURL == nil {
+                Text("A 3D model hasn’t been built for this avatar yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.fmSecondary)
+            }
             avatar3DActions
         }
     }
@@ -264,13 +290,20 @@ struct AvatarProfileView: View {
         let profile = store.profile
         return AvatarProfileSection(title: "Original Full-Body Photo") {
             if let photo = store.bodyPhoto {
-                // The photo as it was taken: its own shape, nothing cropped. Tap to see it full screen.
                 Button { showFullPhoto = true } label: {
-                    Image(uiImage: photo)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: 360)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    HStack(spacing: 12) {
+                        Image(uiImage: photo).resizable().scaledToFit()
+                            .frame(width: 55, height: 72)
+                            .background(Color.fmStudio, in: RoundedRectangle(cornerRadius: 8))
+                            .accessibilityHidden(true)
+                        Text("View Original Photo").font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.fmInk)
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .foregroundStyle(Color.fmCobalt).accessibilityHidden(true)
+                    }
+                    .padding(10)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 12))
                 }
                 .buttonStyle(PressableCardStyle())
                 .accessibilityLabel("Your full-body photo")
@@ -356,9 +389,13 @@ struct AvatarProfileView: View {
     /// Height or weight were edited after the avatar was made: offer a new preview, without replacing anything yet.
     private var measurementsChanged: some View {
         VStack(alignment: .leading, spacing: 12) {
-            NoticeRow(tone: .info, text: "Your height or weight changed since this avatar was made. Your current avatar stays until you accept a new one.")
-            Button { changeAvatar(.generate) } label: { Label("Generate a New Preview", systemImage: "sparkles") }
-                .buttonStyle(FMFilledButtonStyle())
+            NoticeRow(tone: .info, text: "Your measurements changed. Preview an avatar using your current height and weight.")
+            Button {
+                changeAvatar(store.profile.readyToGenerate ? .generate : .bodyPhoto)
+            } label: {
+                Label("Update Avatar", systemImage: "sparkles")
+            }
+            .buttonStyle(FMFilledButtonStyle())
         }
         .fmCard(padding: 14)
     }
@@ -390,7 +427,7 @@ struct AvatarProfileView: View {
 
     private var privacy: some View {
         VStack(spacing: 6) {
-            Text("Your photos, measurements, and avatar are stored only on this iPhone. Photos are sent to OpenAI only when you choose to generate an avatar. Your avatar portrait is sent to the FitMix server only when you choose to build its 3D model.")
+            Text("FitMix stores your profile photos, measurements, and avatar on this iPhone. For portrait and outfit previews, FitMix sends the photos you choose through its server to OpenAI. A 3D build uses your portrait on the FitMix server.")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.fmSecondary)
                 .multilineTextAlignment(.center)
@@ -492,19 +529,25 @@ struct PhotoConfirmSheet: View {
 struct BodyMetricsCard: View {
     var edit: () -> Void
     @Environment(AvatarStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         let profile = store.profile
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Body Metrics").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
-                    Text("A cue for your avatar's build").font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Text("Measurements").font(.headline).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    UnitToggle(units: Binding(get: { profile.units }, set: { store.setUnits($0) }))
                 }
-                Spacer()
-                UnitToggle(units: Binding(get: { profile.units }, set: { store.setUnits($0) }))
+                VStack(alignment: .leading) {
+                    Text("Measurements").font(.headline).accessibilityAddTraits(.isHeader)
+                    UnitToggle(units: Binding(get: { profile.units }, set: { store.setUnits($0) }))
+                }
             }
-            HStack(spacing: 10) {
+            let arrangement = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 8))
+                : AnyLayout(HStackLayout(spacing: 10))
+            arrangement {
                 tile(label: "Height", value: heightValue(profile), footnote: heightFootnote(profile))
                 tile(label: "Weight", value: weightValue(profile), footnote: weightFootnote(profile))
             }
@@ -521,12 +564,12 @@ struct BodyMetricsCard: View {
                     Image(systemName: "pencil").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.fmSecondary)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(value.number).font(.system(size: 28, weight: .medium)).foregroundStyle(Color.fmInk)
-                    Text(value.unit).font(.system(size: 14)).foregroundStyle(Color.fmSecondary)
+                    Text(value.number).font(.title2.weight(.medium)).foregroundStyle(Color.fmInk)
+                    Text(value.unit).font(.subheadline).foregroundStyle(Color.fmSecondary)
                 }
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-                Text(footnote).font(.system(size: 12)).foregroundStyle(Color.fmSecondary).lineLimit(1)
+                Text(footnote).font(.caption).foregroundStyle(Color.fmSecondary)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)

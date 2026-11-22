@@ -50,9 +50,25 @@ def test_works_without_a_selfie():
     assert len(images) == 1 and "Only the full-body photo is provided" in prompt and "selfie" not in prompt
 
 
-def test_prompt_keeps_the_build_from_the_photo():
+def test_prompt_targets_entered_measurements_and_uses_the_photo_for_individual_proportions():
     prompt = build_prompt(165, 82, has_selfie=False)
-    assert "without slimming, exaggerating, or reshaping" in prompt and "head to shoes" in prompt
+    assert "entered height of 165 cm and weight of 82 kg as the targets" in prompt
+    assert "head-to-body and torso-to-leg proportions" in prompt
+    assert "Reflect weight relative to height in the silhouette" in prompt
+    assert "Adjust that baseline where needed to reflect the entered measurements" in prompt
+    assert "Match the person's age, face shape, and distinguishing features" in prompt and "head to shoes" in prompt
+
+
+def test_changed_measurements_generate_a_new_portrait_with_the_same_photo():
+    recorder = Recorder()
+    with client(recorder) as c:
+        for height, weight in (("178", "74.3"), ("183", "74.3"), ("183", "90"), ("183", "90")):
+            assert post(c, selfie=False, height=height, weight=weight).status_code == 200
+    assert len(recorder.calls) == 3
+    for (images, prompt), measurements in zip(recorder.calls, ("178 cm and weight of 74.3 kg",
+                                                                "183 cm and weight of 74.3 kg",
+                                                                "183 cm and weight of 90 kg"), strict=True):
+        assert images[0][1] == JPEG and measurements in prompt
 
 
 @pytest.mark.parametrize("height,weight", [("40", "70"), ("170", "900"), ("abc", "70")])

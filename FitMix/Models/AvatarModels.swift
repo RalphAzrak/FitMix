@@ -21,6 +21,10 @@ nonisolated struct AvatarRecord: Codable, Equatable, Sendable {
 }
 
 extension AvatarRecord {
+    func matchesMeasurements(heightCm: Double, weightKg: Double) -> Bool {
+        abs(self.heightCm - heightCm) <= 0.05 && abs(self.weightKg - weightKg) <= 0.05
+    }
+
     /// Says what the portrait was actually made from.
     func madeFromText(units: UnitSystem) -> String {
         let photos = usedSelfie ? "your full-body photo and selfie" : "your full-body photo"
@@ -64,10 +68,15 @@ nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
     var setupStarted: Bool { hasBodyPhoto || hasSelfie || hasMetrics || avatar != nil || candidate != nil }
     var readyToGenerate: Bool { hasBodyPhoto && BodyMeasurements.isValid(heightCm: heightCm, weightKg: weightKg) }
 
+    var hasCurrentCandidate: Bool {
+        guard let candidate, let heightCm, let weightKg else { return false }
+        return candidate.matchesMeasurements(heightCm: heightCm, weightKg: weightKg)
+    }
+
     /// True when height or weight differ from what the accepted avatar was made with.
     var measurementsChangedSinceAvatar: Bool {
         guard let avatar, let heightCm, let weightKg else { return false }
-        return abs(avatar.heightCm - heightCm) > 0.05 || abs(avatar.weightKg - weightKg) > 0.05
+        return !avatar.matchesMeasurements(heightCm: heightCm, weightKg: weightKg)
     }
 
     init() {}

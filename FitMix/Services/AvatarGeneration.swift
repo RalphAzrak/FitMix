@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import OSLog
 import ImageIO
 
 /// Where the FitMix backend is. The backend holds the OpenAI key; the app never does.
@@ -40,6 +42,7 @@ nonisolated struct AvatarGenerationRequest: Sendable {
     var selfie: Data?
     var heightCm: Double
     var weightKg: Double
+    var regenerate = false
 }
 
 nonisolated enum AvatarGenerationError: LocalizedError, Equatable {
@@ -83,6 +86,17 @@ nonisolated protocol AvatarGenerating: Sendable {
 nonisolated struct BackendAvatarGenerator: AvatarGenerating {
     var config: BackendConfig?
     var session: URLSession = BackendAvatarGenerator.makeSession()
+    var ownerID: UUID? = nil
+
+    private static let installScope: String = {
+        let key = "fitmix.imagePreviewScope"
+        if let saved = UserDefaults.standard.string(forKey: key) { return saved }
+        let value = UUID().uuidString
+        UserDefaults.standard.set(value, forKey: key)
+        return value
+    }()
+
+    private static let catalogResults = CatalogPreviewCache()
 
     static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral   // nothing about the request is cached on disk
@@ -106,18 +120,21 @@ nonisolated struct BackendAvatarGenerator: AvatarGenerating {
         var form = MultipartForm()
         form.add(file: request.bodyPhoto, name: "body_photo", fileName: "body.jpg", type: "image/jpeg")
         if let selfie = request.selfie { form.add(file: selfie, name: "selfie", fileName: "selfie.jpg", type: "image/jpeg") }
-        form.add(value: String(format: "%.1f", request.heightCm), name: "height_cm")
-        form.add(value: String(format: "%.1f", request.weightKg), name: "weight_kg")
+        let requestLocale = Locale(identifier: "en_US_POSIX")
+        form.add(value: String(format: "%.1f", locale: requestLocale, request.heightCm), name: "height_cm")
+        form.add(value: String(format: "%.1f", locale: requestLocale, request.weightKg), name: "weight_kg")
+        if request.regenerate { form.add(value: "true", name: "regenerate") }
 
         return try await uploadImage(form, endpoint: "v1/avatar").0
     }
 
-    func style(portrait: Data, garments: [(AvatarOutfitSlot, Data)]) async throws -> Data {
+    func style(portrait: Data, garments: [(AvatarOutfitSlot, Data)], regenerate: Bool = false) async throws -> Data {
         var form = MultipartForm()
         form.add(file: portrait, name: "portrait", fileName: "portrait.jpg", type: "image/jpeg")
         for (slot, data) in garments {
             form.add(file: data, name: slot.rawValue, fileName: "\(slot.rawValue).jpg", type: "image/jpeg")
         }
+        if regenerate { form.add(value: "true", name: "regenerate") }
         let (data, response) = try await uploadImage(form, endpoint: "v1/avatar-outfit")
         guard response.value(forHTTPHeaderField: "X-FitMix-Mock") != "1" else {
             throw AvatarGenerationError.service("This FitMix server is in test mode. A live server is needed to preview your outfit.")
@@ -125,16 +142,51 @@ nonisolated struct BackendAvatarGenerator: AvatarGenerating {
         return data
     }
 
+    func catalogPhoto(_ photo: Data) async throws -> WardrobeCatalogPhoto {
+        let key = (config?.baseURL.absoluteString ?? "") + (ownerID?.uuidString ?? "")
+            + SHA256.hash(data: photo).description
+        if let cached = await Self.catalogResults.photo(for: key) { return cached }
+        var form = MultipartForm()
+        form.add(file: photo, name: "photo", fileName: "garment.jpg", type: "image/jpeg")
+        let (data, response) = try await upload(form, endpoint: "v1/wardrobe-photo", accept: "image/*")
+        if response.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("image/") == true {
+            let category = response.value(forHTTPHeaderField: "X-FitMix-Wardrobe-Category").flatMap(WardrobeCategory.init(rawValue:))
+            let result = WardrobeCatalogPhoto(category: category, image: data, message: nil)
+            if CGImageSourceCreateWithData(data as CFData, nil) != nil {
+                await Self.catalogResults.remember(result, for: key)
+            }
+            return result
+        }
+        guard let result = try? JSONDecoder().decode(WardrobeCatalogPhoto.self, from: data) else {
+            throw AvatarGenerationError.invalidResponse
+        }
+        if let image = result.image, CGImageSourceCreateWithData(image as CFData, nil) != nil {
+            await Self.catalogResults.remember(result, for: key)
+        }
+        return result
+    }
+
     private func uploadImage(_ form: MultipartForm, endpoint: String) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await upload(form, endpoint: endpoint)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { throw AvatarGenerationError.invalidResponse }
+        return (data, response)
+    }
+
+    private func upload(_ form: MultipartForm, endpoint: String, accept: String? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let config else { throw AvatarGenerationError.notConfigured }
         var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent(endpoint))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue(accept, forHTTPHeaderField: "Accept")
+        let scope = Self.installScope + (ownerID?.uuidString ?? "")
+        let digest = SHA256.hash(data: Data(scope.utf8)).description
+        urlRequest.setValue(digest, forHTTPHeaderField: "X-FitMix-Image-Scope")
         if let token = config.token, !token.isEmpty { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await session.upload(for: urlRequest, from: form.finished())
+            (data, response) = try await session.upload(for: urlRequest, from: form.finished(),
+                                                        delegate: ImageRequestMetrics(endpoint: endpoint))
         } catch let error as URLError {
             switch error.code {
             case .cancelled: throw CancellationError()
@@ -150,10 +202,45 @@ nonisolated struct BackendAvatarGenerator: AvatarGenerating {
             if let failure = try? JSONDecoder().decode(Failure.self, from: data) { throw AvatarGenerationError.service(failure.error.message) }
             throw AvatarGenerationError.invalidResponse
         }
-        // Only hand back something that really is a picture.
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
-              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { throw AvatarGenerationError.invalidResponse }
         return (data, http)
+    }
+}
+
+private actor CatalogPreviewCache {
+    private var entries: [(key: String, photo: WardrobeCatalogPhoto, expiry: ContinuousClock.Instant)] = []
+
+    func photo(for key: String) -> WardrobeCatalogPhoto? {
+        let now = ContinuousClock.now
+        entries.removeAll { $0.expiry <= now }
+        return entries.first { $0.key == key }?.photo
+    }
+
+    func remember(_ photo: WardrobeCatalogPhoto, for key: String) {
+        guard let size = photo.image?.count, size <= 2_000_000 else { return }
+        entries.removeAll { $0.key == key }
+        entries.append((key, photo, .now.advanced(by: .seconds(600))))
+        if entries.count > 4 { entries.removeFirst() }
+    }
+}
+
+private nonisolated final class ImageRequestMetrics: NSObject, URLSessionTaskDelegate {
+    private static let log = Logger(subsystem: "app.fitmix", category: "ImagePreviews")
+    let endpoint: String
+
+    init(endpoint: String) { self.endpoint = endpoint }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let transaction = metrics.transactionMetrics.last else { return }
+        let upload = Self.ms(from: transaction.requestStartDate, to: transaction.requestEndDate)
+        let wait = Self.ms(from: transaction.requestEndDate, to: transaction.responseStartDate)
+        let download = Self.ms(from: transaction.responseStartDate, to: transaction.responseEndDate)
+        let server = (task.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Server-Timing") ?? ""
+        Self.log.info("\(self.endpoint, privacy: .public) upload \(upload) ms, server wait \(wait) ms, download \(download) ms \(server, privacy: .public)")
+    }
+
+    private static func ms(from start: Date?, to end: Date?) -> Int {
+        guard let start, let end else { return 0 }
+        return Int(max(0, end.timeIntervalSince(start) * 1000))
     }
 }
 

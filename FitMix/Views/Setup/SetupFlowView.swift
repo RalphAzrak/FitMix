@@ -301,7 +301,7 @@ struct MeasurementsStepView: View {
 
     var body: some View {
         StepScaffold(title: "Height and weight",
-                     subtitle: "Used alongside your photo as a cue for your overall build. Change them any time without retaking photos.") {
+                     subtitle: "FitMix uses these measurements and your photo to shape your avatar’s proportions.") {
             if loaded {
                 MetricsForm(heightCm: $heightCm, weightKg: $weightKg, units: $units).fmCard()
             }
@@ -350,7 +350,7 @@ struct GenerateStepView: View {
         }
         // A new portrait has arrived: move on to reviewing it.
         .onChange(of: store.profile.candidate) { old, new in
-            if let new, new != old { onDone() }
+            if new != old, store.profile.hasCurrentCandidate { onDone() }
         }
         #if DEBUG
         .onAppear {
@@ -370,7 +370,7 @@ struct GenerateStepView: View {
             }
             VStack(alignment: .leading, spacing: 12) {
                 Eyebrow(text: "What will be sent")
-                sentRow(image: store.bodyThumbnail ?? store.bodyPhoto, icon: "figure.stand", title: "Full-body photo", detail: "The main reference for your build")
+                sentRow(image: store.bodyThumbnail ?? store.bodyPhoto, icon: "figure.stand", title: "Full-body photo", detail: "For your likeness and individual proportions")
                 if profile.hasSelfie {
                     sentRow(image: store.selfie, icon: "face.smiling", title: "Selfie", detail: "For facial detail")
                 } else {
@@ -382,7 +382,7 @@ struct GenerateStepView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("FitMix sends these to its avatar service, which passes them to OpenAI to create the image. Location and other camera details are removed first.")
-                Text("FitMix's service doesn't keep your photos. OpenAI handles them under its own data policy.")
+                Text("FitMix briefly keeps completed previews in memory so you can reuse them. OpenAI handles photos under its own data policy.")
                 Text(profile.avatar == nil ? "The portrait is saved only on this iPhone."
                                            : "The portrait is saved only on this iPhone. Your current avatar stays until you accept a new one.")
             }
@@ -464,8 +464,10 @@ struct ReviewStepView: View {
     @Environment(AvatarStore.self) private var store
 
     var body: some View {
-        StepScaffold(title: "Review your avatar", subtitle: "An AI-generated portrait of you.") {
-            if let portrait = store.candidateImage {
+        StepScaffold(title: "Review your avatar", subtitle: "Check your portrait before you use it.") {
+            if !store.profile.hasCurrentCandidate {
+                NoticeRow(tone: .info, text: "Generate a preview using your current height and weight.")
+            } else if let portrait = store.candidateImage {
                 Image(uiImage: portrait)
                     .resizable()
                     .scaledToFit()
@@ -475,7 +477,7 @@ struct ReviewStepView: View {
             } else {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 300)
             }
-            if let record = store.profile.candidate {
+            if store.profile.hasCurrentCandidate, let record = store.profile.candidate {
                 Text(record.madeFromText(units: store.profile.units))
                     .font(.system(size: 14))
                     .foregroundStyle(Color.fmSecondary)
@@ -488,7 +490,7 @@ struct ReviewStepView: View {
                 if store.acceptCandidate() { onAccepted() }
             }
             .buttonStyle(FMFilledButtonStyle())
-            .disabled(store.candidateImage == nil)
+            .disabled(!store.profile.hasCurrentCandidate || store.candidateImage == nil)
             HStack(spacing: 10) {
                 Button("Regenerate", action: regenerate).buttonStyle(FMOutlineButtonStyle())
                 Button("Change Photos", action: changePhotos).buttonStyle(FMOutlineButtonStyle())

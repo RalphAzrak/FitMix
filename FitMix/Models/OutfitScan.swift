@@ -115,10 +115,13 @@ struct CatalogProduct: Identifiable, Hashable {
     }
 
     var visualMatchLabel: String {
-        visualScore.map { "\(matchLabel) · \($0)% visual match" } ?? matchLabel
+        if bestMatch { return "Best match" }
+        if visualScore != nil { return "Similar item" }
+        return match == .similar ? "Similar item" : matchLabel
     }
 
     var visualScore: Int? = nil
+    var bestMatch = false
     let id: String
     let name: String
     let brand: String?
@@ -139,7 +142,7 @@ struct CatalogProduct: Identifiable, Hashable {
 
     init(id: String, name: String, brand: String? = nil, retailer: String? = nil, category: GarmentCategory, match: Match,
          image: ProductImage? = nil, price: Price? = nil, sizes: [String] = [], retailerURL: URL? = nil, isFixture: Bool = false,
-         evidence: [String] = [], visualScore: Int? = nil) {
+         evidence: [String] = [], visualScore: Int? = nil, bestMatch: Bool = false) {
         self.id = id
         self.name = name
         self.brand = brand
@@ -153,6 +156,7 @@ struct CatalogProduct: Identifiable, Hashable {
         self.isFixture = isFixture
         self.evidence = evidence
         self.visualScore = visualScore
+        self.bestMatch = bestMatch
     }
 }
 

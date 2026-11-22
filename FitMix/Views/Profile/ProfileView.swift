@@ -25,10 +25,7 @@ struct ProfileView: View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    Text("Profile")
-                        .font(.fmDisplay(34, relativeTo: .largeTitle))
-                        .foregroundStyle(AuthPalette.onSurface)
-                        .accessibilityAddTraits(.isHeader)
+                    FMPageHeading(title: "Account")
 
                     if let user = auth.user { AccountCard(user: user) }
                     TryOnPhotoCard()
@@ -86,7 +83,7 @@ struct ProfileView: View {
                 .padding(.bottom, 40)
             }
             .defaultScrollAnchor(ProfileView.debugScrollToBottom ? .bottom : .top)
-            .background(AuthPalette.surface.ignoresSafeArea())
+            .background(Color.fmCanvas.ignoresSafeArea())
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark") }
@@ -94,7 +91,7 @@ struct ProfileView: View {
                         .accessibilityIdentifier("profileClose")
                 }
             }
-            .navigationTitle("Profile")
+            .navigationTitle("Account")
             .toolbarTitleDisplayMode(.inline)
             .toolbar(removing: .title)
             .navigationDestination(for: ProfileRoute.self) { route in

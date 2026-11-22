@@ -7,7 +7,8 @@
 - `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
   server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
   labeled "exact", "brand" or "similar" (see visual_search.py).
-- `POST /v1/outfit-match`: Studio's OpenAI-orchestrated image-first product search.
+- `POST /v1/outfit-match`: Studio's product search. OpenAI searches the web from the garment's photo and
+  description, and this server reads the pages it finds and ranks them by their photos (see outfit_match.py).
 - `POST /v1/lens-search`: legacy compatibility route for older app builds. This server asks Google
   Lens (via Scrappa) for visual matches and returns the best credible retailer listing, labeled "similar"
   (see lens_search.py). Cached, de-duplicated and capped per month.
@@ -26,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import openai
@@ -36,9 +37,11 @@ from fastapi.responses import JSONResponse, Response
 
 from . import avatar3d
 from .mock import placeholder_png
-from .outfit_match import OpenAIVisualSearch, OutfitMatcher, TrendtrackImageSearch
+from .image_results import ImageResult, ImageResults, image_key
+from .outfit_match import (MAX_PER_STORE, OpenAIVisualSearch, OpenAIWebSearch, OutfitMatcher, SearchMode,
+                           WardrobeIdentification, brand_key)
 from .retailer_product import CURRENCY, price
-from .prompt import build_outfit_prompt, build_prompt
+from .prompt import build_catalog_prompt, build_outfit_prompt, build_prompt
 from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
 from .providers import CropHost, EbayProvider, FixtureProvider, ScrappaLensProvider
@@ -65,10 +68,11 @@ FALLBACK_MODEL = "gpt-image-2"
 @dataclass(frozen=True)
 class Settings:
     api_key: str = field(default="", repr=False)
-    trendtrack_api_key: str = field(default="", repr=False)
     model: str = "gpt-image-2.6-sunburst"
+    preview_model: str = "gpt-image-2.6-flare"
     matching_model: str = "gpt-4.1-mini"
     quality: str = "medium"
+    preview_quality: str = "low"
     size: str = "1024x1536"
     timeout_seconds: float = 240.0
     app_token: str = field(default="", repr=False)
@@ -98,10 +102,11 @@ class Settings:
         env = os.environ
         return Settings(
             api_key=env.get("OPENAI_API_KEY", "").strip(),
-            trendtrack_api_key=env.get("TRENDTRACK_API_KEY", "").strip(),
             model=env.get("OPENAI_IMAGE_MODEL", "").strip() or Settings.model,
+            preview_model=env.get("FITMIX_PREVIEW_IMAGE_MODEL", "").strip() or Settings.preview_model,
             matching_model=env.get("OPENAI_MATCH_MODEL", "").strip() or Settings.matching_model,
             quality=env.get("OPENAI_IMAGE_QUALITY", "").strip() or Settings.quality,
+            preview_quality=env.get("FITMIX_PREVIEW_IMAGE_QUALITY", "").strip() or Settings.preview_quality,
             size=env.get("OPENAI_IMAGE_SIZE", "").strip() or Settings.size,
             timeout_seconds=float(env.get("OPENAI_TIMEOUT_SECONDS", "") or Settings.timeout_seconds),
             app_token=env.get("FITMIX_APP_TOKEN", "").strip(),
@@ -136,6 +141,10 @@ class Generator(Protocol):
     async def generate(self, images: list[ImageFile], prompt: str) -> bytes: ...
 
 
+class WardrobeAnalyzing(Protocol):
+    async def identify_wardrobe_item(self, photo: bytes, media: str) -> WardrobeIdentification: ...
+
+
 class MockGenerator:
     """Returns a placeholder picture after a short pause. Nothing leaves this machine."""
 
@@ -145,8 +154,9 @@ class MockGenerator:
 
 
 class OpenAIGenerator:
-    def __init__(self, settings: Settings, client: openai.AsyncOpenAI | None = None):
+    def __init__(self, settings: Settings, client: openai.AsyncOpenAI | None = None, *, jpeg: bool = False):
         self.settings = settings
+        self.jpeg = jpeg
         self.client = client or openai.AsyncOpenAI(api_key=settings.api_key, timeout=settings.timeout_seconds, max_retries=1)
 
     async def generate(self, images: list[ImageFile], prompt: str) -> bytes:
@@ -182,7 +192,7 @@ class OpenAIGenerator:
         return base64.b64decode(encoded)
 
     async def _edit(self, model: str, images: list[ImageFile], prompt: str):
-        options = {}
+        options = {"output_format": "jpeg", "output_compression": 90} if self.jpeg else {}
         if model.startswith("gpt-image-1.5"):
             options["input_fidelity"] = "high"  # keeps faces closer to the reference; newer models do this themselves
         return await self.client.images.edit(model=model, image=images, prompt=prompt, size=self.settings.size,
@@ -238,7 +248,8 @@ def default_lens_search(settings: Settings, crop_host: CropHost, enricher: Enric
 def create_app(settings: Settings | None = None, generator: Generator | None = None,
                providers: list[VisualProvider] | None = None, enricher: Enricher | None = None,
                crop_host: CropHost | None = None, lens: LensSearch | None = None,
-               builder: avatar3d.Builder | None = None, outfit: OutfitMatcher | None = None) -> FastAPI:
+               builder: avatar3d.Builder | None = None, outfit: OutfitMatcher | None = None,
+               wardrobe_analysis: WardrobeAnalyzing | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
     if builder is None:
         builder = avatar3d.MockBuilder() if settings.mock else avatar3d.ScriptBuilder()
@@ -255,10 +266,29 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     if enricher is None and settings.listing_enrichment:
         enricher = ListingEnricher()
     lens = lens or default_lens_search(settings, crop_host, enricher)
-    outfit = outfit or OutfitMatcher(
-        OpenAIVisualSearch(settings.api_key, settings.matching_model) if settings.api_key else None,
-        TrendtrackImageSearch(settings.trendtrack_api_key) if settings.trendtrack_api_key else None,
-    )
+    if outfit is None:
+        analysis = OpenAIVisualSearch(settings.api_key, settings.matching_model) if settings.api_key else None
+        outfit = OutfitMatcher(analysis, OpenAIWebSearch(analysis) if analysis else None, per_store=MAX_PER_STORE)
+    if wardrobe_analysis is None and not settings.mock and isinstance(outfit.analysis, OpenAIVisualSearch):
+        wardrobe_analysis = outfit.analysis
+    if isinstance(generator, OpenAIGenerator):
+        preview_settings = replace(settings, model=settings.preview_model, quality=settings.preview_quality)
+        preview_generator = OpenAIGenerator(preview_settings, client=generator.client, jpeg=True)
+        catalog_generator = OpenAIGenerator(replace(preview_settings, size="1024x1024"), client=generator.client, jpeg=True)
+    else:
+        preview_generator = catalog_generator = generator
+    image_results = ImageResults()
+
+    def scoped_image_key(request: Request, operation: str, prompt: str, images: list[ImageFile]) -> bytes:
+        client = request.client.host if request.client else "unknown"
+        scope = request.headers.get("X-FitMix-Image-Scope", "")[:128] or client
+        return image_key(scope, operation, prompt, images)
+
+    async def render_image(generator: Generator, images: list[ImageFile], prompt: str) -> ImageResult:
+        start = time.perf_counter()
+        picture = await generator.generate(images, prompt)
+        return ImageResult(picture, generation_ms=(time.perf_counter() - start) * 1000)
+
     app = FastAPI(title="FitMix backend", docs_url=None, redoc_url=None, openapi_url=None)
     recent: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -307,7 +337,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
                 "avatar3d_ready": builder.ready,
                 "match_ready": bool(providers), "match_providers": [p.name for p in providers],
                 "match_skipped": skipped, "lens_search": lens.status(),
-                "outfit_match": {"ready": outfit.ready, "currency": CURRENCY, "discovery": "trendtrack"}}
+                "outfit_match": {"ready": outfit.ready, "currency": CURRENCY, "discovery": "openai_web_search"}}
 
     @app.get("/v1/crops/{token}.jpg")
     async def crop_for_provider(token: str):
@@ -402,11 +432,15 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     async def outfit_match(
         category: str = Form(...), crop: UploadFile | None = File(None), text: str = Form(""),
         search_id: str | None = Form(None), max_price: str | None = Form(None),
+        brand: str = Form(""), mode: SearchMode = Form("combined"),
         _: str = Depends(authorize_match),
     ):
         if category not in CATEGORIES:
             raise ApiError(400, "invalid_category", "Choose a jacket, T-shirt, pants or shoes.")
         cap = price(max_price)
+        brand = brand.strip()
+        if len(brand) > 80 or (brand and not brand_key(brand)):
+            raise ApiError(400, "invalid_brand", "Enter a brand name of up to 80 characters.")
         if bool(crop) == bool(search_id) or (search_id and (len(search_id) != 32 or cap is None)):
             raise ApiError(400, "invalid_request", "Send a garment crop or a valid budget search.")
         data = await crop.read(MAX_CROP_BYTES + 1) if crop else b""
@@ -418,7 +452,9 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         started = time.monotonic()
         try:
             async with asyncio.timeout(60):
-                search_id, results = await outfit.match(category, data, media, text[:500].split(",")[:12], search_id, cap)
+                search_id, results, description = await outfit.match(
+                    category, data, media, text[:500].split(",")[:12], search_id, cap, mode=mode, brand=brand,
+                )
         except TimeoutError:
             raise ApiError(504, "provider_timeout", "Garment matching took too long. Try again.") from None
         except ProviderError as error:
@@ -427,14 +463,18 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             raise ApiError(status, error.code, error.message) from None
         log.info("outfit %s: %d listings in %.2fs", category, len(results), time.monotonic() - started)
         return JSONResponse({"status": "matched" if results else "no_match", "currency": CURRENCY,
-                             "search_id": search_id, "results": results}, headers={"Cache-Control": "no-store"})
+                             "search_id": search_id, "description": description.summary() if description else None,
+                             "garment_label": description.label() if description else None,
+                             "results": results}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(
+        request: Request,
         body_photo: UploadFile = File(...),
         selfie: UploadFile | None = File(None),
         height_cm: float = Form(...),
         weight_kg: float = Form(...),
+        regenerate: bool = Form(False),
         _: str = Depends(authorize),
     ):
         if generator is None:
@@ -451,23 +491,29 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
         started = time.monotonic()
         log.info("avatar %s: %d image(s), %d KB", request_id, len(images), sum(len(i[1]) for i in images) // 1024)
         try:
-            picture = await generator.generate(images, prompt)
+            rendered, disposition = await image_results.get(
+                scoped_image_key(request, "avatar", prompt, images),
+                lambda: render_image(generator, images, prompt), regenerate=regenerate,
+            )
         except ApiError as error:
             log.info("avatar %s: failed (%s) after %.1fs", request_id, error.code, time.monotonic() - started)
             raise
         log.info("avatar %s: done in %.1fs", request_id, time.monotonic() - started)
-        return Response(content=picture, media_type=_media_type(picture) or "image/png", headers={"Cache-Control": "no-store"})
+        return Response(content=rendered.image, media_type=_media_type(rendered.image) or "image/png",
+                        headers=rendered.headers(disposition))
 
     @app.post("/v1/avatar-outfit")
     async def style_avatar(
+        request: Request,
         portrait: UploadFile = File(...),
         tshirt: UploadFile | None = File(None),
         pants: UploadFile | None = File(None),
         shoes: UploadFile | None = File(None),
         outerwear: UploadFile | None = File(None),
+        regenerate: bool = Form(False),
         _: str = Depends(authorize),
     ):
-        if generator is None:
+        if preview_generator is None:
             raise ApiError(503, "not_configured", "Outfit previews aren't configured on the FitMix server.")
         selected = [(slot, upload) for slot, upload in (
             ("tshirt", tshirt), ("pants", pants), ("shoes", shoes), ("outerwear", outerwear)
@@ -476,9 +522,55 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             raise ApiError(400, "empty_outfit", "Add at least one garment to preview the outfit.")
         images = [await _read_image(portrait, "avatar portrait", "portrait")]
         images.extend([await _read_image(upload, slot, slot) for slot, upload in selected])
-        picture = await generator.generate(images, build_outfit_prompt([slot for slot, _ in selected]))
-        return Response(content=picture, media_type=_media_type(picture) or "image/png",
-                        headers={"Cache-Control": "no-store", "X-FitMix-Mock": "1" if settings.mock else "0"})
+        prompt = build_outfit_prompt([slot for slot, _ in selected])
+        rendered, disposition = await image_results.get(
+            scoped_image_key(request, "outfit", prompt, images),
+            lambda: render_image(preview_generator, images, prompt), regenerate=regenerate,
+        )
+        headers = rendered.headers(disposition)
+        headers["X-FitMix-Mock"] = "1" if settings.mock else "0"
+        return Response(content=rendered.image, media_type=_media_type(rendered.image) or "image/png", headers=headers)
+
+    @app.post("/v1/wardrobe-photo")
+    async def wardrobe_photo(request: Request, photo: UploadFile = File(...), regenerate: bool = Form(False),
+                             _: str = Depends(authorize)):
+        if wardrobe_analysis is None or catalog_generator is None:
+            raise ApiError(503, "not_configured", "Photo polishing isn't set up on this FitMix server.")
+        image = await _read_image(photo, "clothing photo", "garment")
+
+        async def prepare_catalog() -> ImageResult:
+            started = time.perf_counter()
+            try:
+                identified = await wardrobe_analysis.identify_wardrobe_item(image[1], image[2])
+            except ProviderError as error:
+                raise ApiError(504 if error.code == "provider_timeout" else 502, error.code,
+                               "FitMix couldn't identify the garment. Choose its category or try again.") from None
+            classification_ms = (time.perf_counter() - started) * 1000
+            if not identified.clear_subject:
+                return ImageResult(None, message="Try a photo with a single item or one pair of shoes.",
+                                   classification_ms=classification_ms)
+            try:
+                rendered = await render_image(catalog_generator, [image], build_catalog_prompt(identified.category))
+                if _media_type(rendered.image) is None:
+                    raise ApiError(502, "upstream_empty", "The service didn't return a usable photo.")
+                return replace(rendered, category=identified.category, classification_ms=classification_ms)
+            except ApiError as error:
+                log.info("wardrobe photo polish failed (%s)", error.code)
+                return ImageResult(None, category=identified.category,
+                                   message="Couldn't polish this photo. Try again or use your original.",
+                                   classification_ms=classification_ms)
+
+        result, disposition = await image_results.get(
+            scoped_image_key(request, "catalog", "", [image]), prepare_catalog, regenerate=regenerate,
+        )
+        headers = result.headers(disposition)
+        if result.image and request.headers.get("accept") == "image/*":
+            if result.category:
+                headers["X-FitMix-Wardrobe-Category"] = result.category
+            return Response(content=result.image, media_type=_media_type(result.image), headers=headers)
+        return JSONResponse({"category": result.category,
+                             "image": base64.b64encode(result.image).decode("ascii") if result.image else None,
+                             "message": result.message}, headers=headers)
 
     def build_state(job: avatar3d.Job) -> dict:
         return {"job": job.id, "status": job.status, "stage": job.stage, "progress": job.progress,
@@ -528,7 +620,9 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     return app
 
 
-def _media_type(data: bytes) -> str | None:
+def _media_type(data: bytes | None) -> str | None:
+    if not data:
+        return None
     if data[:3] == b"\xff\xd8\xff":
         return "image/jpeg"
     if data[:8] == b"\x89PNG\r\n\x1a\n":

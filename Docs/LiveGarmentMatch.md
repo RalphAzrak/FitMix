@@ -21,11 +21,11 @@ the visible garments.
    - When the tracked person isn't matched for 0.45 s (they left), or 0.25 s while someone else is in view
      (the scanner switched subjects), all targets are cleared at once.
    - A new framing hint must hold for 3 analyzed frames before it replaces the one shown.
-4. **Tap**. Studio uses the target’s exact source image and highlight rectangle. The preview crop
-   matches that rectangle. For product search, the analyzer can choose a sharper crop of the same
-   garment from earlier, unexpired snapshots of the tracked subject.
-5. **Studio**. The tapped garment is selected. Each visible garment starts its own lookup and updates
-   as results arrive. Opening a new scan cancels the old searches.
+4. **Tap**. Studio uses the target's captured frame and highlight rectangle. The crop it displays
+   is the crop used for the search. **Refine Search** lets the user adjust that rectangle on the same frame.
+5. **Studio**. Every detected garment starts a lookup, the tapped one first, so each garment's box
+   shows the product chosen for it. The boxes are full width and stacked, with the product photo large.
+   Opening a new scan cancels the old searches.
 6. **Search**. `POST /v1/outfit-match` takes one garment crop per request as JPEG up to 640 px on
    the long edge, with its category and text read on the phone. The full outfit frame and avatar
    stay on the phone during product search.
@@ -49,27 +49,16 @@ A person-instance mask refines them when most of the subject's pose probes agree
 If another pose shares the label, the mask is discarded and pose bounds still work. Mask requests
 are paced, with brief reuse when the visible joints stay aligned.
 
-Skin is the reference for telling garments from bare body. It is sampled on the cheek, or on the back of a hand
-when something covers the face, and only used if it falls in a plausible skin-colour range. Without a
-reference, skin-coloured samples count as bare.
+Skin is sampled on the cheek or the back of a hand. Only samples in a plausible skin-colour range are used.
 
-- **Jacket and T-shirt.** The image classifier and torso colour samples identify likely jackets, short
-  sleeves, and contrasting inner layers. An inner shirt under an open jacket gets its own narrower target.
-  A clear top is also tappable when both torso side panels are the same fabric and neither they nor the chest
-  look like skin, so long sleeves and faces out of frame still work. Close framing that cuts off the hips
-  estimates them from the shoulders (1.45 shoulder widths down) while the chest is in view. A torso that looks
-  bare is never a T-shirt, however the arms read.
-- **Pants.** Hip, knee, and ankle landmarks set the region. With the ankles out of frame, hips and a knee are
-  enough (waist-to-knee): the box runs to the bottom of the frame. Thigh, above-knee and shin samples must not
-  look like skin, so shorts and bare legs are rejected. The classifier ("jeans") is asked only when colour
-  can't tell: the leg isn't one garment, a gray leg has no skin to compare with (it needs 0.5), or only one
-  thigh is visible without a skin reference.
-- **Shoes.** Ankles and leg length set the region. Vision's labels are hierarchical ("footwear" covers socks),
-  so only shoe labels count (shoes, sneaker, boot, high heel, sandal, loafer), at 0.1 or more. When the tight
-  crop scores sock but no shoe, a wider crop with the lower legs is classified, because dark shoes under dark
-  trousers read as socks when cropped tight. Feet whose colour is skin are rejected unless a shoe label
-  reaches 0.3 (sandals). When the feet run off the bottom of the frame, the Camera says **Feet are cut off.
-  Step back or tilt down to include the shoes.**
+- **Jacket and T-shirt.** Colour samples and the classifier identify sleeves and layers. An inner shirt
+  under an open jacket gets its own target. Close framing can estimate the hips from the shoulders. A
+  visible torso can still yield a lower-confidence top when the sleeve and fabric cues disagree.
+- **Pants.** Hip, knee, and ankle landmarks set the crop, extending to the frame edge when the legs are
+  cut off. When fabric covers the thighs and the lower legs look bare, the crop can stop near the knees
+  to capture shorts. The classifier helps distinguish skin-coloured trousers and gray fabric from bare legs.
+- **Shoes.** Ankles set the region and Vision checks for shoe labels. Where dark shoes resemble socks,
+  the classifier examines a broader crop. The camera asks for wider framing when the feet are cut off.
 - **Optional Core ML detector.** When `GarmentDetector.mlmodelc` is bundled, it can refine boxes for
   the locked pose. A box shared with another pose is discarded. The project ships without this model.
 
@@ -115,7 +104,7 @@ matching chroma, and a dark T-shirt under a black jacket is still separated, by 
 (vision / classify) and how long each garment took to become tappable after the person appeared. The same numbers are
 `app.fitmix` signposts ("analyze frame", "tappable") in Instruments.
 
-## Detection check (22 Nov 2026, Mac, no iPhone)
+## Upstream detection check (22 Nov 2026, Mac, no iPhone)
 
 The detector and analyzer source files were compiled into a Mac harness. The harness fed 1080×1920 portrait frames,
 built from openly licensed photos and crops of them, through `LiveGarmentAnalyzer` at 30 fps. Frames arrived as
@@ -156,16 +145,23 @@ shoes (no suitable photo was found), and several people in view.
 
 ## Product match
 
-Studio sends the clearest eligible crop for each garment using up to four recent snapshots. Each
-crop goes to `POST /v1/outfit-match` independently. OpenAI invokes Trendtrack’s image search with the actual
-crop, then compares the crop against the retailer photos. The score uses color, cut, pattern and distinctive
-details. A verified retailer code matching a visible code earns **Exact match**. Otherwise Studio shows the
-highest-scoring credible listing as **Similar match**. **More matches** opens the alternatives. Changing the listing also updates
-the selected-product summary and shopping review.
+Studio sends the crop from the selected garment, never the outfit frame. The backend searches the
+web with OpenAI, once from the crop and once from a description of it (garment type, color and
+pattern together, plus print and lettering). There is no store list. FitMix reads each page found
+for its title, photo and, when stated, price, then compares the product photo with the crop.
+Every result must meet the visual score cutoff. A different color, pattern, closure, or
+lettering rules a listing out. Studio shows **Best match** for strong evidence,
+**Similar item** for other qualified listings, and **No close match found** when none qualify.
+Every result has its product photo, sent along by the backend. A store page that couldn't be read has
+no photo to compare and is not listed. Every result for the selected garment is listed under the
+garment cards. Tapping one puts it on the card, and **Try on** shows it on the user's avatar.
+A listing whose page states no price shows **Price unavailable**. The scan label comes from
+the detected garment, including **Quarter-zip** when the crop supports it. **Refine Search**
+adjusts the crop or applies a brand filter.
 
-**Budget** sets one cap in CAD. Studio maximizes the number of included garments and then total
-visual similarity. When necessary it searches for lower-priced alternatives using the original
-garment descriptions. An over-budget swap is blocked before it changes the look.
+**Set Outfit Budget** appears above the Studio preview with presets and a custom amount in CAD.
+Studio maximizes the number of included garments and then total
+visual similarity, using listings that state a CAD price. An over-budget swap is blocked before it changes the look.
 
 See [backend setup and iPhone test](../Backend/README.md#studio-outfit-matching) for endpoint and
 deployment details. The Xcode console category `OutfitMatching` reports first card and settled times.
@@ -189,7 +185,7 @@ deployment details. The Xcode console category `OutfitMatching` reports first ca
 
 - Real time-to-tappable and frame cost (`FM_DEBUG_PERF_HUD=1`), and stable targets while moving.
 - Physical taps on targets (in the simulator, selection is checked through the same `select` path a tap uses).
-- Live OpenAI and retailer matching with a configured backend and a garment-only scan.
+- Live OpenAI web matching with a configured backend and a garment-only scan.
 
 Run the baseline and updated build on the same iPhone. Record the screen with the same subject,
 outfit, lighting, and starting distance. Compare these scenarios.

@@ -2,10 +2,13 @@
 
 _OPENING = (
     "Create a photorealistic, full-body studio photograph of the same person in the reference images. "
-    "Their entered height is {height} cm and their weight is {weight} kg. "
-    "Use the full-body photo as the primary reference for their silhouette, shoulder width, torso, and limb "
-    "proportions. Use height and weight as supporting cues for their overall build. Keep the build close to what "
-    "you see in the photo, including when the measurements alone could suggest several body shapes."
+    "Use the entered height of {height} cm and weight of {weight} kg as the targets for the generated body. "
+    "Reflect height in the person's apparent stature, including natural head-to-body and torso-to-leg proportions. "
+    "Reflect weight relative to height in the silhouette and fullness of the torso, hips, arms, and legs. "
+    "Use the full-body photo as the baseline for the person's individual proportions and how their build is "
+    "distributed. Adjust that baseline where needed to reflect the entered measurements, accounting for "
+    "perspective, pose, and loose clothing in the reference. Keep the person's recognizable build and natural "
+    "anatomy. Avoid defaulting to a fashion-model build or inventing specific body composition from two numbers."
 )
 
 _WITH_SELFIE = (
@@ -21,8 +24,8 @@ _WITHOUT_SELFIE = (
 _STYLE = (
     "Show natural human anatomy, lifelike eyes, realistic skin texture, individual hair strands, and believable "
     "fabric detail. Match the person's age, face shape, and distinguishing features. Avoid cartoon styling, "
-    "illustration, CGI, and heavy beauty retouching. Preserve the person's build without slimming, exaggerating, "
-    "or reshaping it."
+    "illustration, CGI, and heavy beauty retouching. Use neutral framing and natural clothing fit so the "
+    "body proportions are visible. Avoid cosmetic slimming and exaggeration."
 )
 
 _FRAMING = (
@@ -74,4 +77,31 @@ def build_outfit_prompt(slots: list[str]) -> str:
         "image 1. Use later images only as garment "
         "references. Show one person and one studio photo.\n\n"
         f"{references}{layers}"
+    )
+
+
+_CATALOG_LAYOUT = {
+    "outerwear": "Arrange it in a straight, front-facing flat lay with the sleeves extended naturally. "
+                 "If it has a hood, arrange the same hood upright. If it has a front zipper, align and close it.",
+    "tshirt": "Arrange it in a straight, front-facing flat lay with both sleeves extended naturally and the hem flat.",
+    "pants": "Arrange it in a straight, front-facing flat lay with the waistband level and both legs extended naturally.",
+    "shoes": "Arrange the same shoes together in a tidy product view. Keep the number of shoes visible in the source. "
+             "Retain their toe shape, sole, laces, panels and colors.",
+    "accessory": "Arrange the same item upright in a clear product view at a natural angle.",
+}
+
+
+def build_catalog_prompt(category: str | None) -> str:
+    layout = _CATALOG_LAYOUT.get(category, "Arrange the same item in a straight, clear catalog view.")
+    return (
+        "Edit the reference photograph into one photorealistic ecommerce catalog photo of the same physical "
+        "garment. Isolate the primary item and straighten its pose and layout. "
+        f"{layout} "
+        "Remove the room, furniture, people, hands and unrelated objects. Use a pure white seamless studio "
+        "background with soft, diffuse lighting and a very faint contact shadow. Center the full garment with "
+        "comfortable margins. Preserve its actual color, material texture, silhouette, stitching, seams, pockets, "
+        "closures, hardware and visible logos in the same locations. Relax large incidental creases, retaining "
+        "natural fabric detail. Infer the smallest amount needed to straighten obscured fabric. Preserve "
+        "asymmetrical features. Do not invent logos, prints, pockets, labels, or hardware. Do not add text, "
+        "a person, a hanger, extra products or a collage."
     )

@@ -412,31 +412,26 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
             let jacket = s.tighten(CGRect(x: outer.minX, y: outer.minY, width: outer.width, height: hemY(matching: panelA) - outer.minY)) ?? outer
             return [LiveDetection(category: .jacket, bounds: jacket, confidence: Double(jacketScore), color: panelA ?? centreHigh)]
         }
-        // A bare torso is never a T-shirt, however the arms read (shaded arms can look like sleeves).
+        // Keep the bare-torso check for both the confident and fallback detections.
         guard ![panelA, panelB, centreHigh].contains(where: { looksBare($0, skin) }) else { return [] }
+        let elbowXs = [j[.leftElbow], j[.rightElbow]].compactMap { $0?.x } + [minS, maxS]
+        let teeTop = shoulderY - torso * 0.2
+        let tee = s.tighten(CGRect(x: (elbowXs.min() ?? minS) - w * 0.15, y: teeTop,
+                                   width: (elbowXs.max() ?? maxS) - (elbowXs.min() ?? minS) + w * 0.3, height: hem - teeTop))
         if shortSleeves || teeScore >= 0.2 {
-            // Without long sleeves the garment is the torso plus upper arms, not out to the wrists.
-            let elbowXs = [j[.leftElbow], j[.rightElbow]].compactMap { $0?.x } + [minS, maxS]
-            let teeTop = shoulderY - torso * 0.2  // the collar sits well above the shoulder joints
-            let tee = s.tighten(CGRect(x: (elbowXs.min() ?? minS) - w * 0.15, y: teeTop,
-                                       width: (elbowXs.max() ?? maxS) - (elbowXs.min() ?? minS) + w * 0.3, height: hem - teeTop))
             return tee.map { [LiveDetection(category: .tshirt, bounds: $0, confidence: 0.6, color: centreHigh ?? panelA)] } ?? []
         }
-        // A clear top on a visible torso: both side panels are the same fabric and neither they nor the
-        // chest look like bare skin. Long sleeves land here too; the live categories have one top.
-        #if DEBUG
-        if let a = panelA, let b = panelB, let ch = centreHigh {
-            Self.trace?("clear top: panels ΔE \(Int(deltaE(a, b))) bare \(looksBare(a, skin)) \(looksBare(b, skin)) \(looksBare(ch, skin)) lab \(labString(a)) \(labString(ch))")
-        }
-        #endif
         if let a = panelA, let b = panelB, centreHigh != nil, deltaE(a, b) < 14 {
-            let elbowXs = [j[.leftElbow], j[.rightElbow]].compactMap { $0?.x } + [minS, maxS]
-            let teeTop = shoulderY - torso * 0.2
-            let tee = s.tighten(CGRect(x: (elbowXs.min() ?? minS) - w * 0.15, y: teeTop,
-                                       width: (elbowXs.max() ?? maxS) - (elbowXs.min() ?? minS) + w * 0.3, height: hem - teeTop))
             return tee.map { [LiveDetection(category: .tshirt, bounds: $0, confidence: 0.5, color: (a + b) / 2)] } ?? []
         }
-        return []
+        // Offer a lower-confidence top when the torso is in view but the sleeve and fabric cues disagree.
+        guard j.mid(.leftHip, .rightHip) != nil, let fabric = centreHigh ?? panelA ?? panelB else { return [] }
+        if jacketScore >= 0.08, jacketScore > teeScore, !bareForearm {
+            return [LiveDetection(category: .jacket, bounds: outer, confidence: 0.4, color: panelA ?? fabric)]
+        }
+        let sleevesCovered = !forearms.isEmpty && skin != nil && !bareForearm
+        return [LiveDetection(category: .tshirt, bounds: sleevesCovered ? outer : (tee ?? outer),
+                              confidence: 0.45, color: fabric)]
     }
 
     // MARK: Pants
@@ -444,68 +439,69 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
     private func pants(_ s: Scene, skin: SIMD3<Float>?, time: Double) -> LiveDetection? {
         let j = s.joints
         guard let hip = j.mid(.leftHip, .rightHip) else { return nil }
-        let ankleY = [j[.leftAnkle], j[.rightAnkle]].compactMap { $0.map { Double($0.y) } }.max()
-        let kneeY = [j[.leftKnee], j[.rightKnee]].compactMap { $0.map { Double($0.y) } }.max()
-        #if DEBUG
-        Self.trace?(String(format: "pants joints: hip %.3f knee %@ ankle %@", hip.y, kneeY.map { String(format: "%.3f", $0) } ?? "-", ankleY.map { String(format: "%.3f", $0) } ?? "-"))
-        #endif
-        // Hip to ankle. Waist-to-knee framing has no ankles: the shin is about as long as the thigh.
-        let span: Double, anklesInView: Bool
-        if let ankleY, ankleY - hip.y > 0.08 {
-            span = ankleY - hip.y
-            anklesInView = true
-        } else if let kneeY, kneeY - hip.y > 0.05, kneeY < 0.985 {
-            span = (kneeY - hip.y) * 2
-            anklesInView = false
+        let kneeY = j.y([.leftKnee, .rightKnee])
+        let ankleY = j.y([.leftAnkle, .rightAnkle])
+        let hipY = Double(hip.y)
+        let anklesInView = ankleY.map { $0 - hipY > 0.08 } ?? false
+        let span: Double
+        if anklesInView, let ankleY {
+            span = ankleY - hipY
+        } else if let kneeY, kneeY - hipY > 0.05 {
+            span = (kneeY - hipY) * 2
         } else {
-            return nil
+            // A thin strip under the hips is too narrow to offer as a garment.
+            span = 1 - hipY
+            guard span > 0.18 else { return nil }
         }
+
         let legs: [(PoseJoints.Name, PoseJoints.Name, PoseJoints.Name)] = [(.leftHip, .leftKnee, .leftAnkle), (.rightHip, .rightKnee, .rightAnkle)]
-        var covered = false, bare = false, neutral = false
+        var covered = false, bareThigh = false, bareLowerLeg = false
         var thighs: [SIMD3<Float>] = []
         for (h, k, a) in legs {
-            guard let hp = j[h], let kn = j[k] else { continue }
+            guard let hp = j[h] else { continue }
+            let knee = j[k]
+            let kn = knee ?? CGPoint(x: hp.x, y: min(1, hp.y + span))
             let thigh = s.sample(at: lerp(hp, kn, 0.5), size: span * 0.06)
-            // Just above the knee: shorts end here, trousers don't.
-            let aboveKnee = s.sample(at: lerp(hp, kn, 0.85), size: span * 0.05)
-            let shin = j[a].flatMap { s.sample(at: lerp(kn, $0, 0.55), size: span * 0.05) }
-            if looksBare(thigh, skin) || looksBare(aboveKnee, skin) || looksBare(shin, skin) { bare = true }
-            // Same garment top to bottom: the same colour, allowing for shading down the leg.
-            // Shading changes lightness, not hue, but white against gray isn't shading.
+            let aboveKnee = knee.flatMap { s.sample(at: lerp(hp, $0, 0.85), size: span * 0.05) }
+            let belowKnee = j[a].map { lerp(kn, $0, 0.55) } ?? knee.map {
+                CGPoint(x: $0.x + ($0.x - hp.x) * 0.3, y: $0.y + ($0.y - hp.y) * 0.3)
+            }
+            let shin = belowKnee.flatMap { $0.y < 0.98 ? s.sample(at: $0, size: span * 0.05) : nil }
+            bareThigh = bareThigh || looksBare(thigh, skin)
+            bareLowerLeg = bareLowerLeg || looksBare(aboveKnee, skin) || looksBare(shin, skin)
             let lower = shin ?? aboveKnee
-            if let thigh, let lower, deltaE(thigh, lower) < 16 || chromaDelta(thigh, lower) < 10 && lightnessDelta(thigh, lower) < 28 {
+            if let thigh, let lower,
+               deltaE(thigh, lower) < 16 || chromaDelta(thigh, lower) < 10 && lightnessDelta(thigh, lower) < 28 {
                 covered = true
             }
-            if let thigh {
-                thighs.append(thigh)
-                if Self.isNeutralMidtone(thigh) { neutral = true }
-            }
-            #if DEBUG
-            if let thigh, let lower { Self.trace?(String(format: "pants leg: ΔE %.0f, chroma Δ %.0f thighLab %@ lowerLab %@ skinLab %@", deltaE(thigh, lower), chromaDelta(thigh, lower), labString(thigh), labString(lower), skin.map(labString) ?? "-")) }
-            #endif
+            if let thigh { thighs.append(thigh) }
         }
-        #if DEBUG
-        Self.trace?("pants: covered \(covered), bare \(bare), ankles \(anklesInView), face skin \(skin != nil)")
-        #endif
-        guard !bare, let thighColor = thighs.first else { return nil }
+        guard let thighColor = thighs.first else { return nil }
+        let shorts = !bareThigh && bareLowerLeg && kneeY != nil
+        let names: [PoseJoints.Name] = anklesInView && !shorts
+            ? [.leftHip, .rightHip, .leftKnee, .rightKnee, .leftAnkle, .rightAnkle]
+            : [.leftHip, .rightHip, .leftKnee, .rightKnee]
+        let xs = j.xs(names)
+        let pad = span * (kneeY == nil ? 0.3 : 0.12) * s.aspect
+        let top = hipY - span * 0.04
+        let bottom = shorts ? (kneeY ?? 1) + span * 0.05 : (anklesInView ? top + span * 1.03 : 1)
+        guard let box = s.tighten(CGRect(x: (xs.min() ?? hip.x) - pad, y: top,
+                                         width: (xs.max() ?? hip.x) - (xs.min() ?? hip.x) + pad * 2,
+                                         height: bottom - top)) else { return nil }
 
-        let xs = j.xs(anklesInView ? [.leftHip, .rightHip, .leftKnee, .rightKnee, .leftAnkle, .rightAnkle] : [.leftHip, .rightHip, .leftKnee, .rightKnee])
-        let pad = span * 0.12 * s.aspect
-        // Without ankles the trousers run on past the bottom of the frame.
-        let height = anklesInView ? span * 1.03 : 1 - (hip.y - span * 0.04)
-        guard let box = s.tighten(CGRect(x: (xs.min() ?? hip.x) - pad, y: hip.y - span * 0.04,
-                                         width: (xs.max() ?? hip.x) - (xs.min() ?? hip.x) + pad * 2, height: height)) else { return nil }
-        // Ask the classifier when the colours alone can't tell: the leg didn't read as one garment, a
-        // gray leg could be skin under poor light, or (waist-to-knee) one thigh with no skin to compare.
-        let needsClassifier = !covered || (skin == nil && neutral) || (!anklesInView && thighs.count < 2 && skin == nil)
-        let jeans = needsClassifier ? score(["jeans"], in: scores(key: "legs", box: box, s, time: time)) : 0
+        let ambiguousGray = skin == nil && thighs.contains(where: Self.isNeutralMidtone)
+        let needsClassifier = !covered || bareThigh || ambiguousGray || (!anklesInView && thighs.count < 2 && skin == nil)
+        let clothing = needsClassifier ? score(["jeans", "trousers", "pants", "shorts"],
+                                                in: scores(key: "legs", box: box, s, time: time)) : 0
         #if DEBUG
-        Self.trace?(String(format: "pants: jeans %.2f", jeans))
+        Self.trace?(String(format: "pants: covered %@, shorts %@, bare thigh %@, classifier %.2f",
+                           String(covered), String(shorts), String(bareThigh), clothing))
         #endif
-        // Gray legs with no skin to compare against could be bare legs under poor light, so they need more.
-        let needed = !covered ? 0.25 : skin == nil && neutral ? 0.5 : 0.15
-        guard !needsClassifier || jeans >= Float(needed) else { return nil }
-        return LiveDetection(category: .pants, bounds: box, confidence: min(1, 0.55 + Double(jeans)), color: thighColor)
+        // The classifier can corroborate tan trousers or distinguish low-contrast fabric from skin.
+        guard !bareThigh || clothing >= 0.25 else { return nil }
+        guard !ambiguousGray || clothing >= 0.5 else { return nil }
+        return LiveDetection(category: .pants, bounds: box, confidence: needsClassifier ? min(1, 0.45 + Double(clothing)) : 0.55,
+                             color: thighColor)
     }
 
     // MARK: Shoes
@@ -831,23 +827,6 @@ nonisolated struct ColorGrid {
             }
         }
         return n >= 3 ? sum / Float(n) : nil
-    }
-
-    /// Mean absolute Laplacian of brightness. Higher is sharper; only meaningful relative to
-    /// other frames of the same scene.
-    var sharpness: Double {
-        guard width > 2, height > 2 else { return 0 }
-        func luma(_ x: Int, _ y: Int) -> Float {
-            let i = (y * width + x) * 3
-            return 0.299 * rgb[i] + 0.587 * rgb[i + 1] + 0.114 * rgb[i + 2]
-        }
-        var total: Float = 0
-        for y in 1..<(height - 1) {
-            for x in 1..<(width - 1) {
-                total += abs(4 * luma(x, y) - luma(x - 1, y) - luma(x + 1, y) - luma(x, y - 1) - luma(x, y + 1))
-            }
-        }
-        return Double(total) / Double((width - 2) * (height - 2))
     }
 }
 
