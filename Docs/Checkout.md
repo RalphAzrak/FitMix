@@ -1,84 +1,97 @@
-# In-app retailer checkout (proof of concept)
+# Checkout across stores
 
-Studio Fit listing → Shop This Look → **Choose Size & Add** (the exact store variant) → **View Cart** →
-**Checkout at <store>**. Each Shopify store's own checkout opens in a sheet inside FitMix (Shopify Checkout
-Kit). The cart is grouped by store, and every store checks out separately.
+Studio Fit → Shop This Look → **Add to Cart** (a Shopify listing first opens the size picker) → **View Cart** →
+**Checkout**. One FitMix cart can hold pieces from any number of stores. Each store is checked out on its own
+secure site; there is no single payment across stores, and FitMix never takes or stores payment details.
 
 | Piece | Where |
 | --- | --- |
-| Listing URL → store + product handle, variants from `/products/<handle>.js` | `FitMix/Services/ShopifyProducts.swift` |
-| Size / colour / quantity picker | `FitMix/Views/Checkout/VariantPickerSheet.swift` |
-| Exact variant on a cart line (`ShopifyLine`) | `FitMix/Models/Cart.swift` |
-| Retailer groups, clear-only-what-this-store-sold | `FitMix/Services/CartStore.swift` |
-| Cart permalink, completion → receipt, lifecycle log | `FitMix/Services/RetailerCheckout.swift` |
-| Per-store checkout button and Checkout Kit sheet | `FitMix/Views/Checkout/CartView.swift` |
-| Launch-argument script for the simulator | `FitMix/Services/DebugCheckoutScript.swift` |
+| Cart line: store, title, photo, listed price and currency, link, size, colour, variant | `FitMix/Models/Cart.swift` |
+| Groups by store, estimated subtotals per currency, visits, clear-only-what-a-store-sold | `FitMix/Services/CartStore.swift` |
+| Link checks, per-store checkout plan, receipts, log (no Shopify code) | `FitMix/Services/StoreCheckout.swift` |
+| Shopify only: cart permalink, Checkout Kit completion → receipt | `FitMix/Services/ShopifyCartCheckout.swift` |
+| Cart screen | `FitMix/Views/Checkout/CartView.swift` |
+| Checkout screen | `FitMix/Views/Checkout/CheckoutView.swift` |
+| Store pages in Safari View, hand-off to Safari | `FitMix/Views/Checkout/RetailerBrowser.swift` |
+| Checkout Kit sheet for a prefilled Shopify cart | `FitMix/Views/Checkout/ShopifyCheckoutSheet.swift` |
+| Shopify size/colour picker; not-Shopify fallback | `FitMix/Views/Checkout/VariantPickerSheet.swift`, `FitMix/Services/ShopifyProducts.swift` |
+| Debug fixtures and launch script | `FitMix/Services/CheckoutFixtures.swift`, `FitMix/Services/DebugCheckoutScript.swift` |
 
-Package: [Shopify/checkout-kit](https://github.com/Shopify/checkout-kit) 4.2.0, products `ShopifyCheckoutKit`
-and `EmbeddedCheckoutProtocol` (the v4 SDK; the older `checkout-sheet-kit-swift` v3 is in maintenance until
-May 2027).
+## What gets saved
 
-## How it works
+Add to Cart saves the listing the piece shows at that moment (`WorkingLook.Piece.product`): a confirmed swap,
+else the listing the shopper picked from Studio's ranked list (`StudioStore.chooseListing`), else the best match.
+The line keeps the title, store name, product photo URL, listed price and currency, the product URL, and size,
+colour, variant ID and variant title when known. Cart files are `CartData` version 2; every field added since
+version 1 is optional, so carts saved earlier still load.
 
-1. **Is it Shopify?** `ShopifyProductLink` reads `https://<store>/…/products/<handle>[?variant=<id>]` from the
-   listing (Google Lens `google.com/goto?url=` links are unwrapped). `ShopifyProducts.load` fetches
-   `https://<store>/products/<handle>.js`, which every Shopify online store serves publicly. Anything that
-   isn't that JSON is treated as "not Shopify" and keeps **View at retailer**.
-2. **Exact variant.** The picker offers only option values that a real variant has, crosses out sold-out
-   ones, and resolves one numeric variant ID. Two real cases:
-   - **Kotn** lists `Color`, `Colour` and `Size`, and its option lists include colours this product doesn't
-     have (each colour is a separate product). Only Black exists here, so colour is fixed and the shopper
-     picks Size.
-   - **Frank And Oak** has only `Size`; each colour is its own product (`YGroup_…` tag). The listing's URL
-     fixes the colour, and the cart says "Colour as pictured".
-3. **Cart.** A Shopify line stores the store domain, handle, numeric variant ID, the store's variant title
-   and every option. Lines group by store domain.
-4. **Checkout.** `https://<store>/cart/<variant>:<qty>,<variant>:<qty>` (Shopify's cart permalink; no
-   Storefront API token) is opened with `ShopifyCheckout(checkout:)` in a sheet.
-5. **Outcome.**
-   - Closed without buying (close button, swipe down, or the app closing it): the cart is unchanged and
-     says so.
-   - `onComplete`: FitMix reads the order ID/label and line items from the event, removes exactly those
-     variants and quantities from **that store's** lines, and shows a receipt. Other stores' lines stay. If
-     the event's line items don't match what was sent, it falls back to what FitMix sent for that store.
-   - `onFail`: the cart is unchanged and the error is shown.
+## Cart
 
-The prices shown in FitMix are the listing's; each store's checkout prices the order, tax and shipping.
+Lines are grouped by store: the listing's web host without `www.` (Google Lens `goto` links are unwrapped), else
+the retailer name. Each row shows photo, title, store, price, selected variant (or "Size not listed · choose it at
+the store"), quantity and remove. Subtotals are per currency and labeled **estimated**; different currencies are
+never added or converted. Each retailer confirms the final price, availability, shipping and taxes.
+
+## Checkout: one card per store
+
+- **Prefilled cart**: only when FitMix has a verified way to put the exact variants and quantities in the store's
+  cart. Today that is Shopify's cart permalink, `https://<store>/cart/<variant>:<qty>,…`, with numeric variant IDs
+  read from the store's own `/products/<handle>.js`. **Checkout at [store]** opens it in Shopify Checkout Kit.
+- **Open each item**: every other store. **Open at [store]** opens that piece's product page in Safari View, and
+  the card says to add it there in the size and quantity shown, then check out on the store's site.
+- **Unusable link**: no link, a link that isn't a web page, or a non-https link. That piece's button is disabled
+  with the reason; the store's other pieces and other stores stay usable.
+
+Done (Safari View) or closing checkout returns to Checkout to continue with the next store. A page that doesn't
+load in Safari View offers **Open in Safari**; a prefilled cart whose checkout fails inside FitMix offers **Open
+cart in Safari** with the same permalink.
+
+**Nothing is marked purchased unless a store confirms it.** Opening, returning or cancelling leaves the cart as it
+was, and the card says "Opened at …; FitMix hasn't received an order confirmation". Only Checkout Kit's completion
+event removes lines, and only the variants and quantities that store sold. Pages opened in Safari View report
+nothing back, so those pieces stay until the shopper removes them.
+
+A Shopify-style link (`/products/<handle>`) on a store that isn't Shopify (Uniqlo, for one) can still be added: the
+picker finds no Shopify product data and offers **Add to Cart** without a size. If the store's data can't be
+loaded at all, **Add Without a Size** does the same. Only https links go to the picker.
 
 ## Debug launch arguments (Debug builds only)
 
 | Variable | What it does |
 | --- | --- |
-| `FM_DEBUG_MATCH_FIXTURE=shopify` | Studio Fit's search returns **two hand-picked real listings**: Kotn's Women's Shrunken Tee in Black for the T-shirt, Frank And Oak's Essential Slim Chino Pant for the pants. Everything after the search is the real path. |
-| `FM_DEBUG_CHECKOUT_PICKS=tshirt=Size:M*1;pants=Size:32X32*2` | Selects each garment in Studio, waits for its match, opens Shop This Look, and adds each through the variant picker. |
-| `FM_DEBUG_CHECKOUT_OPEN=kotn.com` | The cart then opens that store's checkout. |
-| `FM_DEBUG_CHECKOUT_CLOSE_AFTER=40` | Closes that checkout after 40 s without buying. |
-| `FM_DEBUG_CHECKOUT_SIMULATE_COMPLETE=1` | **Simulated**: no order exists. Feeds a completion event built from the lines FitMix sent through the real completion handler, to check cart clearing only. The receipt says "simulated". |
-| `FM_DEBUG_CHECKOUT_PREFILL=montreal` | Pre-fills Montréal City Hall (275 Rue Notre-Dame Est, H2Y 1C6) and `fitmix-checkout-test@example.com` (a reserved, undeliverable domain). Never the user's details. |
+| `FM_DEBUG_CHECKOUT_FIXTURE=1` | Studio Fit's search returns `CheckoutFixtureSearch`: T-shirt = Kotn tee (Shopify, CAD) then Uniqlo AIRism tee (not Shopify, USD); pants = Frank And Oak chino (Shopify, CAD); shoes = test listing with no link (CAD); jacket = test listing with an `http://` link (USD). The three real listings were hand-picked on 21 Nov 2026. |
+| `FM_DEBUG_CHECKOUT_CHOOSE=tshirt:uniqlo-us-E465185-000` | Picks that listing from the piece's ranked list, as tapping it in Studio does. |
+| `FM_DEBUG_CHECKOUT_PICKS=tshirt=*1;pants=Size:32X32*2;shoes=*1;jacket=*1` | Adds each piece from Shop This Look: via the picker for Shopify-style links, else plain Add to Cart. |
+| `FM_DEBUG_CHECKOUT_OPEN=frankandoak.com,uniqlo.com` | Opens Checkout, then each store in turn (prefilled cart, else its first item with a link). |
+| `FM_DEBUG_CHECKOUT_CLOSE_AFTER=20` | Closes each store after 20 s, like Done or closing checkout. |
+| `FM_DEBUG_CHECKOUT_SIMULATE_COMPLETE=1` | **Simulated**: feeds a completion event built from what FitMix sent, to test cart clearing. No order exists; the receipt says "Simulated · no order". |
+| `FM_DEBUG_CHECKOUT_PREFILL=montreal` | Pre-fills a public Montréal address and a reserved `example.com` email in the Shopify permalink. |
+| `FM_DEBUG_MATCH_FIXTURE=shopify` | The earlier proof of concept's two Shopify listings (Kotn, Frank And Oak). |
 
-With `FM_DEBUG_SCREEN=live-sample-tshirt`, these run the whole flow without a camera. Every checkout event is
-printed as `[checkout] …` and saved as JSON in the app's `Documents/checkout-events/`.
+With `FM_DEBUG_SCREEN=live-sample-tshirt` these run the whole flow without a camera. Every step is logged as
+`[checkout] …`.
 
-## Observed on 21 Nov 2026 (iPhone 17 simulator, iOS 27.2)
+## Observed on 21 Nov 2026 (iPhone 17 simulator, iOS 27.2, Debug)
 
-| Store | Variant sent | What checkout reported (Checkout Kit `start`/`update` events) |
+Fixture run: Uniqlo chosen as the alternative (rank 2 of 2), then pants Size 32X32 × 2, shoes and jacket.
+
+| Store | Checkout | What happened |
 | --- | --- | --- |
-| Kotn (`kotn.com`) | `53281327513968` (Black / M) × 1 | Same variant × 1, CAD 48.00. With the Montréal test address: "Ground (Up to 7 Business Days)" $8.00, tax $8.39 (Québec GST + QST rate). Needs a phone number to continue. |
-| Frank And Oak (`www.frankandoak.com`) | `47362189885618` (32X32) × 2, and × 4 in a later run | Same variant and quantity, CAD 81.75 each. With the Montréal test address: "Free standard delivery" $0, tax $48.97 on $327.00 (Québec GST + QST rate). Needs a phone number to continue. |
+| Frank And Oak (Shopify) | Prefilled cart `https://www.frankandoak.com/cart/47362189885618:2` | Checkout Kit `start`/`update`: variant 47362189885618 × 2, CAD. Closed after 20 s: all 4 lines kept. |
+| Uniqlo (not Shopify) | Product page `https://www.uniqlo.com/us/en/products/E465185-000/00` | Its `/products/….js` isn't Shopify data, so it was added without a size. Safari View loaded the page (`ok=true`, the AIRism Oversized T-Shirt). Done: all 4 lines kept. |
+| FitMix Test Store | No link | Button disabled with the reason. |
+| FitMix Test Outlet | `http://` link | Button disabled with the reason. |
 
-- Both `/cart/<variant>:<qty>` permalinks worked on the stores' own domains, without any token.
-- Closing a checkout without buying kept the cart exactly as it was.
-- A **simulated** completion for Kotn removed only Kotn's line; Frank And Oak's stayed.
-- No order was placed and no payment details were entered. Both are live stores.
+Cart: 5 pieces from 4 stores, estimated US$84.90 and CA$283.50 shown separately. No order was placed and no
+payment details were entered.
 
 ## Not done yet
 
-- **A real Studio Fit result** needs eBay keys or the approved Scrappa setup on the backend. The hand-picked
-  listings stand in for that.
-- **A test order** needs a Shopify development store (free, from a Shopify Partner account) with the
-  Bogus Gateway or Shopify Payments test mode on, and a product. Point `FM_DEBUG_MATCH_FIXTURE=shopify`
-  listings (or a real listing) at that store, check out with card `1`, and confirm the order in its admin.
-- **Order details on completion**: buyer details are redacted unless the merchant grants
-  `read_checkout_kit_enhanced_buyer_events`.
-- **Wallets**: Apple Pay inside checkout needs an Apple Pay-capable device; Shop Pay and bank or wallet apps
-  can leave FitMix (see the report for what was observed).
+- **iPhone**: Checkout Kit, Safari View, Apple Pay / Shop Pay hand-offs and returning to FitMix from a wallet or
+  bank app need a real device.
+- **A test order** (the only way to see a real completion event) needs a Shopify development store with a test
+  gateway.
+- **Other prefilled carts**: no verified cart link is used for any store that isn't Shopify. eBay, Amazon and
+  others open product pages.
+- **Colour for non-Shopify listings**: Studio's listings carry no colour, so those lines have none until a store
+  supplies one.

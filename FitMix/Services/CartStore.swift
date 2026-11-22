@@ -20,9 +20,10 @@ enum CartStoreError: LocalizedError, Equatable {
 /// memory only. Those items move into the account's cart when the user signs in. Signing out
 /// clears the cart from memory; the saved file comes back when that account signs in again.
 ///
-/// Lines are grouped by retailer, and each Shopify store gets its own checkout inside FitMix
-/// (`RetailerCheckout`). The store prices the order; `subtotal` here is only the sum of the prices
-/// the listings showed when they were added. A completed checkout removes only what that store sold.
+/// Lines are grouped by store, and each store checks out on its own site (`StoreCheckoutPlan`). The
+/// store prices the order; the subtotals here are only estimates from the prices the listings showed
+/// when they were added. Opening a store changes nothing; only a verified order confirmation removes
+/// lines, and then only what that store sold.
 @Observable
 final class CartStore {
     static let maxQuantity = 10
@@ -58,12 +59,19 @@ final class CartStore {
     // MARK: Retailers
 
     struct RetailerGroup: Identifiable {
+        /// `CartItem.retailerKey`, e.g. `kotn.com`.
         var id: String
         var name: String
         var items: [CartItem]
-        /// Every line is an exact Shopify variant, so this store can be checked out in FitMix.
-        var canCheckOutInApp: Bool { items.allSatisfy { $0.shopify != nil } }
         var count: Int { items.reduce(0) { $0 + $1.quantity } }
+        var subtotals: [CurrencySubtotal] { CartStore.subtotals(of: items) }
+    }
+
+    /// Listed prices in one currency, added up. An estimate: the store confirms the real total.
+    struct CurrencySubtotal: Equatable {
+        var price: Price
+        /// Pieces (counting quantities) included.
+        var count: Int
     }
 
     /// Lines grouped by store, in the order each store was first added.
@@ -76,12 +84,18 @@ final class CartStore {
         }
         return order.map { key in
             let lines = byKey[key] ?? []
-            return RetailerGroup(id: key, name: lines.first?.shopify?.storeName ?? lines.first?.retailer ?? key, items: lines)
+            return RetailerGroup(id: key, name: lines.first?.storeName ?? key, items: lines)
         }
     }
 
     /// Receipts of checkouts completed in this session, newest first.
     private(set) var receipts: [CheckoutReceipt] = []
+
+    /// When the shopper last opened each store (by `RetailerGroup.id`) or item (by line id) from
+    /// Checkout, in this session. Opening is not buying: nothing here removes or changes a line.
+    private(set) var visits: [String: Date] = [:]
+
+    func noteVisit(_ key: String) { visits[key] = .now }
 
     // MARK: Account switching
 
@@ -105,9 +119,10 @@ final class CartStore {
     // MARK: Editing
 
     /// Adds one of `product` in `size`. Adding the same product and size again raises its quantity.
-    func add(_ product: CatalogProduct, size: String?) throws {
+    func add(_ product: CatalogProduct, size: String?, quantity: Int = 1) throws {
         if case .local(let image)? = product.image { localImages[product.id] = image }
-        let item = CartItem(product: product, size: size)
+        var item = CartItem(product: product, size: size)
+        item.quantity = min(max(quantity, 1), Self.maxQuantity)
         try update { Self.merge(item, into: &$0) }
     }
 
@@ -122,6 +137,9 @@ final class CartStore {
                                options: choices, colourFixedByListing: resolved.colourIsFixedByListing)
         var item = CartItem(product: product, size: choices.first { ["size", "taille"].contains($0.name.lowercased()) }?.value)
         item.shopify = line
+        item.variantID = String(variant.id)
+        item.variantTitle = variant.title
+        item.color = line.colour
         item.quantity = min(max(quantity, 1), Self.maxQuantity)
         if item.imageURL == nil { item.imageURL = resolved.imageURL }
         // The store's current variant price, in the listing's currency when the listing gave one.
@@ -129,7 +147,8 @@ final class CartStore {
         try update { Self.merge(item, into: &$0) }
     }
 
-    /// A store's checkout finished. Removes what that order contains (by variant and quantity) from
+    /// A store's checkout reported a completed order (a verified completion event; opening a store
+    /// never calls this). Removes what that order contains (by variant and quantity) from
     /// that store's lines only; other stores' lines are never touched. Returns the receipt.
     @discardableResult
     func completeCheckout(store: String, purchased: [Int64: Int], order: CheckoutReceipt) throws -> CheckoutReceipt {
@@ -180,16 +199,23 @@ final class CartStore {
 
     // MARK: Totals
 
-    /// Sum of the listed prices of the items that have one, if they share a currency.
-    var subtotal: (price: Price, pricedCount: Int)? {
-        let priced = items.compactMap(\.lineTotal)
-        guard let currency = priced.first?.currencyCode, priced.allSatisfy({ $0.currencyCode == currency }) else { return nil }
-        let sum = priced.reduce(Decimal.zero) { $0 + $1.amount }
-        return (Price(amount: sum, currencyCode: currency), items.filter { $0.unitPrice != nil }.count)
-    }
+    /// Estimated subtotal per currency, in the order each currency first appears. Different
+    /// currencies are never added together or converted.
+    var subtotals: [CurrencySubtotal] { Self.subtotals(of: items) }
 
-    var hasMixedCurrencies: Bool {
-        Set(items.compactMap(\.currencyCode)).count > 1
+    /// Pieces (counting quantities) with no listed price, so they're in no subtotal.
+    var unpricedCount: Int { items.filter { $0.unitPrice == nil }.reduce(0) { $0 + $1.quantity } }
+
+    static func subtotals(of items: [CartItem]) -> [CurrencySubtotal] {
+        var order: [String] = []
+        var sums: [String: (Decimal, Int)] = [:]
+        for item in items {
+            guard let total = item.lineTotal else { continue }
+            if sums[total.currencyCode] == nil { order.append(total.currencyCode) }
+            let current = sums[total.currencyCode] ?? (0, 0)
+            sums[total.currencyCode] = (current.0 + total.amount, current.1 + item.quantity)
+        }
+        return order.map { CurrencySubtotal(price: Price(amount: sums[$0]!.0, currencyCode: $0), count: sums[$0]!.1) }
     }
 
     // MARK: Disk

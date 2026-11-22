@@ -21,20 +21,26 @@ nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
     var currencyCode: String?
     /// Nil when the product lists no sizes (live retailer matches usually don't).
     var size: String?
+    /// The colour the shopper chose or the store's variant names. Nil when unknown.
+    var color: String?
+    /// The store's own identifier for the exact variant (e.g. a Shopify variant ID), when known.
+    var variantID: String?
+    /// The store's name for that variant, e.g. "Black / M".
+    var variantTitle: String?
     var quantity: Int
     var retailerURL: URL?
     /// Development/test data, not a real listing. Always labeled as such.
     var isFixture: Bool
     var addedAt: Date
     /// The exact store variant, when the listing is a Shopify product FitMix could resolve. Lines with
-    /// one can be checked out inside FitMix; others still open at the retailer. Optional so carts saved
-    /// before checkout existed still load.
+    /// one can go into that store's cart already filled in; others open at the retailer's product page.
+    /// Optional, like every field added after the first version, so older saved carts still load.
     var shopify: ShopifyLine?
 
     init(id: UUID = UUID(), productID: String, name: String, brand: String? = nil, retailer: String? = nil,
          categoryRaw: String, imageURL: URL? = nil, priceAmount: Decimal? = nil, currencyCode: String? = nil,
-         size: String? = nil, quantity: Int = 1, retailerURL: URL? = nil, isFixture: Bool = false, addedAt: Date = .now,
-         shopify: ShopifyLine? = nil) {
+         size: String? = nil, color: String? = nil, variantID: String? = nil, variantTitle: String? = nil,
+         quantity: Int = 1, retailerURL: URL? = nil, isFixture: Bool = false, addedAt: Date = .now, shopify: ShopifyLine? = nil) {
         self.id = id
         self.productID = productID
         self.name = name
@@ -45,6 +51,9 @@ nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
         self.priceAmount = priceAmount
         self.currencyCode = currencyCode
         self.size = size
+        self.color = color
+        self.variantID = variantID
+        self.variantTitle = variantTitle
         self.quantity = quantity
         self.retailerURL = retailerURL
         self.isFixture = isFixture
@@ -62,8 +71,33 @@ nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
         isSameLine(productID: other.productID, size: other.size, variantID: other.shopify?.variantID)
     }
 
-    /// Which checkout this line belongs to: one per store.
-    var retailerKey: String { shopify?.storeDomain ?? retailer ?? "Other retailers" }
+    /// The listing's link, with search-engine redirects (Google Lens `goto` links) removed.
+    var productLink: URL? { retailerURL.map(RetailerLink.unwrap) }
+
+    /// Which store this line is bought from: one checkout per store. The store's web host
+    /// (`www.` dropped) when the line has a usable link, else the retailer's name.
+    var retailerKey: String {
+        if let shopify { return RetailerLink.storeKey(host: shopify.storeDomain) }
+        if case .success(let url) = RetailerLink.check(retailerURL), let host = url.host { return RetailerLink.storeKey(host: host) }
+        return storeName.lowercased()
+    }
+
+    /// What to call the store: "Kotn", "eBay" (the seller is shown separately), else the web host.
+    var storeName: String {
+        if let shopify { return shopify.storeName }
+        if let name = retailer?.components(separatedBy: " · ").first?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return name }
+        if let host = productLink?.host { return RetailerLink.storeKey(host: host) }
+        return "Other retailer"
+    }
+
+    /// The selected size, colour and variant, as the cart shows them. Empty when none is known.
+    var variantDetails: [String] {
+        if let shopify {
+            return shopify.displayOptions + (shopify.colourFixedByListing ? ["Colour as pictured"] : [])
+        }
+        return [size.map { "Size \($0)" }, color.map { "Colour \($0)" },
+                variantTitle.flatMap { $0 == size || $0 == color ? nil : $0 }].compactMap { $0 }
+    }
 }
 
 /// One exact variant on a Shopify store, as resolved from the store's public product data.
@@ -103,8 +137,13 @@ nonisolated struct ShopifyLine: Codable, Equatable, Sendable {
 }
 
 /// What FitMix saves for one account's cart on this iPhone.
+///
+/// - Version 1: the first cart (no variant fields).
+/// - Version 2: `color`, `variantID`, `variantTitle` and `shopify` on each line. Every new field is
+///   optional, so a version 1 file decodes unchanged.
 nonisolated struct CartData: Codable, Equatable, Sendable {
-    var version = 1
+    static let currentVersion = 2
+    var version = CartData.currentVersion
     var items: [CartItem] = []
 }
 

@@ -19,13 +19,7 @@ nonisolated struct ShopifyProductLink: Equatable, Sendable {
     /// Reads `https://<store>/…/products/<handle>[?variant=<id>]`. Google Lens result links
     /// (`google.com/goto?url=<listing>` or `/url?q=`) are unwrapped first.
     init?(url: URL) {
-        var url = url
-        if let host = url.host?.lowercased(), host == "google.com" || host.hasSuffix(".google.com"),
-           let inner = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-               .first(where: { $0.name == "url" || $0.name == "q" })?.value,
-           let innerURL = URL(string: inner) {
-            url = innerURL
-        }
+        let url = RetailerLink.unwrap(url)
         guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
               let host = url.host?.lowercased(), !host.isEmpty else { return nil }
         let parts = url.pathComponents
@@ -177,7 +171,7 @@ nonisolated enum ShopifyProductError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .notShopify: "This retailer's sizes can't be read in FitMix. Choose them on the retailer's page."
+        case .notShopify: "This store doesn't share its sizes with FitMix. Add the piece now and choose the size and colour on the store's site when you check out."
         case .busy: "The store is busy right now. Wait a minute and try again."
         case .offline: "You're offline. Connect to the internet and try again."
         case .unavailable: "FitMix couldn't load this product's sizes. Try again."

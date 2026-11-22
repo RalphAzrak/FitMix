@@ -2,9 +2,10 @@ import SwiftUI
 import SafariServices
 
 /// Review of the current look's purchasable pieces, including confirmed swaps.
-/// Each piece can be added to the cart in its chosen size. A piece whose listing is a Shopify product
-/// opens `VariantPickerSheet` to choose the store's exact variant, and can then be checked out in
-/// FitMix from the cart. Other retailers still sell on their own page.
+/// Each piece is added as the listing it currently shows: a confirmed swap, else the listing chosen
+/// in Studio, else the best match (`WorkingLook.Piece.product`). A listing that looks like a Shopify
+/// product opens `VariantPickerSheet` to choose the store's exact variant; any other is added in its
+/// chosen size. The cart then sends each store's pieces to that store's own checkout.
 struct ShoppingReviewView: View {
     @Environment(StudioStore.self) private var studio
     @Environment(CartStore.self) private var cart
@@ -46,7 +47,9 @@ struct ShoppingReviewView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .navigationDestination(isPresented: $showCart) { CartView(showsDone: false) }
         }
-        .sheet(item: $picking) { VariantPickerSheet(product: $0.product, link: $0.link, autoPick: $0.autoPick) }
+        // `.id`: a new piece gets a fresh picker. Without it, a sheet still on screen when the piece changes
+        // keeps the previous product's loaded variants and could add the wrong one.
+        .sheet(item: $picking) { VariantPickerSheet(product: $0.product, link: $0.link, autoPick: $0.autoPick).id($0.id) }
         .task { await runDebugScript() }
         .preferredColorScheme(.light)
         .sheet(item: $retailer) { SafariView(url: $0).ignoresSafeArea() }
@@ -151,7 +154,7 @@ struct ShoppingReviewView: View {
                 Spacer(minLength: 0)
             }
             HStack {
-                if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
+                if let link = Self.shopifyLink(for: product) {
                     Text("Sizes and colours from \(link.host)").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
                 } else if product.sizes.isEmpty {
                     Text("Sizes unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
@@ -205,7 +208,7 @@ extension ShoppingReviewView {
     /// none (most live retailer matches) is added without a size.
     @ViewBuilder
     fileprivate func addButton(product: CatalogProduct, size: String?) -> some View {
-        if let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) {
+        if let link = Self.shopifyLink(for: product) {
             Button {
                 picking = VariantPick(product: product, link: link)
             } label: {
@@ -253,15 +256,23 @@ extension ShoppingReviewView {
 }
 
 extension ShoppingReviewView {
-    /// Debug: `FM_DEBUG_CHECKOUT_PICKS` adds each scripted piece through its variant picker, then opens the cart.
+    /// Debug: `FM_DEBUG_CHECKOUT_PICKS` adds each scripted piece (through its variant picker when the listing
+    /// looks like Shopify, else with plain Add to Cart), then opens the cart.
     fileprivate func runDebugScript() async {
-        guard let script = DebugCheckoutScript.current, let look = studio.look else { return }
+        guard let script = DebugCheckoutScript.current, studio.look != nil else { return }
         try? await Task.sleep(for: .seconds(1))
         for category in script.order {
             guard let pick = script.picks[category],
-                  let product = look.pieces.first(where: { $0.detected.category == category })?.product,
-                  let link = product.retailerURL.flatMap(ShopifyProductLink.init(url:)) else {
+                  let product = studio.look?.pieces.first(where: { $0.detected.category == category })?.product else {
                 CheckoutLog.record("debug-no-listing", store: "-", note: "category=\(category.rawValue)")
+                continue
+            }
+            guard let link = Self.shopifyLink(for: product) else {
+                let size = pick.options.first { $0.0.caseInsensitiveCompare("size") == .orderedSame }?.1
+                do {
+                    try cart.add(product, size: size, quantity: pick.quantity)
+                    CheckoutLog.record("added", store: product.retailer ?? "-", note: "product=\(product.id) size=\(size ?? "-") qty=\(pick.quantity)")
+                } catch { CheckoutLog.record("debug-add-failed", store: "-", note: error.localizedDescription) }
                 continue
             }
             picking = VariantPick(product: product, link: link, autoPick: pick)
@@ -269,6 +280,14 @@ extension ShoppingReviewView {
             try? await Task.sleep(for: .milliseconds(700))
         }
         showCart = true
+    }
+}
+
+extension ShoppingReviewView {
+    /// The listing as a possible Shopify product, only when it's a link FitMix would open for checkout.
+    static func shopifyLink(for product: CatalogProduct) -> ShopifyProductLink? {
+        guard case .success(let url) = RetailerLink.check(product.retailerURL) else { return nil }
+        return ShopifyProductLink(url: url)
     }
 }
 
