@@ -10,8 +10,11 @@ Errors use the same shape as Backend/: {"error": {"code", "message"}}. A step th
 reported in that garment's `errors` and the rest of the result is still returned.
 """
 
+import asyncio
+import hashlib
 import hmac
 import logging
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
@@ -135,6 +138,10 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     if pipeline is None:
         pipeline = build_pipeline(settings)
     analyses: TTLCache[Analysis] = TTLCache(settings.cache_size, settings.cache_ttl_seconds)
+    # sha256 of an /analyze input → its analysis id, so a repeated photo returns instantly (only clean analyses).
+    by_input: TTLCache[str] = TTLCache(settings.cache_size, settings.cache_ttl_seconds)
+    # Analyses still running, by input hash: identical requests arriving together share one run.
+    running: dict[str, asyncio.Task] = {}
     app = FastAPI(title="FitMix vision service", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.exception_handler(ApiError)
@@ -157,16 +164,30 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                            "The vision service has no models configured yet. Start it with MOCK_MODE=1 for demo data.")
         return pipeline
 
-    async def read_image(upload: UploadFile, limit: int, label: str):
+    async def read_upload(upload: UploadFile, limit: int, label: str) -> bytes:
         data = await upload.read(limit + 1)
         if len(data) > limit:
             raise ApiError(413, "image_too_large", f"The {label} is too large (limit {limit // (1024 * 1024)} MB).")
         if media_type(data) is None:
             raise ApiError(400, "invalid_image", f"The {label} isn't a JPEG, PNG or WebP picture.")
+        return data
+
+    def open_image(data: bytes, label: str):
         try:
             return decode(data)
         except Exception:
             raise ApiError(400, "invalid_image", f"The {label} couldn't be opened.")
+
+    def input_key(kind: str, files: list[bytes], hints: list[str | None]) -> str:
+        """Identifies an /analyze input: the kind, every file's bytes in order, and the category hints."""
+        digest = hashlib.sha256(kind.encode())
+        for data, hint in zip(files, hints):
+            digest.update(len(data).to_bytes(8, "big") + data + f"|{hint or ''}|".encode())
+        return digest.hexdigest()
+
+    def is_clean(analysis: Analysis) -> bool:
+        """Only analyses where every step worked are reused, so a provider outage can be retried."""
+        return not analysis.errors and bool(analysis.garments) and not any(g.errors for g in analysis.garments)
 
     def base_url(request: Request) -> str:
         return str(request.base_url).rstrip("/")
@@ -179,7 +200,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     def online_json(matches: list[OnlineMatch], base: str) -> list[OnlineMatch]:
         return [m.model_copy(update={"image": absolute(m.image, base)}) for m in matches]
 
-    def analysis_json(analysis: Analysis, base: str, cached: bool) -> AnalyzeResponse:
+    def analysis_json(analysis: Analysis, base: str, cached: bool, timings: dict[str, int] | None = None) -> AnalyzeResponse:
         garments = []
         for g in analysis.garments:
             garments.append(GarmentResult(
@@ -189,7 +210,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 catalog_matches=[m.model_copy(update={"image": absolute(m.image, base)}) for m in g.catalog_matches],
                 online_matches=[], errors=g.errors))
         return AnalyzeResponse(analysis_id=analysis.id, input=analysis.input, mock=settings.mock, cached=cached,
-                               garments=garments, errors=analysis.errors, timings_ms=analysis.timings_ms)
+                               garments=garments, errors=analysis.errors, timings_ms=timings or analysis.timings_ms)
 
     @app.get("/health")
     async def health():
@@ -197,7 +218,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 "components": pipeline.components() if pipeline else None,
                 "keys": {"openai": bool(settings.openai_api_key), "serpapi": bool(settings.serpapi_key),
                          "supabase": bool(settings.supabase_url and settings.supabase_service_role_key)},
-                "cached_analyses": len(analyses)}
+                "cached_analyses": len(analyses), "cached_inputs": len(by_input)}
 
     @app.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(authorize)])
     async def analyze(
@@ -207,24 +228,56 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
         categories: str | None = Form(None),
     ):
         active = require_pipeline()
+        started = time.perf_counter()
         crops = crops or []
         if (image is None) == (not crops):
             raise ApiError(400, "invalid_request", "Send either one `image` (a person photo) or one or more `crops`, not both.")
         if image is not None:
-            photo = await read_image(image, settings.max_image_bytes, "photo")
-            analysis = await active.analyze(image=photo)
+            files, labels, hints = [await read_upload(image, settings.max_image_bytes, "photo")], ["photo"], [None]
         else:
             if len(crops) > settings.max_crops:
                 raise ApiError(400, "too_many_crops", f"Send at most {settings.max_crops} garment crops at once.")
-            hints: list[str | None] = [None] * len(crops)
+            hints = [None] * len(crops)
             if categories:
                 hints = [c.strip().lower() or None for c in categories.split(",")]
                 if len(hints) != len(crops) or any(h is not None and h not in HINT_CATEGORY for h in hints):
                     raise ApiError(400, "invalid_categories",
                                    "`categories` needs one entry per crop, each one of: " + ", ".join(sorted(HINT_CATEGORY)) + ".")
-            pictures = [await read_image(c, settings.max_crop_bytes, f"garment crop {i + 1}") for i, c in enumerate(crops)]
-            analysis = await active.analyze(crops=pictures, hints=hints)
-        analyses.put(analysis.id, analysis)
+            labels = [f"garment crop {i + 1}" for i in range(len(crops))]
+            files = [await read_upload(c, settings.max_crop_bytes, label) for c, label in zip(crops, labels)]
+        kind = "image" if image is not None else "crops"
+        key = input_key(kind, files, hints)
+
+        # The same input as a recent clean analysis: return it, with its id, so its searches are reused too.
+        known = by_input.get(key)
+        cached = analyses.get(known) if known else None
+        if cached is not None:
+            took = round((time.perf_counter() - started) * 1000)
+            log.info("analysis %s: cache hit in %d ms", cached.id[:8], took)
+            return analysis_json(cached, base_url(request), cached=True, timings={"cache": took, "total": took})
+
+        if key in running:  # the same input is being analyzed right now: wait for that run
+            analysis = await asyncio.shield(running[key])
+            return analysis_json(analysis, base_url(request), cached=True)
+
+        pictures = [open_image(data, label) for data, label in zip(files, labels)]
+
+        async def run() -> Analysis:
+            # Stored before anyone waiting on this run gets it, so its crop links work straight away.
+            result = await (active.analyze(image=pictures[0]) if kind == "image" else active.analyze(crops=pictures, hints=hints))
+            analyses.put(result.id, result)
+            if is_clean(result):
+                by_input.put(key, result.id)
+            return result
+
+        # Shielded: if this caller disconnects, the run still finishes for anyone else waiting on it.
+        task = asyncio.ensure_future(run())
+        running[key] = task
+        try:
+            analysis = await asyncio.shield(task)
+        finally:
+            if running.get(key) is task:
+                del running[key]
         return analysis_json(analysis, base_url(request), cached=False)
 
     async def run_search(request: Request, body: SearchRequest, brand: str | None) -> SearchResponse:

@@ -24,13 +24,13 @@ garment-and-brand pair is searched once and then cached, so credits are only spe
 | 3 | SegFormer segmentation (per-garment crops) | ✅ done |
 | 4 | FashionCLIP catalog matching + demo catalog | ✅ done |
 | 5 | Google Lens (via Supabase signed links) + re-ranking | ✅ done |
-| 6 | `/refine` on real search + image-hash cache | planned |
+| 6 | `/refine` on real search + image-hash cache | ✅ done |
 
 Without `MOCK_MODE=1`, each step runs when its key is present, and steps that aren't built or configured yet
 are skipped (they're `null` in `/health` → `components`). With neither `OPENAI_API_KEY` nor `SERPAPI_KEY`,
 `/analyze` answers `503 not_configured`.
 
-**What runs today (after stage 5):**
+**What runs today (all stages done):**
 - **A photo** (`image`) is segmented by SegFormer into upper clothes, dress, skirt, pants and shoes. Each
   garment is cut out onto white, and pieces under `MIN_GARMENT_AREA` of the photo are dropped (shoes need half
   that). All the crops are then described in one OpenAI call. The model merges a jacket and the top under it
@@ -167,6 +167,9 @@ online match is `{title, price: {value, currency} | null, retailer, url, image, 
 `source` is `lens`, `shopping`, or `lens+shopping`. A search that worked is cached, so asking again returns
 `"cached": true` and spends nothing. A failed one isn't cached, so it can be retried.
 
+The same input sent to `/analyze` again also returns `"cached": true`, with the earlier `analysis_id` (see
+[Caching](#caching)).
+
 ### `POST /refine` (JSON)
 
 ```bash
@@ -213,6 +216,21 @@ Each run keeps the other script's entries and any you added by hand. FashionCLIP
 startup only for new or changed products and cached in `catalog/embeddings.npz`, which Git ignores. Restart the
 service after changing the catalog. Matches from local images point at `/catalog-images/<file>`, served by
 this service.
+
+## Caching
+
+Everything is kept in memory, and a restart forgets it.
+
+- **Repeated inputs** (stage 6): `/analyze` hashes its input with sha256 (the kind, every file's bytes in order,
+  and the category hints).
+  - **The same photo again** returns the earlier analysis instantly, with the same `analysis_id`,
+    `"cached": true` and `timings_ms: {"cache", "total"}`. Its searches stay cached too.
+  - **Only clean analyses are reused:** if any step failed, the next request runs again, so an outage can be
+    retried.
+  - **Identical requests that arrive together** share one run.
+- **Searches:** a `/search` or `/refine` that worked is kept per garment and brand, so asking again returns
+  `"cached": true` and spends no SerpAPI credit. A garment's Lens results are also reused by its `/refine`.
+- **Limits:** up to `CACHE_SIZE` analyses (64) for `CACHE_TTL_SECONDS` (1 hour). The least recently used go first.
 
 ## Re-ranking
 
