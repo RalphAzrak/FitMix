@@ -1,19 +1,21 @@
 import SwiftUI
 
-/// The cart: pieces the user added from Shop This Look, with size and quantity, grouped by retailer.
-/// Checkout opens FitMix's own checkout pages (`CheckoutView` → `PaymentView` → confirmation), in demo
-/// mode: no payment is taken and no store receives an order. A paid order removes its lines.
+/// The cart, the first page of the checkout flow (`CheckoutFlowView`): pieces the user added from
+/// Shop This Look, with size and quantity, grouped by store.
+///
+/// In demo mode (`CheckoutMode.current == .demo`, Debug builds) one **Checkout** button pushes the demo
+/// checkout for the whole cart, every store together, and recent demo orders are listed here and open
+/// their Order Summary. Outside demo mode each Shopify store has its own **Checkout at <store>**
+/// (Shopify Checkout Kit, `ShopifyStoreCheckout.swift`).
 struct CartView: View {
     @Environment(CartStore.self) private var cart
-    @Environment(\.dismiss) private var dismiss
-    /// False when pushed inside another screen's navigation (Shop This Look), where Back is enough.
-    var showsDone = true
+    @Environment(DemoOrderStore.self) private var orders
+    @Environment(CheckoutNavigator.self) private var navigator
 
-    @State private var retailer: URL?
     @State private var failure: String?
     @State private var confirmClear = false
-    /// FitMix's checkout, pushed on this navigation stack.
-    @State private var showCheckout = false
+    @State private var shopify = ShopifyStoreCheckoutState()
+    private let mode = CheckoutMode.current
 
     var body: some View {
         Group {
@@ -21,9 +23,12 @@ struct CartView: View {
                 unreadable(loadError)
             } else if cart.isEmpty {
                 ScrollView {
-                    ProfileEmptyState(icon: "bag", title: "Your cart is empty",
-                                      message: "Scan an outfit, then add pieces from Shop This Look.")
-                        .padding(16)
+                    VStack(alignment: .leading, spacing: 12) {
+                        ProfileEmptyState(icon: "bag", title: "Your cart is empty",
+                                          message: "Scan an outfit, then add pieces from Shop This Look.")
+                        recentOrders
+                    }
+                    .padding(16)
                 }
             } else {
                 list
@@ -33,8 +38,8 @@ struct CartView: View {
         .navigationTitle("Cart")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if showsDone {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { navigator.close() }.accessibilityIdentifier("cartDone")
             }
             if !cart.isEmpty && cart.loadError == nil {
                 ToolbarItem(placement: .topBarLeading) {
@@ -43,11 +48,7 @@ struct CartView: View {
                 }
             }
         }
-        .sheet(item: $retailer) { SafariView(url: $0).ignoresSafeArea() }
-        .navigationDestination(isPresented: $showCheckout) {
-            // Done on the confirmation pops back here; the paid lines are gone by then.
-            CheckoutView(onFinish: { showCheckout = false })
-        }
+        .shopifyStoreCheckout(shopify, cart: cart)
         .task { await runDebugCheckout() }
         .confirmationDialog("Remove everything from your cart?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear Cart", role: .destructive) { perform { try cart.removeAll() } }
@@ -75,13 +76,16 @@ struct CartView: View {
     private var list: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                if mode == .shopify { ShopifyCheckoutReceipts(state: shopify) }
                 ForEach(cart.groups) { group in
                     FMSectionHeader(title: group.name) {
                         Text(group.count == 1 ? "1 item" : "\(group.count) items")
                             .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
                     }
                     ForEach(group.items) { row($0) }
+                    if mode == .shopify { ShopifyGroupCheckoutButton(group: group, state: shopify) }
                 }
+                recentOrders
             }
             .padding(16)
         }
@@ -106,8 +110,10 @@ struct CartView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(AuthPalette.onSurface)
                         .lineLimit(2)
-                    if let detail = [item.brand, item.retailer].compactMap({ $0 }).first {
-                        Text(detail).font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
+                    // The store, then the brand when it says something more.
+                    let detail = [item.retailer, item.brand.flatMap { $0 == item.retailer ? nil : $0 }].compactMap { $0 }
+                    if !detail.isEmpty {
+                        Text(detail.joined(separator: " · ")).font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
                     }
                     if let line = item.shopify {
                         Text(line.displayOptions.joined(separator: " · ") + (line.colourFixedByListing ? " · Colour as pictured" : ""))
@@ -138,12 +144,6 @@ struct CartView: View {
                 .foregroundStyle(Color.fmError)
                 .accessibilityLabel("Remove \(item.name)")
                 Spacer()
-                if let url = item.retailerURL {
-                    Button("View at retailer") { retailer = url }
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(AuthPalette.primary)
-                        .frame(minHeight: 44)
-                }
             }
         }
         .padding(12)
@@ -190,69 +190,86 @@ struct CartView: View {
 
     private var summary: some View {
         VStack(spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(cart.count == 1 ? "1 item" : "\(cart.count) items")
-                    .font(.system(size: 15, weight: .semibold))
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cart.count == 1 ? "1 item" : "\(cart.count) items").font(.system(size: 15, weight: .semibold))
+                    Text(cart.groups.count == 1 ? "from 1 store" : "from \(cart.groups.count) stores")
+                        .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
+                }
                 Spacer()
-                subtotalText
+                VStack(alignment: .trailing, spacing: 1) {
+                    if cart.totals.isEmpty {
+                        Text("Prices unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
+                    }
+                    ForEach(cart.totals, id: \.price.currencyCode) { total in
+                        Text(total.price.formatted).font(.system(size: 17, weight: .bold)).foregroundStyle(AuthPalette.onSurface)
+                    }
+                    if cart.totals.count > 1 {
+                        Text("Currencies kept separate").font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
+                    }
+                    if cart.unpricedPieces > 0 && !cart.totals.isEmpty {
+                        Text("\(cart.unpricedPieces) without a price").font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("cartTotals")
             }
-            if let problem = CheckoutReadiness.problem(with: cart.items) {
-                NoticeRow(tone: .caution, text: problem).accessibilityIdentifier("cartCheckoutProblem")
-            } else {
-                Text("Delivery and tax are added at checkout.")
+            switch mode {
+            case .demo:
+                Button {
+                    navigator.path.append(.checkout)
+                } label: {
+                    Label("Checkout", systemImage: "bag")
+                }
+                .buttonStyle(FMFilledButtonStyle())
+                .accessibilityIdentifier("cartCheckout")
+            case .shopify:
+                Text("Each store checks out on its own, with the button under its pieces.")
                     .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button {
-                showCheckout = true
-            } label: {
-                Label("Checkout", systemImage: "lock.fill")
-            }
-            .buttonStyle(FMFilledButtonStyle())
-            .disabled(CheckoutReadiness.problem(with: cart.items) != nil)
-            .accessibilityIdentifier("cartCheckout")
         }
         .padding(16)
         .background(AuthPalette.surface)
         .overlay(alignment: .top) { Rectangle().fill(AuthPalette.containerHigh).frame(height: 1) }
     }
 
+    /// Demo orders placed on this iPhone, newest first. Saved on disk, so they're here after a restart.
     @ViewBuilder
-    private var subtotalText: some View {
-        if cart.hasMixedCurrencies {
-            Text("Prices in several currencies").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
-        } else if let subtotal = cart.subtotal {
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(subtotal.price.formatted).font(.system(size: 17, weight: .bold)).foregroundStyle(AuthPalette.onSurface)
-                if subtotal.pricedCount < cart.items.count {
-                    Text("for \(subtotal.pricedCount) of \(cart.items.count) pieces")
-                        .font(.system(size: 11)).foregroundStyle(AuthPalette.secondary)
+    private var recentOrders: some View {
+        if let error = orders.loadError {
+            NoticeRow(tone: .caution, text: error)
+        } else if !orders.orders.isEmpty {
+            FMSectionHeader(title: "Demo orders")
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("demoOrdersSection")
+                .accessibilityValue("\(orders.orders.count)")
+            ForEach(orders.orders.prefix(5)) { order in
+                NavigationLink(value: CheckoutRoute.summary(order.id, justPlaced: false)) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "checkmark.seal.fill").foregroundStyle(Color.fmGreen)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Demo order placed · \(order.number)").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk)
+                            Text("\(order.pieces) items · \(order.savedTotals.map(\.price.formatted).joined(separator: " · ")) · \(order.placedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.system(size: 12)).foregroundStyle(Color.fmSecondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.fmOutline)
+                    }
+                    .fmCard(padding: 12)
                 }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("demoOrder-\(order.number)")
             }
-        } else {
-            Text("Prices unavailable").font(.system(size: 13)).foregroundStyle(AuthPalette.secondary)
         }
     }
 
-    // MARK: Debug
-
-    /// Debug builds: FM_DEBUG_SCREEN=checkout fills an empty cart with two labelled sample pieces and
-    /// opens checkout straight away.
+    /// Debug: `FM_DEBUG_CHECKOUT_PLACE=1` taps Checkout, then Checkout and Payment carry on.
     private func runDebugCheckout() async {
-        #if DEBUG
-        guard AppShell.debugScreen == "checkout", !showCheckout else { return }
-        if cart.isEmpty {
-            let samples = [
-                CatalogProduct(id: "debug-checkout-jacket", name: "Olive Nylon Bomber Jacket", retailer: "FitMix sample",
-                               category: .jacket, match: .similar, price: Price(amount: 89, currencyCode: "CAD"), sizes: ["M"], isFixture: true),
-                CatalogProduct(id: "debug-checkout-pants", name: "Slim Stretch Chino", retailer: "FitMix sample",
-                               category: .pants, match: .similar, price: Price(amount: 64.5, currencyCode: "CAD"), sizes: ["32"], isFixture: true),
-            ]
-            for sample in samples { perform { try cart.add(sample, size: sample.sizes.first) } }
-        }
-        try? await Task.sleep(for: .seconds(0.5))
-        showCheckout = true
-        #endif
+        guard mode == .demo, DebugCheckoutScript.current?.placeOrder == true, !cart.isEmpty, navigator.path.isEmpty else { return }
+        do { try await Task.sleep(for: .seconds(1.5)) } catch { return }
+        CheckoutLog.record("debug-cart-checkout", store: "-", note: "items=\(cart.items.count) stores=\(cart.groups.count)")
+        navigator.path.append(.checkout)
     }
 
     private func perform(_ change: () throws -> Void) {

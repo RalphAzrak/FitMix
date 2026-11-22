@@ -16,6 +16,10 @@
 	</array>
 	<!-- Lets the app reach the FitMix backend running on a Mac on the same Wi-Fi (plain http to a .local address).
 	     Everything else still requires https. -->
+	<!-- Which checkout the cart opens: "demo" (FitMix's full-page demo checkout) or "shopify" (each store's
+	     Shopify Checkout Kit checkout). From the FITMIX_CHECKOUT_MODE build setting: Debug demo, Release shopify. -->
+	<key>FMCheckoutMode</key>
+	<string>$(FITMIX_CHECKOUT_MODE)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

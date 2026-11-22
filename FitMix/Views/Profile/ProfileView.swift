@@ -12,7 +12,7 @@ struct ProfileView: View {
     @Environment(AuthSession.self) private var auth
     @Environment(AvatarStore.self) private var avatar
     @Environment(ProfileStore.self) private var profile
-    @Environment(OrderStore.self) private var orders
+    @Environment(DemoOrderStore.self) private var orders
     @Environment(\.dismiss) private var dismiss
 
     @State private var path: [ProfileRoute] = ProfileView.debugRoute.map { [$0] } ?? []

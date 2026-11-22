@@ -291,7 +291,19 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
             evidence: ["Debug: hand-picked real Shopify listing, not found by visual search"], provider: "debug-shopify", isFixture: false),
     ]
 
-    enum Mode: String { case match, branded, nomatch, error, slow, shopify, budget }
+    /// FM_DEBUG_MATCH_FIXTURE=mixed: a real listing from a retailer that isn't on Shopify (Uniqlo) for the
+    /// T-shirt, and the real Shopify listing (Frank And Oak) for the pants, so one cart mixes both kinds.
+    static let mixedListings: [GarmentCategory: RetailerListing] = [
+        .tshirt: RetailerListing(
+            id: "uniqlo-airism-cotton-oversized-tee", title: "Unisex AIRism Cotton Oversized T-Shirt", retailer: "Uniqlo",
+            seller: nil, imageURL: URL(string: "https://image.uniqlo.com/UQ/ST3/us/imagesgoods/465185/item/usgoods_39_465185_3x4.jpg"),
+            listingURL: URL(string: "https://www.uniqlo.com/us/en/products/E465185-000/00"),
+            price: Decimal(string: "24.90"), currency: "USD", tier: .similar, brand: "Uniqlo",
+            evidence: ["Debug: hand-picked real listing from a retailer not on Shopify, not found by visual search"], provider: "debug-mixed", isFixture: false),
+        .pants: shopifyListings[.pants]!,
+    ]
+
+    enum Mode: String { case match, branded, nomatch, error, slow, shopify, mixed, budget }
     let mode: Mode
 
     init?(mode: String) {
@@ -325,6 +337,9 @@ nonisolated struct FixtureRetailerSearch: RetailerSearching {
             // configured here. Everything after this (product mapping, variant lookup, cart, checkout)
             // is the real path. Labeled as hand-picked in the evidence.
             guard let listing = Self.shopifyListings[request.category] else { return .noMatch }
+            return .matches([listing])
+        case .mixed:
+            guard let listing = Self.mixedListings[request.category] else { return .noMatch }
             return .matches([listing])
         case .nomatch: return .noMatch
         case .error: throw RetailerSearchError.providerBusy("Test fixture: the product search is temporarily unavailable.")
