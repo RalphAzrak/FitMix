@@ -2,8 +2,6 @@ import SwiftUI
 
 /// Choose the exact store variant (size, colour) and quantity of a Shopify listing before adding it
 /// to the cart. Options and stock come from the store's public product data, loaded when this opens.
-/// A `/products/` link on a store that turns out not to be Shopify (Uniqlo, for one) can still be
-/// added: without a size, to be chosen on the store's site at checkout.
 struct VariantPickerSheet: View {
     let product: CatalogProduct
     let link: ShopifyProductLink
@@ -16,8 +14,6 @@ struct VariantPickerSheet: View {
 
     @State private var resolved: ShopifyProduct?
     @State private var loadError: String?
-    /// The store answered, but not with Shopify product data.
-    @State private var notShopify = false
     @State private var selection: [Int: String] = [:]
     @State private var quantity = 1
     @State private var failure: String?
@@ -27,16 +23,10 @@ struct VariantPickerSheet: View {
             Group {
                 if let resolved {
                     form(resolved)
-                } else if notShopify {
-                    plainAdd
                 } else if let loadError {
                     ScrollView {
                         ProfileEmptyState(icon: "exclamationmark.triangle", title: "Couldn't load sizes", message: loadError) {
                             Button("Try Again") { Task { await load() } }.buttonStyle(FMFilledButtonStyle())
-                            // Still addable: the size is then chosen on the store's site at checkout.
-                            Button("Add Without a Size") { addWithoutVariant(quantity: 1) }
-                                .buttonStyle(FMOutlineButtonStyle())
-                                .accessibilityIdentifier("variantAddWithoutSize")
                         }
                         .padding(16)
                     }
@@ -59,62 +49,15 @@ struct VariantPickerSheet: View {
 
     private func load() async {
         loadError = nil
-        notShopify = false
         do {
             let product = try await ShopifyProducts.load(link)
             selection = product.initialSelection(preferredSize: profile.sizing.preferredSize(among: product.options.first(where: \.isSize)?.values ?? [], for: self.product.category))
             resolved = product
             if let autoPick { apply(autoPick, to: product) }
         } catch is CancellationError {
-        } catch ShopifyProductError.notShopify {
-            notShopify = true
-            CheckoutLog.record("not-shopify", store: link.host, note: "product=\(product.id)")
-            if let autoPick { addWithoutVariant(quantity: autoPick.quantity) }
         } catch {
             loadError = error.localizedDescription
         }
-    }
-
-    /// The store isn't Shopify: add the listing as it is, with a quantity, and say where the size is chosen.
-    private var plainAdd: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top, spacing: 14) {
-                    GarmentTile(source: product.image.tileSource, category: product.category)
-                        .frame(width: 76, height: 88)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Eyebrow(text: product.retailer ?? link.host)
-                        Text(product.name).font(.fmDisplay(20)).foregroundStyle(Color.fmInk)
-                        Text(product.price?.formatted ?? "Price unavailable").font(.system(size: 14, weight: .semibold))
-                    }
-                }
-                NoticeRow(tone: .info, text: "\(link.host) doesn't share its sizes with FitMix. Choose the size and colour on \(link.host) when you check out.")
-                quantityStepper
-                Button {
-                    addWithoutVariant(quantity: quantity)
-                } label: {
-                    Label("Add to Cart", systemImage: "bag.badge.plus")
-                }
-                .buttonStyle(FMFilledButtonStyle())
-                .accessibilityIdentifier("variantAddPlain")
-            }
-            .padding(16)
-        }
-    }
-
-    private var quantityStepper: some View {
-        Stepper(value: $quantity, in: 1...CartStore.maxQuantity) {
-            Text("Quantity \(quantity)").font(.system(size: 15, weight: .semibold))
-        }
-        .accessibilityIdentifier("variantQuantityPlain")
-    }
-
-    private func addWithoutVariant(quantity: Int) {
-        do {
-            try cart.add(product, size: nil, quantity: quantity)
-            CheckoutLog.record("added", store: link.host, note: "product=\(product.id) variant=none qty=\(quantity)")
-            dismiss()
-        } catch { failure = error.localizedDescription }
     }
 
     // MARK: Form

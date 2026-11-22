@@ -128,7 +128,6 @@ struct AppShell: View {
             case let screen? where screen.hasPrefix("live-sample-"):
                 if let category = GarmentCategory(rawValue: String(screen.dropFirst("live-sample-".count))),
                    let selection = SampleScans.liveSelection(category) {
-                    if CheckoutFixtureSearch.isEnabled { studio.searcher = CheckoutFixtureSearch() }
                     studio.openLive(selection, tryOnSource: nil)
                     router.tab = .studio
                     if let next = ProcessInfo.processInfo.environment["FM_DEBUG_THEN_SELECT"].flatMap(GarmentCategory.init(rawValue:)) {
@@ -148,16 +147,6 @@ struct AppShell: View {
                                 if studio.matchStates[piece.id] == nil { studio.select(piece.id) }
                                 for _ in 0..<60 where studio.matchStates[piece.id] == .searching || studio.matchStates[piece.id] == nil {
                                     try? await Task.sleep(for: .milliseconds(250))
-                                }
-                                // Pick another listing from the ranked list, as tapping it in Studio does.
-                                if let wanted = script.choices[category] {
-                                    let ranked = studio.matchLists[piece.id] ?? []
-                                    if let listing = ranked.first(where: { $0.id == wanted }) {
-                                        studio.chooseListing(listing, for: piece.id)
-                                        CheckoutLog.record("debug-chose", store: "-", note: "category=\(category.rawValue) listing=\(wanted) rank=\((ranked.firstIndex(of: listing) ?? 0) + 1) of \(ranked.count) now=\(studio.look?.pieces.first { $0.id == piece.id }?.product?.id ?? "-")")
-                                    } else {
-                                        CheckoutLog.record("debug-choose-missing", store: "-", note: "category=\(category.rawValue) listing=\(wanted) ranked=\(ranked.map(\.id))")
-                                    }
                                 }
                             }
                             router.showShopLook = true

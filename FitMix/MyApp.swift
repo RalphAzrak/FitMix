@@ -13,7 +13,7 @@ import SwiftUI
 
     init() {
         FMFonts.register()
-        ShopifyCheckoutSetup.configure()
+        CheckoutLog.configure()
     }
 
     var body: some Scene {

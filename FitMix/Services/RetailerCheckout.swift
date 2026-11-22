@@ -1,37 +1,67 @@
 import EmbeddedCheckoutProtocol
 import Foundation
+import os
 import ShopifyCheckoutKit
 
-// MARK: - Shopify stores: a prefilled cart and Checkout Kit
+// MARK: - One store's checkout, inside FitMix
 //
-// One way FitMix can fill a store's cart. For lines resolved to exact Shopify variants (see
-// ShopifyProducts.swift), FitMix builds the store's cart permalink from the store's domain and the
-// numeric variant IDs and quantities (`https://<store>/cart/<variant>:<qty>,<variant>:<qty>`), and
-// Shopify Checkout Kit opens it in a sheet inside the app. No Storefront API token is needed. The
-// store's own checkout prices the order, takes payment and creates the order; FitMix only receives
-// the lifecycle events, and only a completion event counts as a purchase. Stores that aren't Shopify
-// never reach this file. See Docs/Checkout.md.
+// Each Shopify store in the cart gets its own checkout. FitMix builds a cart permalink from the
+// store's domain and the lines' numeric variant IDs and quantities
+// (`https://<store>/cart/<variant>:<qty>,<variant>:<qty>`), and Shopify Checkout Kit opens it in a
+// sheet inside the app. No Storefront API token is needed for that. The store's own checkout prices
+// the order, takes payment and creates the order; FitMix only receives the lifecycle events.
+// See Docs/Checkout.md.
 
-extension PrefilledCart {
-    /// The store's cart permalink for the lines in `items` that are exact Shopify variants, or nil
-    /// when there are none.
-    static func shopify(store: String, storeName: String, items: [CartItem], prefill: CheckoutPrefill? = nil) -> PrefilledCart? {
-        let variantItems = items.filter { $0.shopify != nil }
-        guard let domain = variantItems.first?.shopify?.storeDomain else { return nil }
+/// What a store's completed checkout told FitMix.
+nonisolated struct CheckoutReceipt: Identifiable, Equatable, Sendable {
+    struct Line: Equatable, Sendable {
+        var variantID: Int64?
+        var title: String
+        var quantity: Int
+    }
+    var id: String { checkoutID }
+    var store: String
+    var storeName: String
+    var checkoutID: String
+    /// Shopify's order ID, when the completion event carries one.
+    var orderID: String?
+    /// e.g. "#1001".
+    var orderLabel: String?
+    /// The buyer's order status page.
+    var orderURL: URL?
+    var lines: [Line]
+    var completedAt: Date
+}
+
+/// A checkout FitMix is about to open, or has open, for one store.
+struct RetailerCheckout: Identifiable, Equatable {
+    var store: String
+    var storeName: String
+    /// What FitMix sent: variant → quantity. Used to clear the cart if the completion event's line
+    /// items can't be read.
+    var lines: [Int64: Int]
+    var url: URL
+    var id: String { url.absoluteString }
+
+    /// The checkout for one retailer group, or nil when any line isn't an exact store variant.
+    init?(group: CartStore.RetailerGroup, prefill: CheckoutPrefill? = CheckoutPrefill.debugDefault) {
+        guard group.canCheckOutInApp, !group.items.isEmpty else { return nil }
         var lines: [Int64: Int] = [:]
         var order: [Int64] = []
-        for item in variantItems {
-            guard let variant = item.shopify?.variantID, item.quantity > 0 else { return nil }
+        for item in group.items {
+            guard let variant = item.shopify?.variantID else { return nil }
             if lines[variant] == nil { order.append(variant) }
             lines[variant, default: 0] += item.quantity
         }
-        guard let url = shopifyPermalink(domain: domain, lines: order.map { ($0, lines[$0] ?? 1) }, prefill: prefill) else { return nil }
-        return PrefilledCart(kind: .shopifyCartPermalink, store: store, storeName: storeName, url: url, lines: lines,
-                             itemIDs: variantItems.map(\.id))
+        guard let url = Self.permalink(domain: group.id, lines: order.map { ($0, lines[$0] ?? 1) }, prefill: prefill) else { return nil }
+        self.store = group.id
+        self.storeName = group.name
+        self.lines = lines
+        self.url = url
     }
 
     /// `https://<domain>/cart/<variant>:<qty>,…` (Shopify's cart permalink, numeric variant IDs).
-    nonisolated static func shopifyPermalink(domain: String, lines: [(variant: Int64, quantity: Int)], prefill: CheckoutPrefill? = nil) -> URL? {
+    nonisolated static func permalink(domain: String, lines: [(variant: Int64, quantity: Int)], prefill: CheckoutPrefill? = nil) -> URL? {
         guard !lines.isEmpty, lines.allSatisfy({ $0.quantity > 0 }) else { return nil }
         var components = URLComponents()
         components.scheme = "https"
@@ -41,7 +71,7 @@ extension PrefilledCart {
         return components.url
     }
 
-    /// Turns a Checkout Kit completion event into a receipt and the variant → quantity that was bought.
+    /// Turns a completion event into a receipt and the variant → quantity that was bought.
     func receipt(from event: CheckoutCompleteEvent) -> (receipt: CheckoutReceipt, purchased: [Int64: Int]) {
         let checkout = event.checkout
         let lines = checkout.lineItems.map { line in
@@ -91,10 +121,12 @@ nonisolated struct CheckoutPrefill: Sendable {
     }
 }
 
-/// Checkout Kit setup and its lifecycle snapshots. Debug builds also write every snapshot as JSON to
+/// Checkout logging. Debug builds also write every lifecycle snapshot as JSON to
 /// `Documents/checkout-events/`, so a run can be checked afterwards (line items, shipping options,
 /// order confirmation). Buyer details are redacted by Shopify before FitMix receives them.
-enum ShopifyCheckoutSetup {
+enum CheckoutLog {
+    static let logger = Logger(subsystem: "app.fitmix", category: "checkout")
+
     static func configure() {
         ShopifyCheckout.configure { config in
             config.appearance = .app(.light())
@@ -105,13 +137,18 @@ enum ShopifyCheckoutSetup {
         }
     }
 
-    static func record(_ kind: String, store: String, checkout: Checkout) {
-        var note = "id=\(checkout.id) status=\(checkout.status.rawValue) currency=\(checkout.currency)"
-        note += " lines=" + checkout.lineItems.map { "\($0.item.id)×\($0.quantity) \($0.item.title)" }.joined(separator: "; ")
-        if let order = checkout.order { note += " order=\(order.id) label=\(order.label ?? "-")" }
-        CheckoutLog.record(kind, store: store, note: note)
+    static func record(_ kind: String, store: String, checkout: Checkout? = nil, note: String? = nil) {
+        var summary = "[checkout] \(kind) store=\(store)"
+        if let checkout {
+            summary += " id=\(checkout.id) status=\(checkout.status.rawValue) currency=\(checkout.currency)"
+            summary += " lines=" + checkout.lineItems.map { "\($0.item.id)×\($0.quantity) \($0.item.title)" }.joined(separator: "; ")
+            if let order = checkout.order { summary += " order=\(order.id) label=\(order.label ?? "-")" }
+        }
+        if let note { summary += " \(note)" }
+        logger.info("\(summary, privacy: .public)")
         #if DEBUG
-        guard let data = try? JSONEncoder().encode(checkout),
+        print(summary)
+        guard let checkout, let data = try? JSONEncoder().encode(checkout),
               let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let folder = documents.appendingPathComponent("checkout-events", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
