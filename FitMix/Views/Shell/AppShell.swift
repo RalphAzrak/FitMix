@@ -119,7 +119,7 @@ struct AppShell: View {
             case "metrics": router.showMetricsEditor = true
             case "auth", "profile": router.authPreview = .signIn
             case "auth-create": router.authPreview = .createAccount
-            case "cart": router.showCart = true
+            case "cart", "checkout": router.showCart = true  // "checkout" also opens CartView's checkout
             case "shop": router.showShopLook = true
             case "studio": router.tab = .studio
             #if DEBUG
@@ -192,7 +192,7 @@ struct AppShell: View {
     }
 
     /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | generate | avatar-profile |
-    /// metrics | auth | auth-create | profile | studio | studio-sample | closet | saved | camera | cart | shop.
+    /// metrics | auth | auth-create | profile | studio | studio-sample | closet | saved | camera | cart | checkout | shop.
     static var debugScreen: String? {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_SCREEN"]

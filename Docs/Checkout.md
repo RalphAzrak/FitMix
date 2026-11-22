@@ -1,84 +1,108 @@
-# In-app retailer checkout (proof of concept)
+# Checkout (FitMix's own pages, demo mode)
 
-Studio Fit listing → Shop This Look → **Choose Size & Add** (the exact store variant) → **View Cart** →
-**Checkout at <store>**. Each Shopify store's own checkout opens in a sheet inside FitMix (Shopify Checkout
-Kit). The cart is grouped by store, and every store checks out separately.
+Cart → **Checkout** → **Payment** → **Order confirmed**. All three are native FitMix screens in the app's
+style, pushed on the cart's navigation stack. They don't open a pop-up, an Apple Pay sheet, or a store's web
+checkout.
+
+**Demo mode:** Pay runs `DemoPaymentProcessor`. No card details leave the phone, no money moves, and no store
+receives an order. Every page and order says so ("Demo"). A real provider can replace the processor (see
+"Going live" below) without changing the screens.
 
 | Piece | Where |
 | --- | --- |
-| Listing URL → store + product handle, variants from `/products/<handle>.js` | `FitMix/Services/ShopifyProducts.swift` |
-| Size / colour / quantity picker | `FitMix/Views/Checkout/VariantPickerSheet.swift` |
-| Exact variant on a cart line (`ShopifyLine`) | `FitMix/Models/Cart.swift` |
-| Retailer groups, clear-only-what-this-store-sold | `FitMix/Services/CartStore.swift` |
-| Cart permalink, completion → receipt, lifecycle log | `FitMix/Services/RetailerCheckout.swift` |
-| Per-store checkout button and Checkout Kit sheet | `FitMix/Views/Checkout/CartView.swift` |
-| Launch-argument script for the simulator | `FitMix/Services/DebugCheckoutScript.swift` |
+| Delivery options, tax estimate, totals, card validation, `DemoOrder` | `FitMix/Models/Checkout.swift` |
+| `PaymentProcessor` protocol, `DemoPaymentProcessor` | `FitMix/Services/PaymentProcessor.swift` |
+| Orders per account (`orders.json`) | `FitMix/Services/OrderStore.swift` |
+| Checkout page (contact, ship to, delivery, summary), `CheckoutDraft`, `AddressFormFields` | `FitMix/Views/Checkout/CheckoutView.swift` |
+| Payment page (card, billing, total, Pay) | `FitMix/Views/Checkout/PaymentView.swift` |
+| Card fields, shared field style, demo banner | `FitMix/Views/Checkout/CardFields.swift` |
+| Confirmation, receipt, order detail | `FitMix/Views/Checkout/OrderConfirmationView.swift` |
+| Checkout button and its guards | `FitMix/Views/Checkout/CartView.swift` |
+| Order History | `OrderHistoryView` in `FitMix/Views/Profile/ProfileInfoViews.swift` |
 
-Package: [Shopify/checkout-kit](https://github.com/Shopify/checkout-kit) 4.2.0, products `ShopifyCheckoutKit`
-and `EmbeddedCheckoutProtocol` (the v4 SDK; the older `checkout-sheet-kit-swift` v3 is in maintenance until
-May 2027).
+## The flow
 
-## How it works
+1. **Cart.** **Checkout** is enabled only when every line has a price, in one currency. Otherwise the cart
+   says what to fix.
+2. **Checkout.**
+   - **Contact:** the email comes from the account, and a phone number is required.
+   - **Ship to:**
+     - The default saved address is filled in, and the menu offers the other saved addresses or a new one.
+     - The fields and rules are the same as Profile → Addresses (`ShippingAddress.errors()`,
+       `AddressFormat`). For example, a Canadian postal code must match the province.
+     - Signed in, **Save to my addresses** adds a new address to Profile. If saving fails, checkout still
+       continues and says so.
+   - **Delivery:** Standard ($8, 5–7 days) or Express ($20, 1–2 days). These are demo prices.
+   - **Summary:** the items and totals.
+   - **Continue** shows the problem under each field until they're all valid.
+3. **Payment.**
+   - **The card number** is grouped as it's typed, and the brand (Visa, Mastercard, Amex, Discover) is shown. It
+     must have the brand's length and pass the Luhn check.
+   - **Expiry** is MM/YY and not in the past. **The security code** is 3 digits, or 4 for Amex. **The name** is
+     required.
+   - **Billing** is the shipping address by default, or a separate address with the same rules.
+   - **Pay $X** shows "Processing payment…", and Back is blocked meanwhile.
+4. **Confirmation.**
+   - It shows the order number (`FM-12345`), the **Demo** tag, the items, the address, the card (brand ••••
+     last 4) and the totals.
+   - The paid lines leave the cart, and other lines stay.
+   - **Done** returns to the cart. **View in Order History** appears when the order was saved.
 
-1. **Is it Shopify?** `ShopifyProductLink` reads `https://<store>/…/products/<handle>[?variant=<id>]` from the
-   listing (Google Lens `google.com/goto?url=` links are unwrapped). `ShopifyProducts.load` fetches
-   `https://<store>/products/<handle>.js`, which every Shopify online store serves publicly. Anything that
-   isn't that JSON is treated as "not Shopify" and keeps **View at retailer**.
-2. **Exact variant.** The picker offers only option values that a real variant has, crosses out sold-out
-   ones, and resolves one numeric variant ID. Two real cases:
-   - **Kotn** lists `Color`, `Colour` and `Size`, and its option lists include colours this product doesn't
-     have (each colour is a separate product). Only Black exists here, so colour is fixed and the shopper
-     picks Size.
-   - **Frank And Oak** has only `Size`; each colour is its own product (`YGroup_…` tag). The listing's URL
-     fixes the colour, and the cart says "Colour as pictured".
-3. **Cart.** A Shopify line stores the store domain, handle, numeric variant ID, the store's variant title
-   and every option. Lines group by store domain.
-4. **Checkout.** `https://<store>/cart/<variant>:<qty>,<variant>:<qty>` (Shopify's cart permalink; no
-   Storefront API token) is opened with `ShopifyCheckout(checkout:)` in a sheet.
-5. **Outcome.**
-   - Closed without buying (close button, swipe down, or the app closing it): the cart is unchanged and
-     says so.
-   - `onComplete`: FitMix reads the order ID/label and line items from the event, removes exactly those
-     variants and quantities from **that store's** lines, and shows a receipt. Other stores' lines stay. If
-     the event's line items don't match what was sent, it falls back to what FitMix sent for that store.
-   - `onFail`: the cart is unchanged and the error is shown.
+## Totals
 
-The prices shown in FitMix are the listing's; each store's checkout prices the order, tax and shipping.
+- **Subtotal:** the listed prices of the cart lines (what the listings showed when added).
+- **Delivery:** the option's price.
+- **Tax:** an **estimate** for Canadian addresses, on goods and delivery, by province. Examples: QC 14.975%
+  (GST + QST), ON 13% (HST), NS 14% (HST), AB 5% (GST). Outside Canada the total says "Calculated by the store".
+- **Total:** the sum, rounded to cents.
 
-## Debug launch arguments (Debug builds only)
+## Card data
+
+- The card's digits live only in the payment page's state, and are cleared after the order.
+- They're never saved, logged or sent.
+- An order keeps only the brand and the last four digits.
+- The fields use iOS card content types, so autofill can offer saved cards.
+
+## Demo outcomes
+
+| Card | Result |
+| --- | --- |
+| `4242 4242 4242 4242`, any future date, any CVC | Approved |
+| Any other number that passes the checks | Approved |
+| `4000 0000 0000 0002` | **Declined**: the message shows on the payment page, and the cart and form stay |
+
+## Orders
+
+`OrderStore` saves orders per account in `Application Support/Accounts/<user-id>/orders.json`, with complete
+file protection, next to `cart.json`.
+- **Signed out:** the confirmation shows the order and says it isn't saved.
+- **Order History** (Profile) lists saved orders, newest first, each tagged **Demo**, and opens a detail page.
+
+## Debug (Debug builds only)
 
 | Variable | What it does |
 | --- | --- |
-| `FM_DEBUG_MATCH_FIXTURE=shopify` | Studio Fit's search returns **two hand-picked real listings**: Kotn's Women's Shrunken Tee in Black for the T-shirt, Frank And Oak's Essential Slim Chino Pant for the pants. Everything after the search is the real path. |
-| `FM_DEBUG_CHECKOUT_PICKS=tshirt=Size:M*1;pants=Size:32X32*2` | Selects each garment in Studio, waits for its match, opens Shop This Look, and adds each through the variant picker. |
-| `FM_DEBUG_CHECKOUT_OPEN=kotn.com` | The cart then opens that store's checkout. |
-| `FM_DEBUG_CHECKOUT_CLOSE_AFTER=40` | Closes that checkout after 40 s without buying. |
-| `FM_DEBUG_CHECKOUT_SIMULATE_COMPLETE=1` | **Simulated**: no order exists. Feeds a completion event built from the lines FitMix sent through the real completion handler, to check cart clearing only. The receipt says "simulated". |
-| `FM_DEBUG_CHECKOUT_PREFILL=montreal` | Pre-fills Montréal City Hall (275 Rue Notre-Dame Est, H2Y 1C6) and `fitmix-checkout-test@example.com` (a reserved, undeliverable domain). Never the user's details. |
+| `FM_DEBUG_SCREEN=checkout` | Opens the cart and goes straight to Checkout. An empty cart is first filled with two labelled sample pieces (CAD). |
+| `FM_DEBUG_CHECKOUT_DEMO=decline` | Every card is declined. |
 
-With `FM_DEBUG_SCREEN=live-sample-tshirt`, these run the whole flow without a camera. Every checkout event is
-printed as `[checkout] …` and saved as JSON in the app's `Documents/checkout-events/`.
+## Going live
 
-## Observed on 21 Nov 2026 (iPhone 17 simulator, iOS 27.2)
+1. A payment provider has to be integrated. For example, **Stripe**:
+   - The backend creates a PaymentIntent and prices the order itself (never trusting the app's totals).
+   - The app collects the card with Stripe's own fields, so FitMix never handles raw card numbers.
+   - The provider's confirmation (a webhook) marks the order paid.
+2. A new `PaymentProcessor` wraps that, and `PaymentView.processor` uses it instead of the demo processor.
+3. **Who sells the goods** has to be decided first. Today the products belong to other stores, so FitMix
+   charging for them would make FitMix the merchant: refunds, shipping and tax become its job.
 
-| Store | Variant sent | What checkout reported (Checkout Kit `start`/`update` events) |
-| --- | --- | --- |
-| Kotn (`kotn.com`) | `53281327513968` (Black / M) × 1 | Same variant × 1, CAD 48.00. With the Montréal test address: "Ground (Up to 7 Business Days)" $8.00, tax $8.39 (Québec GST + QST rate). Needs a phone number to continue. |
-| Frank And Oak (`www.frankandoak.com`) | `47362189885618` (32X32) × 2, and × 4 in a later run | Same variant and quantity, CAD 81.75 each. With the Montréal test address: "Free standard delivery" $0, tax $48.97 on $327.00 (Québec GST + QST rate). Needs a phone number to continue. |
+## Shopify store checkout (no longer opened)
 
-- Both `/cart/<variant>:<qty>` permalinks worked on the stores' own domains, without any token.
-- Closing a checkout without buying kept the cart exactly as it was.
-- A **simulated** completion for Kotn removed only Kotn's line; Frank And Oak's stayed.
-- No order was placed and no payment details were entered. Both are live stores.
-
-## Not done yet
-
-- **A real Studio Fit result** needs eBay keys or the approved Scrappa setup on the backend. The hand-picked
-  listings stand in for that.
-- **A test order** needs a Shopify development store (free, from a Shopify Partner account) with the
-  Bogus Gateway or Shopify Payments test mode on, and a product. Point `FM_DEBUG_MATCH_FIXTURE=shopify`
-  listings (or a real listing) at that store, check out with card `1`, and confirm the order in its admin.
-- **Order details on completion**: buyer details are redacted unless the merchant grants
-  `read_checkout_kit_enhanced_buyer_events`.
-- **Wallets**: Apple Pay inside checkout needs an Apple Pay-capable device; Shop Pay and bank or wallet apps
-  can leave FitMix (see the report for what was observed).
+The cart used to open each Shopify store's own checkout in a sheet (Shopify Checkout Kit, cart permalinks).
+That code is still in the app, but the cart doesn't open it any more: `RetailerCheckout.swift`, the
+`ShopifyCheckoutKit` package, and `CartStore.completeCheckout`.
+- The variant picker (`VariantPickerSheet`, `ShopifyProducts`) is still used, so Shopify lines keep their exact
+  variant.
+- To bring store checkout back, open `RetailerCheckout(group:)`'s URL with `ShopifyCheckout(checkout:)` again.
+  Git history has the previous `CartView`.
+- The `FM_DEBUG_CHECKOUT_OPEN`, `_CLOSE_AFTER`, `_SIMULATE_COMPLETE` and `_PREFILL` variables belonged to it,
+  and do nothing now. `FM_DEBUG_CHECKOUT_PICKS` (adding variants through the picker) is still read.

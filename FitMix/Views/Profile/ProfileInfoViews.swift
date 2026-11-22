@@ -19,14 +19,29 @@ struct PaymentMethodsView: View {
     }
 }
 
-/// FitMix doesn't receive order data yet (purchases happen on retailer sites), so there are no
-/// orders to list. No sample orders are shown.
+/// Orders placed through FitMix's checkout, newest first. They're demo orders (no payment, no store
+/// order) and are labelled that way. Purchases made on retailer sites never appear here.
 struct OrderHistoryView: View {
+    @Environment(OrderStore.self) private var orders
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                ProfileEmptyState(icon: "bag", title: "No orders yet",
-                                  message: "Orders placed through FitMix will appear here.")
+                if let loadError = orders.loadError {
+                    NoticeRow(tone: .caution, text: loadError).fmCard()
+                }
+                if orders.orders.isEmpty {
+                    ProfileEmptyState(icon: "bag", title: "No orders yet",
+                                      message: "Orders placed through FitMix will appear here.")
+                } else {
+                    VStack(spacing: 12) {
+                        ForEach(orders.orders) { order in
+                            NavigationLink { OrderDetailView(order: order) } label: { row(order) }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("order-\(order.id)")
+                        }
+                    }
+                }
                 NoticeRow(tone: .info, text: "Purchases you make on a retailer's website, including from View at retailer, don't appear here automatically. Check your email or the retailer's account for those orders.")
                     .fixedSize(horizontal: false, vertical: true)
                     .fmCard()
@@ -36,6 +51,26 @@ struct OrderHistoryView: View {
         .background(AuthPalette.surface.ignoresSafeArea())
         .navigationTitle("Order History")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func row(_ order: DemoOrder) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Order \(order.id)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fmInk)
+                    TagPill(text: "Demo")
+                }
+                Text(order.placedAt.formatted(date: .abbreviated, time: .omitted) + " · " + (order.itemCount == 1 ? "1 piece" : "\(order.itemCount) pieces"))
+                    .font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
+            }
+            Spacer()
+            Text(order.totals.format(order.totals.total))
+                .font(.system(size: 15, weight: .bold).monospacedDigit())
+                .foregroundStyle(Color.fmInk)
+            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fmOutline)
+        }
+        .fmCard(padding: 14)
+        .accessibilityElement(children: .combine)
     }
 }
 

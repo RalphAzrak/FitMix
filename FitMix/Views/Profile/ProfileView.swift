@@ -12,6 +12,7 @@ struct ProfileView: View {
     @Environment(AuthSession.self) private var auth
     @Environment(AvatarStore.self) private var avatar
     @Environment(ProfileStore.self) private var profile
+    @Environment(OrderStore.self) private var orders
     @Environment(\.dismiss) private var dismiss
 
     @State private var path: [ProfileRoute] = ProfileView.debugRoute.map { [$0] } ?? []
@@ -54,7 +55,7 @@ struct ProfileView: View {
 
                     ProfileSection(title: "Order History") {
                         NavigationLink(value: ProfileRoute.orders) {
-                            ProfileRowLabel(icon: "bag", title: "Orders", detail: "No FitMix orders yet")
+                            ProfileRowLabel(icon: "bag", title: "Orders", detail: orders.orders.isEmpty ? "No FitMix orders yet" : (orders.orders.count == 1 ? "1 demo order" : "\(orders.orders.count) demo orders"))
                         }
                         .accessibilityIdentifier("profileOrders")
                     }

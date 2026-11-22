@@ -11,6 +11,8 @@ import SwiftUI
     @State private var profile = ProfileStore()
     /// The cart. Saved per account when signed in; in memory only when signed out.
     @State private var cart = CartStore()
+    /// Orders from FitMix's (demo) checkout, saved per account.
+    @State private var orders = OrderStore()
 
     init() {
         FMFonts.register()
@@ -26,6 +28,7 @@ import SwiftUI
                 .environment(outfit)
                 .environment(profile)
                 .environment(cart)
+                .environment(orders)
                 .preferredColorScheme(.light)
                 // Auth email links (fitmix://reset-password, confirm-email, email-change), including when the app was closed.
                 .onOpenURL { auth.handle(url: $0) }
@@ -44,6 +47,7 @@ import SwiftUI
                     outfit.activate(ownerID: id)
                     profile.activate(accountID: id)
                     cart.activate(accountID: id)
+                    orders.activate(accountID: id)
                 }
                 // Studio always renders from the current try-on photo, including after it's replaced or removed.
                 .onChange(of: store.bodyPhoto) { _, photo in studio.useTryOnPhoto(photo) }
