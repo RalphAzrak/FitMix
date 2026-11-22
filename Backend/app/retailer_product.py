@@ -15,7 +15,6 @@ from urllib.parse import urljoin
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .listing import _first, _products
 
 CURRENCY = "CAD"
 Department = Literal["any", "men", "women", "unisex"]
@@ -67,14 +66,37 @@ def variant_selector(url: httpx.URL) -> tuple[tuple[str, str], ...]:
                         if key.casefold() in VARIANT_PARAMS and value))
 
 
+def _gap_product_id(url: httpx.URL) -> str | None:
+    # Gap brands append four size digits to the colorway ID.
+    if url.path == "/browse/product.do" and (pid := url.params.get("pid")):
+        if pid.isascii() and pid.isdecimal() and len(pid) in (9, 10, 13, 14):
+            return pid[:-4] if len(pid) >= 13 else pid
+    return None
+
+
+def _decathlon_variant_id(url: httpx.URL) -> str | None:
+    # The descriptive slug sometimes differs between a search link and its structured offer.
+    if url.host.removeprefix("www.") == "decathlon.ca":
+        match = re.fullmatch(r"/(?:en|fr)/p/[^/]+/(\d+/(?:c\d+)+m\d+)/?", url.path)
+        return match[1] if match else None
+    return None
+
+
 def listing_key(value: str) -> str:
     url = httpx.URL(value)
-    selector = httpx.QueryParams(variant_selector(url))
-    return url.host.removeprefix("www.") + url.path.rstrip("/") + (f"?{selector}" if selector else "")
+    item = _gap_product_id(url)
+    selector = httpx.QueryParams(variant_selector(url) + ((("pid", item),) if item else ()))
+    decathlon_variant = _decathlon_variant_id(url)
+    path = f"/p/{decathlon_variant}" if decathlon_variant else url.path.rstrip("/")
+    return url.host.removeprefix("www.") + path + (f"?{selector}" if selector else "")
 
 
 def _same_product(a: httpx.URL, b: httpx.URL) -> bool:
-    return a.host == b.host and a.path.rstrip("/") == b.path.rstrip("/")
+    if a.host != b.host:
+        return False
+    if variant := _decathlon_variant_id(a):
+        return variant == _decathlon_variant_id(b)
+    return a.path.rstrip("/") == b.path.rstrip("/") and _gap_product_id(a) == _gap_product_id(b)
 
 
 def public_addresses(host: str) -> list[str]:
@@ -162,6 +184,27 @@ class Listing:
         }
 
 
+def _schema_records(node):
+    """Structured records in a JSON-LD tree."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _schema_records(item)
+    elif isinstance(node, dict):
+        if node.get("@type"):
+            yield node
+        for key in ("@graph", "mainEntity", "hasVariant"):
+            if key in node:
+                yield from _schema_records(node[key])
+
+
+def _first(value):
+    if isinstance(value, list):
+        return _first(value[0]) if value else None
+    if isinstance(value, dict):
+        return value.get("url") or value.get("contentUrl") or value.get("name")
+    return value
+
+
 def _string(value, limit: int = 180) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
@@ -181,16 +224,19 @@ def _in_stock_offer(offer):
     return amount, currency
 
 
-def _product_records(html: str):
-    records = []
+def _page_records(html: str):
     for block in re.findall(r"<script[^>]+application/ld\+json[^>]*>(.*?)</script>", html, re.S | re.I):
         try:
-            records.extend(list(_products(json.loads(block.strip()))))
+            yield from _schema_records(json.loads(block.strip()))
         except (ValueError, RecursionError):
             try:
-                records.extend(list(_products(json.loads(unescape(block.strip())))))
+                yield from _schema_records(json.loads(unescape(block.strip())))
             except (ValueError, RecursionError):
                 continue
+
+
+def _product_records(html: str, *, records=None):
+    records = list(_page_records(html)) if records is None else records
     groups = [record for record in records if _is_type(record, "ProductGroup")]
     groups_by_id = {group[key]: group for group in groups for key in ("@id", "productGroupID")
                     if isinstance(group.get(key), str)}
@@ -253,7 +299,7 @@ def _department(value, *, free_text: bool = False) -> str | None:
 
 
 def product_department(title: str, url: httpx.URL, *declared) -> str | None:
-    # Consult only product-level fields and the product's own title and path.
+    # Consult the product record, its department breadcrumb, title and path.
     fields = set(filter(None, map(_department, declared)))
     title_department = _department(title, free_text=True)
     if title_department == "kids" or "kids" in fields:
@@ -266,6 +312,21 @@ def product_department(title: str, url: httpx.URL, *declared) -> str | None:
     return next(iter(gendered), None) or ("unisex" if "unisex" in explicit else path_department)
 
 
+def _page_department(records, meta):
+    crumbs = []
+    for record in records:
+        if not _is_type(record, "BreadcrumbList") or not isinstance(record.get("itemListElement"), list):
+            continue
+        for entry in record["itemListElement"]:
+            if isinstance(entry, dict):
+                crumb = entry.get("item")
+                name = crumb.get("name") if isinstance(crumb, dict) else entry.get("name")
+                crumbs.append(_department(name, free_text=True))
+    departments = set(filter(None, crumbs))
+    breadcrumb = next(iter(departments)) if len(departments) == 1 else None
+    return meta.get("product:gender"), meta.get("product:audience"), breadcrumb
+
+
 def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], *,
                     selected: tuple[tuple[str, str], ...] = ()) -> list[Listing]:
     page = public_https(page_url)
@@ -273,11 +334,15 @@ def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], 
         return []
     retailer = _string(store_name) or page.host
     selected = set(selected or variant_selector(page))
+    records = list(_page_records(html))
+    page_department = _page_department(records, _page_meta(html))
     offers = []
-    for product, group in _product_records(html):
+    for product, group in _product_records(html, records=records):
         title = _property(product, "name") or _property(group, "name")
         explicit_product_url = _property(product, "url", 2048)
-        product_url = _resolve_url(page_url, explicit_product_url) if explicit_product_url else page.copy_with(query=None)
+        product_url = _resolve_url(page_url, explicit_product_url) if explicit_product_url else (
+            page if _gap_product_id(page) else page.copy_with(query=None)
+        )
         if not title or product_url is None or not _same_product(product_url, page):
             continue
         product_selection = set(variant_selector(product_url))
@@ -300,7 +365,9 @@ def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], 
             if link is None or not _same_product(link, page):
                 continue
             selectors = set(variant_selector(link))
-            own_page = bool((raw_url or explicit_product_url) and group_page and not _same_product(group_page, link))
+            own_page = bool((raw_url or explicit_product_url) and (
+                _decathlon_variant_id(link) or (group_page and not _same_product(group_page, link))
+            ))
             if ((selected and not selected <= selectors)
                     or (product_selection and not product_selection <= selectors)
                     or (group and not selectors and not own_page)):
@@ -327,8 +394,8 @@ def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], 
             )
             brand = _property(product, "brand") or _property(group, "brand")
             department = product_department(title, link, offer.get("audience"), offer.get("gender"),
-                                            product.get("audience"), product.get("gender"),
-                                            group.get("audience"), group.get("gender"))
+                                            product.get("audience"), product.get("gender"), product.get("category"),
+                                            group.get("audience"), group.get("gender"), *page_department)
             offers.append(Listing(title, retailer, brand, str(link), str(photo), amount, currency,
                                   bool(codes & independent_codes), color, pattern, department))
     offers.sort(key=lambda offer: (not offer.exact, offer.currency != CURRENCY, offer.currency, offer.amount))
@@ -369,7 +436,8 @@ def page_listing(html: str, page_url: str, store_name: str, *,
         return None
     selected = set(selected or variant_selector(page))
     meta = _page_meta(html)
-    products = [product for product, _ in _product_records(html)]
+    records = list(_page_records(html))
+    products = [product for product, _ in _product_records(html, records=records)]
     own: list[tuple[dict, httpx.URL]] = []
     for product in products:
         link = _property(product, "url", 2048)
@@ -413,7 +481,7 @@ def page_listing(html: str, page_url: str, store_name: str, *,
     return Listing(title, _string(store_name) or page.host, _property(record, "brand"), str(product_url), str(photo),
                    amount, currency, False, _property(record, "color"), _property(record, "pattern"),
                    product_department(title, product_url, record.get("audience"), record.get("gender"),
-                                      meta.get("product:gender"), meta.get("product:audience")))
+                                      record.get("category"), *_page_department(records, meta)))
 
 
 def comparison_jpeg(data: bytes) -> bytes | None:
@@ -444,11 +512,16 @@ class RetailerVerifier:
             return []
         page_url, data = page
         final_url = httpx.URL(page_url)
+        requested = httpx.URL(url)
+        if (colorway := _gap_product_id(requested)) and colorway != _gap_product_id(final_url):
+            return []
+        if (variant := _decathlon_variant_id(requested)) and variant != _decathlon_variant_id(final_url):
+            return []
         final_host = final_url.host.removeprefix("www.")
         # If a search hit redirected to a different retailer, display the verified domain.
         store = name if final_host == domain.lower().removeprefix("www.") else final_host
         html = data.decode(errors="replace")
-        selected = variant_selector(httpx.URL(url)) or variant_selector(final_url)
+        selected = variant_selector(requested) or variant_selector(final_url)
         offers = verified_offers(html, page_url, store, codes, selected=selected)
         if not offers and (listing := page_listing(html, page_url, store, selected=selected)):
             offers = [listing]

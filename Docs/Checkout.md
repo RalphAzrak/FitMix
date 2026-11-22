@@ -17,7 +17,7 @@ value means `demo`.
 It runs entirely in FitMix. It never collects card details, charges money, calls Shopify, a payment provider
 or a retailer checkout, contacts a store or places a retailer order. It works offline; product photos load
 only when online. It takes **any** cart line: no Shopify variant ID, supported-store list, retailer checkout
-URL or fresh OpenAI/Trendtrack request is needed. Pieces without a listed price are allowed and counted.
+URL or fresh product search is needed. Pieces without a listed price are allowed and counted.
 
 | Piece | Where |
 | --- | --- |

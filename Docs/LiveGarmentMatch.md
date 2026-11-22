@@ -145,15 +145,19 @@ shoes (no suitable photo was found), and several people in view.
 
 ## Product match
 
-Studio sends the crop from the selected garment, never the outfit frame. The backend searches the
-web with OpenAI, once from the crop and once from a description of it (garment type, color and
-pattern together, plus print and lettering). There is no store list. FitMix reads each page found
-for its title, photo and, when stated, price, then compares the product photo with the crop.
+Studio sends only the selected garment crop. The full outfit frame stays on the iPhone.
+OpenAI (`gpt-6.2-sol` by default) describes the crop, then receives the same image and
+structured description on a second request with web search. It uses the image for visual
+details and retrieves candidate listings through text queries. FitMix reads retailer pages
+to verify the variant, product photo, department and price if stated. A separate OpenAI
+comparison ranks the verified product photos against the original crop.
+
 Setup and Profile set the usual shopping department. **Shop this scan for** reruns the current
 scan with a temporary department. FitMix verifies the department from the retailer's listing.
 
 Close matches must reach the visual cutoff and pass the conflict checks. If strong results are
-scarce, FitMix broadens the query while keeping the garment type and department. A short zipper
+scarce, FitMix broadens the query while keeping the garment type and department. Products from the
+broader search appear as **Similar options**. A short zipper
 or the hem of a pair of shorts can rule out a wrong construction at any stage. When there is no
 close match, Studio displays **No close match found** and any verified **Similar options** under
 that garment. There are up to five distinct options in total. Selecting an option explicitly

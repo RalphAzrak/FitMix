@@ -96,6 +96,22 @@ def test_discovery_and_rank_use_the_requested_inputs(scenario, category, details
         content = request["input"][0]["content"]
         if request["text_format"] is WebProducts:
             assert [tool["type"] for tool in request["tools"]] == ["web_search"]
+            if content[0]["text"].startswith("{"):
+                # Studio's search: the photo and its description go to the search model together.
+                assert base64.b64decode(content[1]["image_url"].split(",")[1]) == source
+                context = json.loads(content[0]["text"])
+                assert context["category"] == category
+                visible_details = details.visible_fields()
+                if details.obscured:
+                    visible_details.pop("readable_text", None)
+                assert context["visible_details"] == visible_details
+                assert context["closure"] == details.observed_closure()
+                assert context["bottom_cut"] == details.observed_bottom_cut()
+                assert context["brand_filter"] == (brand_filter or None)
+                assert request["model"] == "gpt-6.2-sol"
+                assert request["tool_choice"] == "required" and request["max_tool_calls"] == 2
+                provider_calls.append("broad" if context["broadened_search"] else "search")
+                return found([5, 0, 1, 2, 3, 4, 6], tracked=4)
             if len(content) == 2:
                 assert base64.b64decode(content[1]["image_url"].split(",")[1]) == source
                 provider_calls.append("photo")
@@ -128,11 +144,15 @@ def test_discovery_and_rank_use_the_requested_inputs(scenario, category, details
                                   product_plain=None, product_text=None))
         return SimpleNamespace(output_parsed=Ratings(ratings=ratings))
 
-    model = OpenAIVisualSearch("", "fixture", SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    brand_filter = ""
+    model = OpenAIVisualSearch("", "gpt-4.1-mini", SimpleNamespace(responses=SimpleNamespace(parse=parse)),
+                               search_model="gpt-6.2-sol")
     matcher = OutfitMatcher(model, OpenAIWebSearch(model), RetailerVerifier(Pages()))
 
     with TestClient(create_app(Settings(mock=True), outfit=matcher)) as client:
         def search(mode=None, brand=""):
+            nonlocal brand_filter
+            brand_filter = brand
             provider_calls.clear()
             rank_calls.clear()
             fetched.clear()
@@ -151,7 +171,7 @@ def test_discovery_and_rank_use_the_requested_inputs(scenario, category, details
         assert set(provider_calls) == {"text"} and rank_calls == [(False, details.visible_fields())]
         assert [row["title"] for row in description["results"][:5]] == [titles[i] for i in (5, 1, 2, 3, 4)]
         combined = search()
-        assert provider_calls.count("photo") == 1 and set(provider_calls) == {"photo", "text"}
+        assert provider_calls == ["search"]  # One search, from the photo and the description together.
         assert rank_calls == [(True, details.visible_fields())]
         assert fetched.count(4) == 1
         assert [row["title"] for row in combined["results"][:5]] == [titles[i] for i in (5, 0, 1, 2, 3)]

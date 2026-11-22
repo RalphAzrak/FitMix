@@ -45,7 +45,7 @@ nonisolated struct RetailerListing: Sendable, Equatable {
     var brand: String?
     /// Why the listing got its label, in words ("brand Converse read on the garment matches").
     var evidence: [String] = []
-    /// Which search found it (e.g. "google_lens", "ebay").
+    /// Which search found the listing.
     var provider: String = ""
     /// Development data, not a real listing.
     var isFixture: Bool
@@ -126,8 +126,9 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
 
     static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral  // nothing cached on disk
-        configuration.timeoutIntervalForRequest = 65
-        configuration.timeoutIntervalForResource = 70
+        // Allow the backend to finish a bounded broadening pass and return its result.
+        configuration.timeoutIntervalForRequest = 85
+        configuration.timeoutIntervalForResource = 90
         configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }

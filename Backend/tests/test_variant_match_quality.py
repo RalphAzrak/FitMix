@@ -267,6 +267,9 @@ def test_black_quarter_zip_uses_color_and_closure_even_with_a_tee_camera_hint(sc
     assert "black solid" in queries[0]
     assert len(fetched) == len(set(fetched))
     assert result["garment_label"] == "Quarter-zip"
-    stocked = scenario != "miss"
-    assert result["status"] == ("matched" if stocked else "no_match")
-    assert [row["title"] for row in result["results"]] == (["Black Quarter Zip"] if stocked else [])
+    focused = scenario == "focused"
+    assert result["status"] == ("matched" if focused else "no_match")
+    assert [row["title"] for row in result["results"]] == (["Black Quarter Zip"] if focused else [])
+    if scenario == "fallback":
+        option = result["alternatives"][0]
+        assert (option["title"], option["match"], option["best_match"]) == ("Black Quarter Zip", "alternative", False)
