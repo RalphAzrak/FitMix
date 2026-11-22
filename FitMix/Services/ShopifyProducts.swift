@@ -16,7 +16,7 @@ nonisolated struct ShopifyProductLink: Equatable, Sendable {
     /// `?variant=` on the listing URL, when the listing pointed at one variant.
     var variantID: Int64?
 
-    /// Reads `https://<store>/…/products/<handle>[?variant=<id>]`. Google Lens result links
+    /// Reads `https://<store>/…/products/<handle>[?variant=<id>]`. Product search links
     /// (`google.com/goto?url=<listing>` or `/url?q=`) are unwrapped first.
     init?(url: URL) {
         var url = url

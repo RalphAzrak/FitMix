@@ -91,61 +91,33 @@ One build runs at a time and others wait their turn. The portrait is written to 
 length of its build and deleted with it; a finished model is kept in memory for 30 minutes. With `FITMIX_MOCK=1`
 a plain placeholder figure is returned after a few seconds, with no tools needed.
 
-`POST /v1/garment-match` (multipart form)
-
-| Field | |
-|---|---|
-| `crop` | Required. JPEG, PNG or WebP of the selected garment only, up to 2 MB. Full camera frames, profile photos and avatar images are never sent. |
-| `category` | Required. `jacket`, `tshirt`, `pants` or `shoes`. Only this category is returned. |
-| `color`, `pattern`, `style` | Optional clues read on the phone, e.g. `black`, `polka dots`, `sneaker`. |
-| `brand_hints`, `text` | Optional, comma-separated words and codes printed on the garment (Vision text recognition on the phone). |
-
-Returns `{"status": "matched" | "no_match", "category", "fixture", "providers": [...], "results": [...]}`. Each result has
-`id`, `title`, `retailer`, `seller`, `image_url`, `url`, `price` (`{"value", "currency"}` exactly as listed, or `null`),
-`match`, `brand`, `evidence` (why it got its label, in words), `provider`, `fixture` and `score`. `providers` says which
-provider answered, failed, or was skipped and why.
-
-How results are labeled (`app/visual_search.py`):
-
-- `exact`: a product code read on the garment matches the listing (title, URL, or the page's SKU/MPN/GTIN); or the
-  brand, a two-word model name and the colour read on the garment all match; or the provider found the same image on
-  the listing *and* the brand is supported. The app shows **Exact match**.
-- `brand`: only the brand is supported, either read on the garment or agreed on by at least 4 of the top 6 visual
-  matches. The app shows **Likely from [brand]**.
-- `similar`: the closest real alternative. The app shows **Similar match**.
-
-Social and media pages (Instagram, Pinterest, …) and listings that name another garment category are dropped. Results
-are ordered by label, then provider rank and shared clues; the app reorders within each label by photo likeness.
-
-Errors use `{"error": {"code", "message"}}`. `not_configured` and `provider_auth` aren't worth retrying; the other
-codes are. When one provider fails, the others' results are still returned.
-
 ## Studio outfit matching
 
-Only `OPENAI_API_KEY` is needed, in this worktree's ignored `Backend/.env`. `OPENAI_MATCH_MODEL` defaults to
-`gpt-4.1-mini`. Start the server with `./run.sh` and check `/health`: `outfit_match.ready` is true once the key
-is set, and `outfit_match.discovery` is `openai_web_search`.
+Set `OPENAI_API_KEY` in the ignored `Backend/.env`. `OPENAI_SEARCH_MODEL` defaults to
+`gpt-6.2-sol` for image description and web search. `OPENAI_MATCH_MODEL` defaults to
+`gpt-4.1-mini` for product photo comparison. Start the server with `./run.sh` and check
+`/health` for `outfit_match.ready` and `outfit_match.discovery: openai_web_search`.
+The legacy Scrappa, eBay and Google Lens routes and configuration have been removed.
 
-FitMix sends the selected crop, shopping department, and on-device OCR hints to `POST /v1/outfit-match`.
-Shopping department is used only for retailer matching. The backend then:
+Studio sends only the selected garment crop, shopping department, and on-device OCR hints to
+`POST /v1/outfit-match`. The full outfit photo stays on the phone. Shopping department applies
+to retailer matching.
 
-1. **Searches the web from the crop and its description**, with OpenAI's
-   [web search tool](https://developers.openai.com/api/docs/guides/tools-web-search). The text query
-   keeps the department, garment type, closure, color and pattern together. When strong results are scarce,
-   a shorter query relaxes trim and fit, then a broader query keeps the department and construction.
-   FitMix checks proposed product links against the search
-   tool's returned sources when available.
-2. **Reads each page it found**, as `FitMixListingReader/1.0`, at most two pages per store and each page once.
-   A page gives a listing when it has a structured in-stock offer, or failing that its own title and photo
-   (a product record or `og:` tags). The price is optional: it is shown when the page states one. Pages that
-   say sold out, that aren't about one product, or that refuse the reader are dropped.
-3. **Checks department and ranks by photo.** The retailer product record, title, or product path must support a
-   specific department. Men's and Women's also include verified Unisex items. A close match needs a score of
-   at least 65 and no clear conflict. Alternatives can differ in color or pattern with enough visual evidence
-   of the same construction. Long trousers cannot substitute for shorts, and full-zip jackets cannot
-   substitute for quarter-zips. An explicit `brand` filter requires that brand on the page.
-4. **Returns up to five distinct options per garment**, prioritizing close matches. Each includes its
-   verified product photo as `thumbnail` (base64 JPEG).
+1. **Describe the garment.** OpenAI identifies visible garment type, color, pattern, cut, closure and lettering.
+2. **Find direct listings.** The same crop and its structured description go to the OpenAI
+   [web search request](https://developers.openai.com/api/docs/guides/tools-web-search). The model
+   uses the image to resolve visible details and issues text queries to retrieve listings.
+   A broader query can relax details while keeping garment construction and department.
+   Listings found this way appear as Similar options.
+3. **Verify listings.** FitMix reads the retailer page to confirm the product, variant photo,
+   department and any stated price and currency. It drops pages and photos it cannot verify.
+   Men's and Women's also include verified Unisex products. An explicit brand requires
+   matching brand evidence on the page.
+4. **Compare garment photos.** The ranker sees the original crop and verified product photos.
+   A close match requires at least 65 and no clear conflict. Similar options still need
+   the right construction, including quarter-zip and shorts when visible.
+5. **Return up to five distinct options**, with close matches first and the photo used for comparison
+   included as a JPEG thumbnail.
 
 The multipart form accepts `crop`, `category`, optional `text` (OCR), optional `brand`, and
 `department` (`men`, `women`, `unisex`, or `any`, the default).
@@ -157,16 +129,10 @@ similar options and can be populated when `status` is `no_match`. Only a close m
 `best_match`. A result's `price` is `null`
 when its page doesn't state one.
 
-What to expect:
-
-- Many large retailers refuse automated readers. Their pages are found and then dropped, because a result
-  without a photo isn't shown. Common garments can end with few results, or none.
-- The same garment can give somewhat different results from one search to the next.
-- A search takes about 10 to 15 seconds and makes five OpenAI calls: three web searches, a description and
-  a ranking.
-- The app shows the merchant's currency. The outfit budget uses CAD prices only, so a listing with no stated
-  price can't be part of a budget. A budget follow-up finds nothing more: a web search has no second page.
-- Crops are held in memory for the length of the request and never written to disk.
+Search time and result counts depend on live retailer coverage and any broadened queries.
+Some retailers restrict automated product page or photo access. The app's request timeout is 85 seconds.
+The outfit budget uses CAD prices only. A budget follow-up has no additional page to fetch.
+Crops are held in memory during combined searches.
 
 For an iPhone test, run the backend on the same Wi-Fi, then build this worktree in Xcode.
 Disable `FM_DEBUG_MATCH_FIXTURE` and camera replay settings. Open **Scan Fits** and tap a
@@ -174,78 +140,20 @@ garment target. In **Layers & Garments**, check the shop link, photo and match l
 adjust the crop or set and clear a brand. Try an alternative. The Xcode console category `OutfitMatching`
 shows first-card and settled timings.
 
-## Legacy product search: `POST /v1/lens-search`
-
-Older clients send each garment’s crop as multipart `crop` (JPEG, PNG or WebP, at most 2 MB) plus `category` (`jacket`, `tshirt`, `pants`, `shoes`) and the
-optional on-device clues `color`, `text`, `pattern`, `style`. The server asks Google Lens through Scrappa
-(`GET https://scrappa.co/api/google/lens?url=<crop URL>&type=visual_matches`, `X-API-KEY` header, from Scrappa's
-OpenAPI spec) and answers:
-
-    {"status": "matched", "source": "google_lens", "cached": false,
-     "result": {"title", "url", "image_url", "image_source", "retailer", "price", "match": "similar", ...}}
-    {"status": "no_match", "source": "google_lens", "cached": false, "result": null}
-
-`result` is the single best credible listing: a retail page (not Google, social or image sites) whose title fits the
-category (or whose page carries a price) and names no other category, with an http(s) product link and an https
-photo. The top 4 listing pages are read for the retailer's own product photo (`image_source: "listing_page"`);
-otherwise Lens's thumbnail of that listing is used (`"lens_thumbnail"`). It is always labeled `similar`.
-
-Spending guards, all server-side:
-
-- **Cache**: the same crop and category get the stored answer (match or no match) for `FITMIX_LENS_CACHE_HOURS`
-  (default 7 days), across restarts. Failures aren't cached.
-- **In-flight de-duplication**: identical requests at the same time share one Scrappa call.
-- **Monthly cap**: at most `FITMIX_LENS_MONTHLY_LIMIT` calls (default 100) per UTC month; Scrappa's free tier is
-  500 credits. Over the cap: `503 budget_exhausted`, no call.
-- **Quota**: Scrappa `402` (out of credits) → `503 provider_quota`, and no more calls this month.
-- **Refused key** (`401/403`) → `503 provider_auth`, no more calls until restart. **Rate limited** → 60 s cooldown
-  (`provider_cooling_down`). Three failures in a row → 60 s cooldown. **Timeout** → `504 provider_timeout`.
-- **Not configured** (no `SCRAPPA_API_KEY`, or `FITMIX_PUBLIC_BASE_URL` isn't https) → `503 not_configured`, no call.
-
-The counter and cache live in `Backend/.cache/lens_search.json` (ignored by Git): hashes and listing JSON, no images.
-`GET /health` reports `lens_search` readiness, calls this month and the cap, never the key.
-
-## Retailer search setup (`/v1/garment-match`, not used by the app any more)
-
-Providers receive only the selected garment crop, and only those listed in `FITMIX_VISUAL_PROVIDERS` run.
-
-| Provider | Status | What it needs |
-|---|---|---|
-| `ebay`: eBay Browse API `search_by_image` | Official API, free. On by default once keys are set. | `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` from a Production keyset at [developer.ebay.com](https://developer.ebay.com/) (eBay asks for Marketplace Account Deletion handling or an exemption; FitMix stores no eBay user data). |
-| `google_lens`: Google Lens via [Scrappa](https://scrappa.co/apis/google-lens-api) | Built and tested with fixtures. **Off until you decide to send garment photos to Scrappa.** | `SCRAPPA_API_KEY`, and `FITMIX_PUBLIC_BASE_URL`: an https address of this server Scrappa can reach. |
-| `fixture` | Labeled development data. Sends nothing. | Nothing. |
-
-Scrappa's documented Lens search is `GET /api/google/lens?url=<public image URL>&type=…` with an `X-API-KEY` header.
-FitMix therefore publishes the crop at `/v1/crops/<random token>.jpg` for at most 90 seconds and 3 fetches, sends that
-URL, and revokes it when the search returns. Scrappa's page also lists an upload endpoint, but its own FAQ says
-uploads aren't supported and the upload docs couldn't be read, so FitMix doesn't use it. Lens results carry `title`,
-`link`, `source`, `thumbnail`, `price` (display text, no currency field) and `position`. A price whose currency isn't
-unambiguous (a bare "$") is dropped and taken from the listing page instead, or shown as "Price unavailable".
-
-Listing pages: with `FITMIX_LISTING_ENRICHMENT=1` (default) the server reads the top 6 listings' pages for the
-schema.org Product photo, price, currency, brand and codes. Only public http(s) hosts are fetched (private, loopback and
-link-local addresses are refused, on every redirect too), and nothing about the user is sent.
-
-To try the app without keys: `FITMIX_VISUAL_PROVIDERS=fixture ./run.sh`. The older `FITMIX_MATCH_PROVIDER=ebay|fixture`
-still works when `FITMIX_VISUAL_PROVIDERS` isn't set.
-
 ## What happens to the photos
 
 The server keeps each photo in memory only while its request runs. It writes nothing to disk and logs only the
 number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the avatar
 photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For Studio
 outfit matching, OpenAI receives the garment crop, and its web search runs queries OpenAI writes from it. The
-stores whose pages are then read get an ordinary page request and never the photo. For the older retailer
-search, each enabled provider receives only the garment crop; that provider's terms govern what it does with it.
-Crops published for Scrappa live only in this server's memory, under an unguessable token, for at most 90 seconds.
+stores get an ordinary request for a product photo or page, and never the crop. No other service receives it.
 
 ## Tests
 
     .venv/bin/pip install -r requirements-dev.txt
     .venv/bin/python -m pytest
 
-The tests replace OpenAI and eBay with stand-ins (eBay answers are shaped like its documented `ItemSummary`
-schema, not real listings), so they need no keys and send nothing.
+The tests replace OpenAI and retailer requests with fixtures. They run without API keys or external requests.
 
 ## Before putting this on the internet
 
