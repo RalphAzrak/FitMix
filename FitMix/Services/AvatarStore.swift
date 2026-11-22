@@ -144,6 +144,7 @@ final class AvatarStore {
         if !profile.hasBodyPhoto { return .bodyPhoto }
         switch profile.currentStep {
         case .review, .generate: return profile.readyToGenerate ? .generate : .measurements
+        case .shoppingDepartment where !profile.readyToGenerate: return .measurements
         default: return profile.currentStep
         }
     }

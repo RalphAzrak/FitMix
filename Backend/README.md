@@ -126,32 +126,35 @@ Only `OPENAI_API_KEY` is needed, in this worktree's ignored `Backend/.env`. `OPE
 `gpt-4.1-mini`. Start the server with `./run.sh` and check `/health`: `outfit_match.ready` is true once the key
 is set, and `outfit_match.discovery` is `openai_web_search`.
 
-FitMix sends the selected crop and on-device OCR hints to `POST /v1/outfit-match`. The backend then:
+FitMix sends the selected crop, shopping department, and on-device OCR hints to `POST /v1/outfit-match`.
+Shopping department is used only for retailer matching. The backend then:
 
 1. **Searches the web from the crop and its description**, with OpenAI's
    [web search tool](https://developers.openai.com/api/docs/guides/tools-web-search). The text query
-   keeps the specific garment type, closure, color and pattern together. A shorter query is used when
-   no result qualifies. FitMix checks proposed product links against the search
+   keeps the department, garment type, closure, color and pattern together. When strong results are scarce,
+   a shorter query relaxes trim and fit, then a broader query keeps the department and construction.
+   FitMix checks proposed product links against the search
    tool's returned sources when available.
 2. **Reads each page it found**, as `FitMixListingReader/1.0`, at most two pages per store and each page once.
    A page gives a listing when it has a structured in-stock offer, or failing that its own title and photo
    (a product record or `og:` tags). The price is optional: it is shown when the page states one. Pages that
    say sold out, that aren't about one product, or that refuse the reader are dropped.
-3. **Ranks by photo.** OpenAI compares each page's product photo with the crop: distinctive details first,
-   then cut, pattern and color. A result needs a score of at least 65 and no clear conflict. A visible
-   partial zipper needs matching cut evidence, and a clear color needs support in the product photo.
-   An explicit `brand` filter requires
-   that brand on the page.
-4. **Sends the photos along.** Every result is a page whose product photo was read and compared, and the
-   first ten carry that photo in the answer (`thumbnail`, base64 JPEG). The app shows it without asking the
-   store again, so a card is never blank. A page that couldn't be read has no photo and is not a result.
+3. **Checks department and ranks by photo.** The retailer product record, title, or product path must support a
+   specific department. Men's and Women's also include verified Unisex items. A close match needs a score of
+   at least 65 and no clear conflict. Alternatives can differ in color or pattern with enough visual evidence
+   of the same construction. Long trousers cannot substitute for shorts, and full-zip jackets cannot
+   substitute for quarter-zips. An explicit `brand` filter requires that brand on the page.
+4. **Returns up to five distinct options per garment**, prioritizing close matches. Each includes its
+   verified product photo as `thumbnail` (base64 JPEG).
 
-The multipart form accepts `crop`, `category`, optional `text` (OCR) and optional `brand`.
+The multipart form accepts `crop`, `category`, optional `text` (OCR), optional `brand`, and
+`department` (`men`, `women`, `unisex`, or `any`, the default).
 `mode` defaults to `combined`. Use `photo` for the photo search only or `description` for
 the description search and scoring only. Description mode derives its text from the same crop, then
 ranks product photos against the text. The response returns `description` and an optional
-`garment_label` from the crop alongside ranked
-results and marks the top result `best_match` when the evidence supports it. A result's `price` is `null`
+`garment_label` from the crop. The `results` array contains close matches. The `alternatives` array contains
+similar options and can be populated when `status` is `no_match`. Only a close match can be marked
+`best_match`. A result's `price` is `null`
 when its page doesn't state one.
 
 What to expect:

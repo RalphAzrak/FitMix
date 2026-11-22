@@ -126,7 +126,7 @@ def test_matcher_reads_at_most_a_few_pages_per_store():
     read = []
 
     class Search:
-        async def page(self, *_):
+        async def page(self, *_, department="any"):
             return DiscoveryPage([Hit(f"https://independent.example/garment/{i}", "www.independent.example", "")
                                   for i in range(5)], None, None)
 
@@ -144,7 +144,7 @@ def test_matcher_reads_at_most_a_few_pages_per_store():
 
     matcher = OutfitMatcher(Rank(), Search(), RetailerVerifier(Pages()), per_store=2)
     _, results, _ = asyncio.run(matcher.match("jacket", CROP, "image/jpeg", [], None, None, mode="photo"))
-    assert len(read) == 2 and len(results) == 2
+    assert len(read) == 2 and len(results) == 1  # Same retailer and product photo.
 
 
 def test_a_page_without_a_structured_offer_is_listed_from_its_own_title_and_photo():
@@ -174,7 +174,7 @@ def test_a_page_without_a_structured_offer_is_listed_from_its_own_title_and_phot
 
 def test_visual_score_ranks_ahead_of_exact_identity_and_keeps_foreign_currency():
     class Search:
-        async def page(self, *_):
+        async def page(self, *_, department="any"):
             return DiscoveryPage([
                 Hit("https://plain.example/products/example", "plain.example", ""),
                 Hit("https://independent.example/garment/elm", "independent.example", ""),
@@ -242,7 +242,7 @@ def test_verified_retailer_fetch_pins_dns_and_rechecks_redirects():
 
 def test_unverified_or_wrong_category_pages_result_in_an_honest_miss():
     class Search:
-        async def page(self, crop, media, search_id=None, offset=0):
+        async def page(self, crop, media, search_id=None, offset=0, *, department="any"):
             if offset == 0:
                 return DiscoveryPage([Hit("https://soldout.example/products/jacket", "soldout.example", "")],
                                      SEARCH_ID, 12)

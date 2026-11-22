@@ -8,7 +8,7 @@ nonisolated enum UnitSystem: String, Codable, CaseIterable, Sendable {
 
 /// The steps of creating an avatar, in order.
 nonisolated enum SetupStep: String, Codable, CaseIterable, Sendable {
-    case bodyPhoto, selfie, measurements, generate, review
+    case bodyPhoto, selfie, measurements, shoppingDepartment, generate, review
 }
 
 /// What one generated portrait was made from. Kept with the picture so the screen can say so, and can tell

@@ -149,12 +149,15 @@ Studio sends the crop from the selected garment, never the outfit frame. The bac
 web with OpenAI, once from the crop and once from a description of it (garment type, color and
 pattern together, plus print and lettering). There is no store list. FitMix reads each page found
 for its title, photo and, when stated, price, then compares the product photo with the crop.
-Every result must meet the visual score cutoff. A different color, pattern, closure, or
-lettering rules a listing out. Studio shows **Best match** for strong evidence,
-**Similar item** for other qualified listings, and **No close match found** when none qualify.
-Every result has its product photo, sent along by the backend. A store page that couldn't be read has
-no photo to compare and is not listed. Every result for the selected garment is listed under the
-garment cards. Tapping one puts it on the card, and **Try on** shows it on the user's avatar.
+Setup and Profile set the usual shopping department. **Shop this scan for** reruns the current
+scan with a temporary department. FitMix verifies the department from the retailer's listing.
+
+Close matches must reach the visual cutoff and pass the conflict checks. If strong results are
+scarce, FitMix broadens the query while keeping the garment type and department. A short zipper
+or the hem of a pair of shorts can rule out a wrong construction at any stage. When there is no
+close match, Studio displays **No close match found** and any verified **Similar options** under
+that garment. There are up to five distinct options in total. Selecting an option explicitly
+puts it on the garment card, and **Try on** shows it on the user's avatar.
 A listing whose page states no price shows **Price unavailable**. The scan label comes from
 the detected garment, including **Quarter-zip** when the crop supports it. **Refine Search**
 adjusts the crop or applies a brand filter.

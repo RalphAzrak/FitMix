@@ -13,6 +13,7 @@ nonisolated struct GarmentSearchRequest: Sendable {
     /// Text read on-device for structured product-code verification.
     var detectedText: [String]
     var brand: String = ""
+    var department: ShoppingDepartment = .any
 }
 
 /// How sure FitMix is that a listing is the garment the user tapped.
@@ -52,6 +53,7 @@ nonisolated struct RetailerListing: Sendable, Equatable {
     var bestMatch = false
     /// The product photo the backend compared with the garment, as JPEG. Shown without asking the store again.
     var thumbnail: Data? = nil
+    var isAlternative = false
 }
 
 nonisolated enum RetailerSearchOutcome: Sendable, Equatable {
@@ -155,6 +157,7 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
         var search_id: String
         var currency: String
         var results: [Listing]
+        var alternatives: [Listing]?
         var description: String?
         var garment_label: String?
     }
@@ -168,6 +171,7 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
         var form = MultipartForm()
         form.add(file: request.crop, name: "crop", fileName: "garment.jpg", type: "image/jpeg")
         form.add(value: request.category.rawValue, name: "category")
+        form.add(value: request.department.rawValue, name: "department")
         if !request.detectedText.isEmpty { form.add(value: request.detectedText.joined(separator: ","), name: "text") }
         if !request.brand.isEmpty { form.add(value: request.brand, name: "brand") }
         let response = try await submit(form)
@@ -224,10 +228,14 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
     }
 
     private static func listings(_ body: Response) -> [RetailerListing] {
-        guard body.status == "matched" else { return [] }
-        return body.results.compactMap { item in
+        let close = body.status == "matched" ? body.results.filter { $0.match != "alternative" } : []
+        let alternatives = body.alternatives ?? []
+        var used = Set<String>()
+        let candidates = close.map { ($0, false) } + alternatives.map { ($0, true) }
+        let listings: [RetailerListing] = candidates.compactMap { item, isAlternative in
             guard !item.id.isEmpty, !item.title.isEmpty, !item.retailer.isEmpty,
-                  let score = item.visual_score, (minimumVisualScore...100).contains(score),
+                  let score = item.visual_score,
+                  (isAlternative ? 45..<minimumVisualScore : minimumVisualScore..<101).contains(score),
                   // Every result is shown with its product photo: one without a photo is not a result.
                   let image = item.image_url.flatMap(URL.init(string:)), image.scheme == "https", image.host() != nil,
                   let link = item.url.flatMap(URL.init(string:)), link.scheme == "https", link.host() != nil else { return nil }
@@ -244,14 +252,17 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
             } else {
                 item.title
             }
+            guard used.insert(item.id).inserted else { return nil }
             return RetailerListing(id: item.id, title: title, retailer: item.retailer, seller: item.seller,
                                    imageURL: image, listingURL: link, price: amount, currency: item.price?.currency,
-                                   tier: MatchTier(rawValue: item.match) ?? .similar,
+                                   tier: isAlternative ? .similar : (MatchTier(rawValue: item.match) ?? .similar),
                                    brand: item.brand, evidence: item.evidence ?? [], provider: item.provider ?? "",
                                    isFixture: item.fixture ?? body.fixture ?? false, visualScore: score,
-                                   bestMatch: item.best_match ?? false,
-                                   thumbnail: item.thumbnail.flatMap { Data(base64Encoded: $0) })
+                                   bestMatch: !isAlternative && (item.best_match ?? false),
+                                   thumbnail: item.thumbnail.flatMap { Data(base64Encoded: $0) },
+                                   isAlternative: isAlternative)
         }
+        return Array(listings.prefix(5))
     }
 }
 
@@ -260,10 +271,11 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
 nonisolated enum GarmentSearchInput {
     /// Downscales the crop to JPEG (no metadata) and reads its clues, on-device.
     @concurrent
-    static func make(category: GarmentCategory, crop: CGImage, brand: String = "") async -> GarmentSearchRequest? {
+    static func make(category: GarmentCategory, crop: CGImage, brand: String = "",
+                     department: ShoppingDepartment = .any) async -> GarmentSearchRequest? {
         guard let jpeg = jpegData(crop, maxDimension: 640) else { return nil }
         return GarmentSearchRequest(category: category, crop: jpeg,
-                                    detectedText: GarmentClues.words(in: crop), brand: brand)
+                                    detectedText: GarmentClues.words(in: crop), brand: brand, department: department)
     }
 
     static func jpegData(_ image: CGImage, maxDimension: Int) -> Data? {

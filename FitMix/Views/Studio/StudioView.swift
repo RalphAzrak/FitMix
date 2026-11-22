@@ -41,6 +41,11 @@ struct StudioView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         lookHeader.padding(.top, 10).padding(.bottom, 8)
                         if studio.isLiveLook {
+                            ShoppingDepartmentPicker(title: "Shop this scan for", identifier: "scanShoppingDepartment", selection: Binding(
+                                get: { studio.shoppingDepartment }, set: studio.setShoppingDepartment
+                            ))
+                            .fmCard(padding: 10)
+                            .padding(.bottom, 8)
                             budgetControl.padding(.bottom, 12)
                         }
                         Picker("Preview view", selection: $mode) {
@@ -409,11 +414,15 @@ struct StudioView: View {
                 // is hidden off to the side. The selected garment's other results follow its box.
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(look.pieces) { piece in
+                        let listings = studio.matchLists[piece.id] ?? []
+                        let close = listings.filter { !$0.isAlternative }
+                        let alternatives = listings.filter(\.isAlternative)
                         RetailerMatchCard(piece: piece, selected: piece.id == studio.selectedPieceID,
                                           state: studio.matchStates[piece.id],
                                           crop: studio.cropPreviews[piece.id],
                                           garmentLabel: studio.matchGarmentLabels[piece.id],
-                                          moreCount: studio.matchLists[piece.id]?.filter { $0.id != piece.product?.id }.count ?? 0,
+                                          moreCount: listings.filter { $0.id != piece.product?.id }.count,
+                                          fallbackOnly: close.isEmpty && !alternatives.isEmpty,
                                           select: { withAnimation(.snappy(duration: 0.2)) { studio.select(piece.id) } },
                                           brand: studio.matchBrands[piece.id],
                                           retry: { studio.findMatch(for: piece.id) },
@@ -421,14 +430,11 @@ struct StudioView: View {
                                           showMore: { matchListPiece = piece },
                                           tryOnAvatar: { tryOnAvatar(piece) })
                             .id(piece.id)
-                        if piece.id == studio.selectedPieceID, let listings = studio.matchLists[piece.id], listings.count > 1 {
-                            MatchResultsList(category: piece.detected.category, listings: listings, chosenID: piece.product?.id,
-                                             choose: { studio.chooseListing($0, for: piece.id) },
-                                             tryOn: { product in
-                                                 guard studio.chooseListing(product, for: piece.id) else { return false }
-                                                 tryOnAvatar(piece)
-                                                 return true
-                                             })
+                        if piece.id == studio.selectedPieceID, close.count > 1 {
+                            resultList(close, for: piece, title: "Close matches")
+                        }
+                        if !alternatives.isEmpty, close.isEmpty || piece.id == studio.selectedPieceID {
+                            resultList(alternatives, for: piece, title: "Similar options")
                         }
                     }
                 }
@@ -448,6 +454,16 @@ struct StudioView: View {
                 .scrollClipDisabled()
             }
         }
+    }
+
+    private func resultList(_ listings: [CatalogProduct], for piece: WorkingLook.Piece, title: String) -> some View {
+        MatchResultsList(title: title, category: piece.detected.category, listings: listings, chosenID: piece.product?.id,
+                         choose: { studio.chooseListing($0, for: piece.id) },
+                         tryOn: { product in
+                             guard studio.chooseListing(product, for: piece.id) else { return false }
+                             tryOnAvatar(piece)
+                             return true
+                         })
     }
 
     // MARK: Budget and shopping
@@ -746,6 +762,7 @@ private struct RetailerMatchCard: View {
     var garmentLabel: String?
     /// How many other ranked listings there are.
     var moreCount: Int = 0
+    var fallbackOnly: Bool
     var select: () -> Void
     var brand: String?
     var retry: () -> Void
@@ -845,6 +862,7 @@ private struct RetailerMatchCard: View {
         switch state {
         case .found(let product):
             VStack(alignment: .leading, spacing: 3) {
+                if fallbackOnly { noCloseMatchLabel }
                 Text(product.visualMatchLabel)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(AuthPalette.primary)
                     .accessibilityIdentifier("matchLabel")
@@ -907,9 +925,7 @@ private struct RetailerMatchCard: View {
                 .fixedSize(horizontal: false, vertical: true)
         case .noMatch:
             VStack(alignment: .leading, spacing: 4) {
-                Text("No close match found")
-                    .font(.system(size: 13, weight: .semibold))
-                    .accessibilityIdentifier("noMatch")
+                noCloseMatchLabel
                 retryButton
             }
         case .budgetMissing:
@@ -941,6 +957,12 @@ private struct RetailerMatchCard: View {
         }
     }
 
+    private var noCloseMatchLabel: some View {
+        Text("No close match found")
+            .font(.system(size: 13, weight: .semibold))
+            .accessibilityIdentifier("noMatch")
+    }
+
     private var retryButton: some View {
         Button(action: retry) {
             Label("Retry", systemImage: "arrow.clockwise")
@@ -967,6 +989,7 @@ private extension GarmentCategory {
 /// Every result for the selected garment, listed under the cards so none is hidden behind a button.
 /// Tapping one puts it on the garment's card.
 private struct MatchResultsList: View {
+    var title: String
     var category: GarmentCategory
     var listings: [CatalogProduct]
     var chosenID: String?
@@ -979,7 +1002,7 @@ private struct MatchResultsList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(listings.count) results for \(category.searchNoun)")
+            Text(title)
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(AuthPalette.onSurface)
                 .accessibilityAddTraits(.isHeader)
@@ -1109,7 +1132,7 @@ private struct MatchListSheet: View {
             .alert(swapMessage, isPresented: $swapRejected) {
                 Button("OK", role: .cancel) {}
             }
-            .navigationTitle("Matches")
+            .navigationTitle(listings.allSatisfy(\.isAlternative) ? "Similar options" : "Matches")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }

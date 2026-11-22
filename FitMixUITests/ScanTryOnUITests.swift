@@ -11,6 +11,7 @@ import XCTest
 ///   TEST_RUNNER_FM_TRYON_SCAN    a 1080×1920 outfit photo analyzed as the live camera frame
 ///   TEST_RUNNER_FM_TRYON_REPLAY  detections in that frame, e.g. "tshirt:0.28,0.24,0.43,0.31;pants:…"
 ///   TEST_RUNNER_FM_TRYON_GARMENT a garment image for Wardrobe Try-On
+///   TEST_RUNNER_FM_TRYON_BACKEND optional local test backend for testLiveScanWithoutMatchesRendersOnSavedPhoto
 final class ScanTryOnUITests: XCTestCase {
     private var app: XCUIApplication!
     /// A local stand-in account (no Supabase): Wardrobe items belong to an account.
@@ -53,27 +54,35 @@ final class ScanTryOnUITests: XCTestCase {
         return environment
     }
 
-    /// Taps the T-shirt target in the Camera, then Show Your Try-On in Studio.
+    /// Taps the T-shirt target in the Camera, then opens the Try On tab in Studio.
     private func scanAndOpenYourTryOn() {
         let target = app.buttons["liveTarget-tshirt"]
         XCTAssertTrue(target.waitForExistence(timeout: 15), "no T-shirt target in the Camera")
         snapshot("1-camera-targets")
         target.tap()
-        let switchView = app.buttons["switchView"]
-        XCTAssertTrue(switchView.waitForExistence(timeout: 10), "Studio didn't open")
-        // A live look opens on Street Look; nothing is rendered until Your Try-On is shown.
-        XCTAssertEqual(switchView.label, "Show Your Try-On")
-        switchView.tap()
+        let tryOn = app.buttons["Try On"]
+        XCTAssertTrue(tryOn.waitForExistence(timeout: 10), "Studio didn't open")
+        XCTAssertTrue(app.buttons["Scanned Outfit"].isSelected)
+        tryOn.tap()
     }
 
     // MARK: Live scan
 
     /// Two or more garments from a live scan, no retailer matches, the saved try-on photo reused.
     func testLiveScanWithoutMatchesRendersOnSavedPhoto() throws {
-        launch(try liveScanEnvironment(photo: try path("FM_TRYON_PERSON")))
+        var environment = try liveScanEnvironment(photo: try path("FM_TRYON_PERSON"))
+        let testBackend = env["FM_TRYON_BACKEND"]
+        if let testBackend {
+            environment["FM_DEBUG_TRYON_STUB"] = nil
+            environment["FITMIX_BACKEND_URL"] = testBackend
+        }
+        launch(environment)
         scanAndOpenYourTryOn()
-        XCTAssertTrue(renderedImage.waitForExistence(timeout: 15), "no rendered try-on")
-        XCTAssertTrue(app.descendants(matching: .any)["tryOnStatus"].label.contains("Stand-in"))
+        let image = testBackend == nil ? renderedImage : app.images.matching(NSPredicate(
+            format: "identifier == 'tryOnImage' AND label == 'You wearing the selected look'")).firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 15), "no rendered try-on")
+        let status = testBackend == nil ? "Sample Preview" : "Try-On"
+        XCTAssertTrue(app.descendants(matching: .any)["tryOnStatus"].label.contains(status))
         snapshot("2-your-try-on")
         // No retailer match was needed.
         let noMatch = app.staticTexts.matching(identifier: "noMatch")

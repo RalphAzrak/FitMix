@@ -42,6 +42,7 @@ final class StudioStore {
     private(set) var matchGarmentLabels: [UUID: String] = [:]
     private(set) var matchBrands: [UUID: String] = [:]
     private(set) var matchCropBounds: [UUID: CGRect] = [:]
+    private(set) var shoppingDepartment: ShoppingDepartment = .any
     private(set) var outfitBudget: Decimal?
     private(set) var isExpandingBudget = false
     private(set) var budgetSearchFailed = false
@@ -130,7 +131,8 @@ final class StudioStore {
     /// Camera → Studio: the user tapped one garment in the live feed. Opens a look on that frame
     /// (shown whole, as the reference), with its detected garments and the tapped one selected.
     /// Every detected garment starts a product search, the tapped one first.
-    func openLive(_ selection: LiveGarmentSelection, tryOnSource: UIImage?) {
+    func openLive(_ selection: LiveGarmentSelection, tryOnSource: UIImage?,
+                  department: ShoppingDepartment) {
         let confirmedAt = ContinuousClock.now
         let frame = UIImage(cgImage: selection.frame, scale: 1, orientation: .up)
         var crops: [UUID: CGImage] = [:]
@@ -149,8 +151,10 @@ final class StudioStore {
         if selection.isTestPhoto { SampleScans.register(scan, as: .fixture) }
         else if selection.isSample { SampleScans.register(scan) }
         #endif
+        tryOnVisible = false
         open(scan, tryOnSource: tryOnSource)
         isLiveLook = true
+        shoppingDepartment = department
         matchingStart = confirmedAt
         loggedFirst = false
         loggedSettled = false
@@ -159,9 +163,27 @@ final class StudioStore {
         matchCropBounds = Dictionary(uniqueKeysWithValues: garments.compactMap { item in
             item.bounds.map { (item.id, $0) }
         })
+        // The backend renderer needs the scanned crops before it can prepare the preview.
+        refreshPreview()
         if let selectedID { select(selectedID) }
         // Every detected garment is searched, the tapped one first, so each box shows the product chosen for it.
         for piece in look?.pieces ?? [] where matchStates[piece.id] == nil { findMatch(for: piece.id) }
+    }
+
+    func setShoppingDepartment(_ department: ShoppingDepartment) {
+        guard isLiveLook, shoppingDepartment != department, let look else { return }
+        cancelSearch()
+        shoppingDepartment = department
+        searchIDs = [:]
+        matchLists = [:]
+        baseStates = [:]
+        pinned = [:]
+        budgetSearchFailed = false
+        updateSelections()
+        let ids = look.pieces.map(\.id)
+        for id in ids.filter({ $0 == selectedPieceID }) + ids.filter({ $0 != selectedPieceID }) {
+            findMatch(for: id)
+        }
     }
 
     /// Categories the product search accepts, and the smallest crop worth sending.
@@ -224,6 +246,7 @@ final class StudioStore {
         updateSelections()
         let category = piece.detected.category
         let brand = matchBrands[pieceID] ?? ""
+        let department = shoppingDepartment
         let searcher = self.searcher
         searchTasks[pieceID] = Task { [weak self] in
             var state: RetailerMatchState = .failed("This garment’s image couldn’t be prepared.", retryable: false)
@@ -231,7 +254,7 @@ final class StudioStore {
             var searchID: String?
             var description: String?
             var garmentLabel: String?
-            if let request = await GarmentSearchInput.make(category: category, crop: crop, brand: brand),
+            if let request = await GarmentSearchInput.make(category: category, crop: crop, brand: brand, department: department),
                !Task.isCancelled {
                 do {
                     switch try await searcher.search(request) {
@@ -245,7 +268,7 @@ final class StudioStore {
                         products = listings.map { Self.product(from: $0, category: category) }
                     case .noMatch: break
                     }
-                    state = products.first.map(RetailerMatchState.found) ?? .noMatch
+                    state = products.first(where: { !$0.isAlternative }).map(RetailerMatchState.found) ?? .noMatch
                 } catch is CancellationError {
                     return
                 } catch let error as RetailerSearchError {
@@ -315,13 +338,14 @@ final class StudioStore {
     private func updateSelections() {
         guard var look, isLiveLook else { return }
         let groups = look.pieces.map { matchLists[$0.id] ?? [] }
+        let closeMatches = groups.map { $0.filter { !$0.isAlternative } }
         var choices = look.pieces.indices.map { index in
             groups[index].first { $0.id == pinned[look.pieces[index].id] }
         }
         if let cap = outfitBudget {
             let fixedCost = choices.compactMap { $0?.price?.amount }.reduce(0, +)
             let options = groups.indices.map { index in
-                choices[index] == nil ? groups[index].compactMap { product -> OutfitBudget.Option? in
+                choices[index] == nil ? closeMatches[index].compactMap { product -> OutfitBudget.Option? in
                     guard let price = product.price, price.currencyCode == OutfitBudget.currency else { return nil }
                     return OutfitBudget.Option(id: product.id, price: price.amount, score: product.visualScore ?? 0)
                 } : []
@@ -331,14 +355,14 @@ final class StudioStore {
                 choices[index] = groups[index].first { $0.id == plan[index] }
             }
         } else {
-            for index in choices.indices where choices[index] == nil { choices[index] = groups[index].first }
+            for index in choices.indices where choices[index] == nil { choices[index] = closeMatches[index].first }
         }
         for index in look.pieces.indices {
             let id = look.pieces[index].id
             let chosen = choices[index]
             look.pieces[index].retailerMatch = chosen
             if let chosen { matchStates[id] = .found(chosen) }
-            else if !groups[index].isEmpty, outfitBudget != nil { matchStates[id] = .budgetMissing }
+            else if !closeMatches[index].isEmpty, outfitBudget != nil { matchStates[id] = .budgetMissing }
             else { matchStates[id] = baseStates[id] }
         }
         self.look = look
@@ -459,7 +483,7 @@ final class StudioStore {
                        image: listing.imageURL.map(ProductImage.remote),
                        price: listing.price.flatMap { amount in listing.currency.map { Price(amount: amount, currencyCode: $0) } },
                        retailerURL: listing.listingURL, isFixture: listing.isFixture, evidence: listing.evidence,
-                       visualScore: listing.visualScore, bestMatch: listing.bestMatch)
+                       visualScore: listing.visualScore, bestMatch: listing.bestMatch, isAlternative: listing.isAlternative)
         return product
     }
 

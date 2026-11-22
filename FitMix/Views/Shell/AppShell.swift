@@ -64,6 +64,7 @@ struct AppShell: View {
     @Environment(AvatarStore.self) private var store
     @Environment(StudioStore.self) private var studio
     @Environment(AuthSession.self) private var auth
+    @Environment(ProfileStore.self) private var profile
     @Environment(CartStore.self) private var cart
     @Environment(DemoOrderStore.self) private var orders
     @State private var router = AppRouter()
@@ -97,8 +98,7 @@ struct AppShell: View {
                     // Back to the tab Camera was opened from; Studio keeps its previous look.
                     router.capture = nil
                 }, select: { selection in
-                    // The saved try-on photo (Profile → My Try-On Photo), the same one Outfit Review uses.
-                    studio.openLive(selection, tryOnSource: store.bodyPhoto)
+                    openLive(selection)
                     router.tab = .studio
                     router.capture = nil
                 }, confirm: { scan in
@@ -153,6 +153,7 @@ struct AppShell: View {
             if active { showAuthLink() }
         }
         .onAppear {
+            if profile.accountID != auth.user?.id { profile.activate(accountID: auth.user?.id) }
             if auth.hasOpenAuthLink { showAuthLink() }
             #if DEBUG
             // FM_DEBUG_OPEN_ORDER=latest: opens the newest saved demo order's summary (checks it survives a relaunch).
@@ -202,7 +203,7 @@ struct AppShell: View {
             case let screen? where screen.hasPrefix("live-sample-"):
                 if let category = GarmentCategory(rawValue: String(screen.dropFirst("live-sample-".count))),
                    let selection = SampleScans.liveSelection(category) {
-                    studio.openLive(selection, tryOnSource: store.bodyPhoto)
+                    openLive(selection)
                     router.tab = .studio
                     if let next = ProcessInfo.processInfo.environment["FM_DEBUG_THEN_SELECT"].flatMap(GarmentCategory.init(rawValue:)) {
                         Task {
@@ -260,6 +261,11 @@ struct AppShell: View {
             if otherOpen { try? await Task.sleep(for: .milliseconds(650)) }
             router.authPreview = .signIn
         }
+    }
+
+    private func openLive(_ selection: LiveGarmentSelection) {
+        if profile.accountID != auth.user?.id { profile.activate(accountID: auth.user?.id) }
+        studio.openLive(selection, tryOnSource: store.bodyPhoto, department: profile.shoppingDepartment)
     }
 
     /// Debug builds can open straight into a screen with FM_DEBUG_SCREEN=setup | generate | avatar-profile |

@@ -14,6 +14,7 @@ struct AvatarProfileView: View {
     var outfitSelection: [WardrobeItem]? = nil
 
     @Environment(AvatarStore.self) private var store
+    @Environment(ProfileStore.self) private var profile
     @Environment(AuthSession.self) private var auth
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -29,6 +30,7 @@ struct AvatarProfileView: View {
     /// Which picture of the avatar is showing, once a 3D model exists.
     @State private var show3D = false
     @State private var ask3DBuild = false
+    @State private var shoppingPreferenceError = false
 
     var body: some View {
         ScrollView {
@@ -39,6 +41,7 @@ struct AvatarProfileView: View {
                     selectedOutfit(outfitSelection)
                 } else {
                     BodyMetricsCard(edit: editMetrics)
+                    shoppingPreference
                     if store.homeState == .ready, store.profile.measurementsChangedSinceAvatar { measurementsChanged }
                     photoSection
                     accountSection
@@ -60,6 +63,9 @@ struct AvatarProfileView: View {
             if outfitSelection != nil { show3D = store.model3DURL != nil }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Couldn’t save your shopping department", isPresented: $shoppingPreferenceError) {
+            Button("OK", role: .cancel) {}
+        }
         // The page has its own large title; the bar keeps only the back button.
         .toolbar { ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1).accessibilityHidden(true) } }
         .toolbarBackground(Color.fmCanvas, for: .navigationBar)
@@ -385,6 +391,17 @@ struct AvatarProfileView: View {
     }
 
     // MARK: Measurements, account, privacy
+
+    private var shoppingPreference: some View {
+        ShoppingDepartmentPicker(title: "Shopping department", identifier: "profileShoppingDepartment", selection: Binding(
+            get: { profile.shoppingDepartment },
+            set: { department in
+                do { try profile.saveShoppingDepartment(department) }
+                catch { shoppingPreferenceError = true }
+            }
+        ))
+        .fmCard(padding: 14)
+    }
 
     /// Height or weight were edited after the avatar was made: offer a new preview, without replacing anything yet.
     private var measurementsChanged: some View {

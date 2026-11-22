@@ -102,7 +102,7 @@ def test_discovery_and_rank_use_the_requested_inputs(scenario, category, details
                 return found([0, 1, 2, 3, 4])  # The photo search missed the target.
             query = content[0]["text"]
             assert ("shirt" if category == "tshirt" else category) in query
-            if text:
+            if text and query != "Buy online: aster shirt":
                 assert text.casefold() in query
             provider_calls.append("text")
             return found([5, 1, 2, 3, 4, 6], tracked=4)

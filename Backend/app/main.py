@@ -40,7 +40,7 @@ from .mock import placeholder_png
 from .image_results import ImageResult, ImageResults, image_key
 from .outfit_match import (MAX_PER_STORE, OpenAIVisualSearch, OpenAIWebSearch, OutfitMatcher, SearchMode,
                            WardrobeIdentification, brand_key)
-from .retailer_product import CURRENCY, price
+from .retailer_product import CURRENCY, Department, price
 from .prompt import build_catalog_prompt, build_outfit_prompt, build_prompt
 from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
@@ -432,7 +432,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     async def outfit_match(
         category: str = Form(...), crop: UploadFile | None = File(None), text: str = Form(""),
         search_id: str | None = Form(None), max_price: str | None = Form(None),
-        brand: str = Form(""), mode: SearchMode = Form("combined"),
+        brand: str = Form(""), mode: SearchMode = Form("combined"), department: Department = Form("any"),
         _: str = Depends(authorize_match),
     ):
         if category not in CATEGORIES:
@@ -454,6 +454,7 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             async with asyncio.timeout(60):
                 search_id, results, description = await outfit.match(
                     category, data, media, text[:500].split(",")[:12], search_id, cap, mode=mode, brand=brand,
+                    department=department,
                 )
         except TimeoutError:
             raise ApiError(504, "provider_timeout", "Garment matching took too long. Try again.") from None
@@ -462,10 +463,12 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             log.info("outfit %s: failed (%s)", category, error.code)
             raise ApiError(status, error.code, error.message) from None
         log.info("outfit %s: %d listings in %.2fs", category, len(results), time.monotonic() - started)
-        return JSONResponse({"status": "matched" if results else "no_match", "currency": CURRENCY,
+        close = [row for row in results if row["match"] != "alternative"]
+        alternatives = [row for row in results if row["match"] == "alternative"]
+        return JSONResponse({"status": "matched" if close else "no_match", "currency": CURRENCY,
                              "search_id": search_id, "description": description.summary() if description else None,
                              "garment_label": description.label() if description else None,
-                             "results": results}, headers={"Cache-Control": "no-store"})
+                             "results": close, "alternatives": alternatives}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/avatar")
     async def create_avatar(

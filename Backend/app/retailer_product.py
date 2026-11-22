@@ -9,6 +9,7 @@ import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from html import unescape
+from typing import Literal
 from urllib.parse import urljoin
 
 import httpx
@@ -17,6 +18,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .listing import _first, _products
 
 CURRENCY = "CAD"
+Department = Literal["any", "men", "women", "unisex"]
 MAX_PAGE = 2_500_000
 MAX_PHOTO = 4_000_000
 MAX_COLORWAYS = 3
@@ -142,6 +144,7 @@ class Listing:
     exact: bool
     color: str | None = None
     pattern: str | None = None
+    department: str | None = None
 
     @property
     def variant_attributes(self) -> dict[str, str]:
@@ -225,6 +228,44 @@ def _image_url(page_url: str, value) -> httpx.URL | None:
     return _resolve_url(page_url, raw) if raw else None
 
 
+def _department(value, *, free_text: bool = False) -> str | None:
+    if isinstance(value, dict):
+        parts = [_department(value.get(key)) for key in ("suggestedGender", "gender", "name", "@id", "url")]
+    elif isinstance(value, list):
+        parts = [_department(item) for item in value]
+    elif isinstance(value, str):
+        value = value.casefold().replace("’", "'")
+        if re.search(r"\b(?:kids?|children|boys?|girls?|bab(?:y|ies)|toddlers?|youth)\b", value):
+            return "kids"
+        men = re.search(r"\bmen(?:'s|s)?\b" if free_text else r"\b(?:men(?:'s|s)?|man|male)\b", value)
+        women = re.search(r"\bwomen(?:'s|s)?\b" if free_text else r"\b(?:women(?:'s|s)?|woman|female)\b", value)
+        if re.search(r"\bunisex\b|\ball genders\b", value) or (men and women):
+            return "unisex"
+        return "men" if men else "women" if women else None
+    else:
+        return None
+    evidence = set(filter(None, parts))
+    if "kids" in evidence:
+        return "kids"
+    if "unisex" in evidence or evidence == {"men", "women"}:
+        return "unisex"
+    return next(iter(evidence), None)
+
+
+def product_department(title: str, url: httpx.URL, *declared) -> str | None:
+    # Consult only product-level fields and the product's own title and path.
+    fields = set(filter(None, map(_department, declared)))
+    title_department = _department(title, free_text=True)
+    if title_department == "kids" or "kids" in fields:
+        return "kids"
+    explicit = fields | {title_department}
+    if {"men", "women"} <= explicit:
+        return "conflict"
+    gendered = explicit & {"men", "women"}
+    path_department = _department(url.path, free_text=True)
+    return next(iter(gendered), None) or ("unisex" if "unisex" in explicit else path_department)
+
+
 def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], *,
                     selected: tuple[tuple[str, str], ...] = ()) -> list[Listing]:
     page = public_https(page_url)
@@ -285,8 +326,11 @@ def verified_offers(html: str, page_url: str, store_name: str, codes: set[str], 
                 for key in ("sku", "mpn", "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "barcode")
             )
             brand = _property(product, "brand") or _property(group, "brand")
+            department = product_department(title, link, offer.get("audience"), offer.get("gender"),
+                                            product.get("audience"), product.get("gender"),
+                                            group.get("audience"), group.get("gender"))
             offers.append(Listing(title, retailer, brand, str(link), str(photo), amount, currency,
-                                  bool(codes & independent_codes), color, pattern))
+                                  bool(codes & independent_codes), color, pattern, department))
     offers.sort(key=lambda offer: (not offer.exact, offer.currency != CURRENCY, offer.currency, offer.amount))
     return offers
 
@@ -367,7 +411,9 @@ def page_listing(html: str, page_url: str, store_name: str, *,
         cost = _stated_price({"price": stated[0], "priceCurrency": stated[1]})
     amount, currency = cost or (None, None)
     return Listing(title, _string(store_name) or page.host, _property(record, "brand"), str(product_url), str(photo),
-                   amount, currency, False, _property(record, "color"), _property(record, "pattern"))
+                   amount, currency, False, _property(record, "color"), _property(record, "pattern"),
+                   product_department(title, product_url, record.get("audience"), record.get("gender"),
+                                      meta.get("product:gender"), meta.get("product:audience")))
 
 
 def comparison_jpeg(data: bytes) -> bytes | None:

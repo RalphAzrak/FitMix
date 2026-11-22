@@ -15,7 +15,10 @@ struct SetupFlowView: View {
 
     init(startAt step: SetupStep) { _step = State(initialValue: step) }
 
-    private static let inputSteps: [SetupStep] = [.bodyPhoto, .selfie, .measurements, .generate]
+    private var inputSteps: [SetupStep] {
+        store.profile.avatar == nil ? [.bodyPhoto, .selfie, .measurements, .shoppingDepartment, .generate]
+                                   : [.bodyPhoto, .selfie, .measurements, .generate]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,7 +26,8 @@ struct SetupFlowView: View {
             switch step {
             case .bodyPhoto: BodyPhotoStepView { go(to: .selfie) }
             case .selfie: SelfieStepView { go(to: .measurements) }
-            case .measurements: MeasurementsStepView { go(to: .generate) }
+            case .measurements: MeasurementsStepView { go(to: store.profile.avatar == nil ? .shoppingDepartment : .generate) }
+            case .shoppingDepartment: ShoppingDepartmentStep { go(to: .generate) }
             case .generate: GenerateStepView(onDone: { go(to: .review) }, changePhotos: { go(to: .bodyPhoto) })
             case .review:
                 ReviewStepView(regenerate: { go(to: .generate) }, changePhotos: { go(to: .bodyPhoto) }) { dismiss() }
@@ -40,7 +44,7 @@ struct SetupFlowView: View {
     }
 
     private var header: some View {
-        let index = Self.inputSteps.firstIndex(of: step)
+        let index = inputSteps.firstIndex(of: step)
         return VStack(spacing: 12) {
             HStack {
                 if let previous = previousStep, store.generation != .generating {
@@ -56,14 +60,14 @@ struct SetupFlowView: View {
             .frame(minHeight: 44)
 
             HStack(spacing: 6) {
-                ForEach(Self.inputSteps.indices, id: \.self) { i in
+                ForEach(inputSteps.indices, id: \.self) { i in
                     Capsule()
-                        .fill(i <= (index ?? Self.inputSteps.count) ? Color.fmCobalt : Color.black.opacity(0.12))
+                        .fill(i <= (index ?? inputSteps.count) ? Color.fmCobalt : Color.black.opacity(0.12))
                         .frame(height: 4)
                 }
             }
             .accessibilityHidden(true)
-            Eyebrow(text: index.map { "Step \($0 + 1) of \(Self.inputSteps.count)" } ?? "Review")
+            Eyebrow(text: index.map { "Step \($0 + 1) of \(inputSteps.count)" } ?? "Review")
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 20)
@@ -75,7 +79,8 @@ struct SetupFlowView: View {
         case .bodyPhoto: nil
         case .selfie: .bodyPhoto
         case .measurements: .selfie
-        case .generate: .measurements
+        case .shoppingDepartment: .measurements
+        case .generate: store.profile.avatar == nil ? .shoppingDepartment : .measurements
         case .review: nil      // the review step has its own Regenerate and Change Photos
         }
     }
@@ -326,7 +331,74 @@ struct MeasurementsStepView: View {
     }
 }
 
-// MARK: Step 4 — consent and generation
+private struct ShoppingDepartmentStep: View {
+    var next: () -> Void
+    @Environment(ProfileStore.self) private var profile
+    @State private var department: ShoppingDepartment = .any
+    @State private var saveError = false
+
+    var body: some View {
+        StepScaffold(title: "What do you usually shop for?",
+                     subtitle: "FitMix uses this preference when finding clothes from your scans.") {
+            VStack(spacing: 4) {
+                ForEach(ShoppingDepartment.allCases, id: \.self) { option in
+                    Button { department = option } label: {
+                        HStack {
+                            Text(option.title).font(.body)
+                            Spacer()
+                            Image(systemName: department == option ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(department == option ? Color.fmCobalt : Color.fmSecondary)
+                                .accessibilityHidden(true)
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(department == option ? .isSelected : [])
+                    .accessibilityIdentifier("setupDepartment-\(option.rawValue)")
+                }
+            }
+            .fmCard()
+            .onAppear { department = profile.shoppingDepartment }
+            if saveError { NoticeRow(tone: .caution, text: "FitMix couldn’t save your preference. Try again or skip this step.") }
+        } footer: {
+            Button("Continue") {
+                do {
+                    try profile.saveShoppingDepartment(department)
+                    next()
+                } catch {
+                    saveError = true
+                }
+            }
+            .buttonStyle(FMFilledButtonStyle())
+            Button("Skip", action: next).buttonStyle(FMOutlineButtonStyle())
+        }
+    }
+}
+
+struct ShoppingDepartmentPicker: View {
+    var title: String
+    var identifier: String
+    @Binding var selection: ShoppingDepartment
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title).font(.subheadline.weight(.semibold)).accessibilityHidden(true)
+            Spacer(minLength: 0)
+            Picker(title, selection: $selection) {
+                ForEach(ShoppingDepartment.allCases, id: \.self) { department in
+                    Text(department.title).tag(department)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .accessibilityIdentifier(identifier)
+        }
+    }
+}
+
+// MARK: Consent and generation
 
 /// Says exactly what will leave the phone, asks before sending it, then shows progress or what went wrong.
 struct GenerateStepView: View {

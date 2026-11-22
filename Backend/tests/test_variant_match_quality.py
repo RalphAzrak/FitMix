@@ -48,16 +48,20 @@ def test_black_patterned_tee_never_matches_plain_blue_variant(search_url, includ
              "hasVariant": [blue, black] if include_black or "?" in search_url else [blue]}
     hit = Hit(search_url, "corner.example", "Corner Shop")
     calls = set()
+    queries = []
     ranked_variants = []
 
     class Search:
-        async def page(self, crop, media):
+        async def page(self, crop, media, *, department="any"):
             assert (crop, media) == (source, "image/jpeg")
             calls.add("photo")
             return DiscoveryPage([hit], None, None)
 
         async def text_hits(self, query):
-            assert all(term in query for term in ("black", "diagonal streaks", "t shirt"))
+            assert "t shirt" in query
+            if not queries:
+                assert "black" in query and "diagonal streaks" in query
+            queries.append(query)
             calls.add("text")
             return [hit]
 
@@ -177,10 +181,11 @@ def test_offers_that_cannot_be_tied_to_a_photo_give_one_listing_from_the_page_it
 def test_query_uses_visible_type_base_color_and_pattern(category, fields, expected):
     queries = visible(**fields).queries(category, "Label")
     assert queries
-    for query in queries:
+    for query in queries[:-1]:
         assert all(term in query for term in expected | {"label"})
         assert "unclear" not in query
         assert not fields.get("obscured") or "orb" not in query
+    assert "label" in queries[-1]
     for field in ("neckline", "sleeves"):
         if field in fields:
             assert fields[field].lower() in queries[0]
@@ -215,7 +220,7 @@ def test_black_quarter_zip_uses_color_and_closure_even_with_a_tee_camera_hint(sc
     queries, fetched = [], []
 
     class Search:
-        async def page(self, crop, media):
+        async def page(self, crop, media, *, department="any"):
             assert crop == source
             return DiscoveryPage(photo_hits, None, None)
 
@@ -257,8 +262,9 @@ def test_black_quarter_zip_uses_color_and_closure_even_with_a_tee_camera_hint(sc
                                files={"crop": ("garment.jpg", source, "image/jpeg")})
     assert response.status_code == 200, response.text
     result = response.json()
-    assert len(queries) == (1 if scenario == "focused" else 2)
-    assert all("quarter zip pullover black solid" in query for query in queries)
+    assert len(queries) == {"focused": 1, "fallback": 2, "miss": 3}[scenario]
+    assert all("quarter zip pullover" in query for query in queries)
+    assert "black solid" in queries[0]
     assert len(fetched) == len(set(fetched))
     assert result["garment_label"] == "Quarter-zip"
     stocked = scenario != "miss"

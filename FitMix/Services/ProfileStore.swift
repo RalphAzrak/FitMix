@@ -1,11 +1,25 @@
 import Foundation
 
+nonisolated enum ShoppingDepartment: String, CaseIterable, Codable, Sendable {
+    case men, women, unisex, any
+
+    var title: String {
+        switch self {
+        case .men: "Men’s"
+        case .women: "Women’s"
+        case .unisex: "Unisex"
+        case .any: "Any"
+        }
+    }
+}
+
 /// What FitMix saves for one account on this iPhone: sizing preferences and shipping addresses.
 nonisolated struct AccountProfileData: Codable, Equatable, Sendable {
     var version = 1
     var sizing = SizingPreferences()
     var addresses: [ShippingAddress] = []
     var defaultAddressID: UUID?
+    var shoppingDepartment: ShoppingDepartment?
 }
 
 enum ProfileStoreError: LocalizedError, Equatable {
@@ -39,6 +53,7 @@ final class ProfileStore {
     private(set) var state: LoadState = .signedOut
     private(set) var accountID: UUID?
     private(set) var data = AccountProfileData()
+    private var guestDepartment = ShoppingDepartment(rawValue: UserDefaults.standard.string(forKey: "guestShoppingDepartment") ?? "") ?? .any
 
     @ObservationIgnored let baseDirectory: URL
 
@@ -52,6 +67,18 @@ final class ProfileStore {
     }
 
     var sizing: SizingPreferences { data.sizing }
+    var shoppingDepartment: ShoppingDepartment {
+        accountID == nil ? guestDepartment : (data.shoppingDepartment ?? .any)
+    }
+
+    func saveShoppingDepartment(_ department: ShoppingDepartment) throws {
+        if accountID == nil {
+            UserDefaults.standard.set(department.rawValue, forKey: "guestShoppingDepartment")
+            guestDepartment = department
+        } else {
+            try update { $0.shoppingDepartment = department }
+        }
+    }
 
     /// Saved addresses, default first.
     var addresses: [ShippingAddress] {
