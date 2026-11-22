@@ -34,13 +34,14 @@ struct CameraView: View {
         .background(AuthPalette.surface.ignoresSafeArea())
         .preferredColorScheme(.light)
         .task {
-            await camera.activate()
             #if DEBUG
             // FM_DEBUG_AUTO_ANALYZE=1 with FM_DEBUG_CAPTURE_PHOTO: analyze the photo as a live frame on open.
             if ProcessInfo.processInfo.environment["FM_DEBUG_AUTO_ANALYZE"] == "1", let photo = Self.debugCapturePhoto {
                 camera.analyzeStill(photo, replay: Self.debugReplay)
+                return
             }
             #endif
+            await camera.activate()
         }
         #if DEBUG
         // FM_DEBUG_AUTO_SELECT=shoes: once that target is ready, select it the way a tap does.
@@ -125,19 +126,25 @@ struct CameraView: View {
 
     private var viewfinder: some View {
         ZStack {
-            // Preview and targets share one frame, so the aspect-fit mapping is the same for both.
-            Group {
-                Color.black
-                if let still = camera.stillFrame {
-                    Image(uiImage: still)
-                        .resizable()
-                        .scaledToFit()
-                        .accessibilityLabel("Test photo analyzed as a live frame")
-                } else if showsPreview {
-                    CameraPreview(controller: camera)
-                }
-                if camera.phase == .live || camera.stillFrame != nil {
-                    LiveTargetsOverlay(scan: camera.scan, disabled: camera.isSelecting || confirmed, select: choose)
+            // Both layers use one safe-area proposal and one viewfinder size.
+            GeometryReader { proxy in
+                let size = proxy.size
+                ZStack {
+                    Color.black
+                    if let still = camera.stillFrame {
+                        Image(uiImage: still)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: size.width, height: size.height)
+                            .accessibilityLabel("Test photo analyzed as a live frame")
+                    } else if showsPreview {
+                        CameraPreview(controller: camera)
+                            .frame(width: size.width, height: size.height)
+                    }
+                    if camera.phase == .live || camera.stillFrame != nil {
+                        LiveTargetsOverlay(scan: camera.scan, size: size,
+                                           disabled: camera.isSelecting || confirmed, select: choose)
+                    }
                 }
             }
             .ignoresSafeArea(edges: .bottom)
@@ -192,8 +199,7 @@ struct CameraView: View {
             OverlayPill(text: "Live garment detection needs an iPhone", systemImage: "exclamationmark.triangle.fill")
                 .accessibilityIdentifier("detectionUnavailable")
         } else if !scan.targets.isEmpty {
-            OverlayPill(text: camera.stillFrame == nil ? "Tap to Isolate" : "Test photo · Tap to Isolate",
-                        systemImage: "hand.tap.fill")
+            OverlayPill(text: camera.stillFrame == nil ? "Tap to Isolate" : "Test photo · Tap to Isolate", systemImage: "hand.tap.fill")
                 .accessibilityIdentifier("tapToIsolate")
         } else {
             OverlayPill(text: hintText(scan.hint) ?? "Looking for garments…", systemImage: "viewfinder")
@@ -206,6 +212,8 @@ struct CameraView: View {
         case .noPerson: "Point at an outfit"
         case .includeFeet: "Step back to include the shoes"
         case .includeUpperBody: "Include shoulders and hips to find tops"
+        case .holdSteady: "Hold steady and keep the outfit in view"
+        case .clearerView: "Face the camera and find brighter light"
         case nil: nil
         }
     }
@@ -392,7 +400,11 @@ struct CameraView: View {
                 Eyebrow(text: "Debug · stand-in Camera output", color: .white.opacity(0.6))
                 if ProcessInfo.processInfo.environment["FM_DEBUG_CAPTURE_PHOTO"] != nil {
                     Button("Analyze Test Photo as Live Frame") {
-                        if let photo = Self.debugCapturePhoto { camera.analyzeStill(photo, replay: Self.debugReplay) } else { fixtureError = "FM_DEBUG_CAPTURE_PHOTO couldn't be opened." }
+                        if let photo = Self.debugCapturePhoto {
+                            camera.analyzeStill(photo, replay: Self.debugReplay)
+                        } else {
+                            fixtureError = "FM_DEBUG_CAPTURE_PHOTO couldn't be opened."
+                        }
                     }
                     .buttonStyle(AuthSocialButtonStyle(background: .white, foreground: AuthPalette.onSurface))
                     .accessibilityIdentifier("captureTestPhoto")
@@ -511,37 +523,28 @@ private struct OverlayPill: View {
 /// small or overlapping targets each have one unambiguous button.
 private struct LiveTargetsOverlay: View {
     var scan: LiveScanState
+    var size: CGSize
     var disabled: Bool
     var select: (LiveTarget) -> Void
 
     var body: some View {
-        GeometryReader { proxy in
-            let fitted = scan.frameSize.width > 0
-                ? AVMakeRect(aspectRatio: scan.frameSize, insideRect: CGRect(origin: .zero, size: proxy.size))
-                : .zero
-            ZStack(alignment: .topLeading) {
-                ForEach(scan.targets) { target in
-                    let rect = screenRect(target.bounds, in: fitted)
-                    TargetBox(target: target) { select(target) }
-                        .frame(width: max(rect.width, 24), height: max(rect.height, 24))
-                        .position(x: rect.midX, y: rect.midY)
-                }
-                ForEach(scan.targets) { target in
-                    TargetChip(target: target) { select(target) }
-                        .position(chipCenter(for: target, rect: screenRect(target.bounds, in: fitted), in: proxy.size))
-                }
+        ZStack(alignment: .topLeading) {
+            ForEach(scan.targets) { target in
+                let rect = LiveGarmentAnalyzer.previewRect(for: target.bounds, frameSize: scan.frameSize, in: size)
+                TargetBox(target: target) { select(target) }
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
             }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-            .disabled(disabled)
-            .animation(.easeOut(duration: 0.15), value: scan.targets)
+            ForEach(scan.targets) { target in
+                let rect = LiveGarmentAnalyzer.previewRect(for: target.bounds, frameSize: scan.frameSize, in: size)
+                TargetChip(target: target) { select(target) }
+                    .position(chipCenter(for: target, rect: rect, in: size))
+            }
         }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .disabled(disabled)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("liveTargets")
-    }
-
-    private func screenRect(_ bounds: CGRect, in fitted: CGRect) -> CGRect {
-        CGRect(x: fitted.minX + bounds.minX * fitted.width, y: fitted.minY + bounds.minY * fitted.height,
-               width: bounds.width * fitted.width, height: bounds.height * fitted.height)
     }
 
     private func chipCenter(for target: LiveTarget, rect: CGRect, in size: CGSize) -> CGPoint {
@@ -628,7 +631,9 @@ private struct CameraPreview: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: PreviewView, context: Context) {}
+    func updateUIView(_ view: PreviewView, context: Context) {
+        controller.attach(previewLayer: view.previewLayer)
+    }
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }

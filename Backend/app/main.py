@@ -1,7 +1,9 @@
-"""FitMix backend: avatar portraits, and retailer matches for a garment selected in the live camera.
+"""FitMix backend: avatar portraits, 3D avatars, and retailer matches for a garment selected in the live camera.
 
 - `POST /v1/avatar`: the app posts the user's photos; this server adds the instruction and calls OpenAI's Image
   Edits API.
+- `POST /v1/avatar-3d`: the app posts the accepted portrait; this server builds a 3D model from it on this
+  computer (see avatar3d.py) and the app collects it when it is ready.
 - `POST /v1/garment-match`: the app posts one garment's crop, category and the clues read on the phone; this
   server asks every enabled visual search provider, reads the listing pages, and returns ranked real listings
   labeled "exact", "brand" or "similar" (see visual_search.py).
@@ -9,8 +11,9 @@
   Lens (via Scrappa) for visual matches and returns the best credible retailer listing, labeled "similar"
   (see lens_search.py). Cached, de-duplicated and capped per month.
 
-Provider keys live only in this process's environment. Images are held in memory for the length of one request:
-they are never written to disk and never logged.
+Provider keys live only in this process's environment. Images are held in memory for the length of one request
+and never logged. The one exception is a 3D avatar build, whose tools read files: the portrait sits in a private
+temporary folder until that build ends.
 """
 
 import asyncio
@@ -30,8 +33,9 @@ from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
+from . import avatar3d
 from .mock import placeholder_png
-from .prompt import build_prompt
+from .prompt import build_outfit_prompt, build_prompt
 from .lens_search import LensSearch, LensUnavailable
 from .listing import ListingEnricher
 from .providers import CropHost, EbayProvider, FixtureProvider, ScrappaLensProvider
@@ -79,6 +83,8 @@ class Settings:
     lens_monthly_limit: int = 100
     # How long a Lens answer for the same crop is reused, in hours.
     lens_cache_hours: float = 168.0
+    # A 3D avatar takes minutes of this computer's GPU, so fewer are allowed per hour than portraits.
+    avatar3d_rate_limit_per_hour: int = 6
 
     @staticmethod
     def from_environment() -> "Settings":
@@ -102,6 +108,7 @@ class Settings:
             match_rate_limit_per_hour=int(env.get("FITMIX_MATCH_RATE_LIMIT_PER_HOUR", "") or Settings.match_rate_limit_per_hour),
             lens_monthly_limit=int(env.get("FITMIX_LENS_MONTHLY_LIMIT", "") or Settings.lens_monthly_limit),
             lens_cache_hours=float(env.get("FITMIX_LENS_CACHE_HOURS", "") or Settings.lens_cache_hours),
+            avatar3d_rate_limit_per_hour=int(env.get("FITMIX_AVATAR3D_RATE_LIMIT_PER_HOUR", "") or Settings.avatar3d_rate_limit_per_hour),
         )
 
 
@@ -221,8 +228,12 @@ def default_lens_search(settings: Settings, crop_host: CropHost, enricher: Enric
 
 def create_app(settings: Settings | None = None, generator: Generator | None = None,
                providers: list[VisualProvider] | None = None, enricher: Enricher | None = None,
-               crop_host: CropHost | None = None, lens: LensSearch | None = None) -> FastAPI:
+               crop_host: CropHost | None = None, lens: LensSearch | None = None,
+               builder: avatar3d.Builder | None = None) -> FastAPI:
     settings = settings or Settings.from_environment()
+    if builder is None:
+        builder = avatar3d.MockBuilder() if settings.mock else avatar3d.ScriptBuilder()
+    builds = avatar3d.Jobs(builder)
     if generator is None:
         if settings.mock:
             generator = MockGenerator()
@@ -246,13 +257,16 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
     async def invalid(_: Request, error: RequestValidationError):
         return JSONResponse(status_code=400, content={"error": {"code": "invalid_request", "message": "The request was incomplete."}})
 
+    def known_app(request: Request, service: str) -> str:
+        if settings.app_token:
+            sent = request.headers.get("authorization", "")
+            if not hmac.compare_digest(sent, f"Bearer {settings.app_token}"):
+                raise ApiError(401, "unauthorized", f"This copy of FitMix isn't allowed to use the {service}.")
+        return request.client.host if request.client else "unknown"
+
     def limiter(bucket: str, limit: int, service: str, too_many: str):
         def authorize(request: Request) -> str:
-            if settings.app_token:
-                sent = request.headers.get("authorization", "")
-                if not hmac.compare_digest(sent, f"Bearer {settings.app_token}"):
-                    raise ApiError(401, "unauthorized", f"This copy of FitMix isn't allowed to use the {service}.")
-            client = request.client.host if request.client else "unknown"
+            client = known_app(request, service)
             now = time.monotonic()
             window = recent[(bucket, client)]
             while window and now - window[0] > 3600:
@@ -267,10 +281,17 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
                         "You've made a lot of avatars in the last hour. Try again later.")
     authorize_match = limiter("match", settings.match_rate_limit_per_hour, "product search",
                               "You've searched a lot in the last hour. Try again later.")
+    authorize_build = limiter("avatar3d", settings.avatar3d_rate_limit_per_hour, "3D avatar service",
+                              "You've built a lot of 3D avatars in the last hour. Try again later.")
+
+    def follow_build(request: Request) -> str:
+        """Checking on a build is not rate limited, only starting one."""
+        return known_app(request, "3D avatar service")
 
     @app.get("/health")
     async def health():
         return {"status": "ok", "ready": generator is not None, "mock": settings.mock,
+                "avatar3d_ready": builder.ready,
                 "match_ready": bool(providers), "match_providers": [p.name for p in providers],
                 "match_skipped": skipped, "lens_search": lens.status()}
 
@@ -391,6 +412,73 @@ def create_app(settings: Settings | None = None, generator: Generator | None = N
             raise
         log.info("avatar %s: done in %.1fs", request_id, time.monotonic() - started)
         return Response(content=picture, media_type=_media_type(picture) or "image/png", headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/avatar-outfit")
+    async def style_avatar(
+        portrait: UploadFile = File(...),
+        tshirt: UploadFile | None = File(None),
+        pants: UploadFile | None = File(None),
+        shoes: UploadFile | None = File(None),
+        outerwear: UploadFile | None = File(None),
+        _: str = Depends(authorize),
+    ):
+        if generator is None:
+            raise ApiError(503, "not_configured", "Outfit previews aren't configured on the FitMix server.")
+        selected = [(slot, upload) for slot, upload in (
+            ("tshirt", tshirt), ("pants", pants), ("shoes", shoes), ("outerwear", outerwear)
+        ) if upload is not None]
+        if not selected:
+            raise ApiError(400, "empty_outfit", "Add at least one garment to preview the outfit.")
+        images = [await _read_image(portrait, "avatar portrait", "portrait")]
+        images.extend([await _read_image(upload, slot, slot) for slot, upload in selected])
+        picture = await generator.generate(images, build_outfit_prompt([slot for slot, _ in selected]))
+        return Response(content=picture, media_type=_media_type(picture) or "image/png",
+                        headers={"Cache-Control": "no-store", "X-FitMix-Mock": "1" if settings.mock else "0"})
+
+    def build_state(job: avatar3d.Job) -> dict:
+        return {"job": job.id, "status": job.status, "stage": job.stage, "progress": job.progress,
+                "position": builds.position(job),
+                "face_sharpened": job.built.face_sharpened if job.built else None,
+                "error": {"code": job.error.code, "message": job.error.message} if job.error else None}
+
+    def find_build(job_id: str, client: str) -> avatar3d.Job:
+        job = builds.get(job_id)
+        if job is None or job.owner != client:
+            raise ApiError(404, "not_found", "That 3D avatar build has expired. Start it again.")
+        return job
+
+    @app.post("/v1/avatar-3d", status_code=202)
+    async def start_avatar_3d(portrait: UploadFile = File(...), client: str = Depends(authorize_build)):
+        if not builder.ready:
+            raise ApiError(503, "not_configured",
+                           "The 3D avatar builder isn't set up on this server yet (run Backend/avatar3d/setup.sh).")
+        _, data, _ = await _read_image(portrait, "avatar portrait", "portrait")
+        try:
+            job = builds.submit(data, client)
+        except avatar3d.QueueFull:
+            raise ApiError(503, "busy", "The 3D avatar builder is busy. Try again in a few minutes.")
+        log.info("avatar-3d %s: started, %d KB portrait", job.id[:8], len(data) // 1024)
+        return JSONResponse(build_state(job), status_code=202, headers={"Cache-Control": "no-store"})
+
+    @app.get("/v1/avatar-3d/{job_id}")
+    async def avatar_3d_progress(job_id: str, client: str = Depends(follow_build)):
+        return JSONResponse(build_state(find_build(job_id, client)), headers={"Cache-Control": "no-store"})
+
+    @app.get("/v1/avatar-3d/{job_id}/model")
+    async def avatar_3d_model(job_id: str, client: str = Depends(follow_build)):
+        job = find_build(job_id, client)
+        if job.built is None:
+            raise ApiError(409, "not_ready", "The 3D avatar isn't finished yet.")
+        log.info("avatar-3d %s: collected, %d KB model, built in %.0fs, face %s", job.id[:8], len(job.built.model) // 1024,
+                 (job.finished or time.monotonic()) - job.started,
+                 "sharpened" if job.built.face_sharpened else f"not sharpened ({job.built.face_note or 'no reason given'})")
+        return Response(content=job.built.model, media_type="model/vnd.usdz+zip", headers={"Cache-Control": "no-store"})
+
+    @app.delete("/v1/avatar-3d/{job_id}", status_code=204)
+    async def cancel_avatar_3d(job_id: str, client: str = Depends(follow_build)):
+        """Stops a build the user cancelled, or forgets a finished one."""
+        builds.cancel(find_build(job_id, client))
+        return Response(status_code=204)
 
     return app
 

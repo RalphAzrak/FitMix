@@ -8,6 +8,7 @@ struct TryOnHero: View {
     var source: UIImage?
     /// Set after "Try on my avatar": `source` is the avatar and this listing is what goes on it.
     var avatarListing: AvatarTryOn? = nil
+    var wardrobeItemName: String? = nil
     var addPhoto: () -> Void
     var retry: () -> Void
 
@@ -19,12 +20,6 @@ struct TryOnHero: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("tryOnHero")
-    }
-
-    /// The image currently on screen, also used by zoom.
-    var displayedImage: UIImage? {
-        if case .ready(let image, _, _) = preview { return image }
-        return source
     }
 
     /// What the hero is showing, for its status chip. Only a real try-on is called one.
@@ -69,6 +64,10 @@ struct TryOnHero: View {
                 if let avatarListing {
                     statusCard(icon: "hourglass", title: "Try-on isn't available yet",
                                detail: "This is your avatar. \(avatarListing.productName) is ready to try on, but FitMix can't generate the try-on image yet.")
+                        .padding(.bottom, 14)
+                } else if let wardrobeItemName {
+                    statusCard(icon: "hourglass", title: "Try-on isn't available yet",
+                               detail: "\(wardrobeItemName) is ready in Studio. FitMix can’t generate the try-on image yet.")
                         .padding(.bottom, 14)
                 } else {
                     statusCard(icon: "hourglass", title: "Try-on isn't available yet",

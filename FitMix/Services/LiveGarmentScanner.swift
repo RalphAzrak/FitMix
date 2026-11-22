@@ -2,21 +2,34 @@ import AVFoundation
 import CoreImage
 import OSLog
 import QuartzCore
-
-// MARK: - Live garment scanning (frames → stable targets → one selection)
-//
-// `LiveGarmentAnalyzer` receives upright frames from the camera's video output on its own queue,
-// runs `LiveGarmentDetector` on at most ~8 frames a second (late frames are dropped by AVFoundation,
-// so the preview never waits), and keeps targets steady with `GarmentTracker`. Each target remembers
-// the exact frame it was last detected in. Tapping a target builds a `LiveGarmentSelection` from that
-// same frame, so the crop matches what the user tapped. Frames stay in memory on the iPhone.
+import Vision
 
 /// One selectable garment in the live preview.
 nonisolated struct LiveTarget: Identifiable, Sendable, Equatable {
     var id: GarmentCategory { category }
     let category: GarmentCategory
-    /// Smoothed across frames, normalized to the frame (top-left origin).
-    var bounds: CGRect
+    /// Smoothed bounds used both on screen and for the crop (normalized, top-left origin).
+    let bounds: CGRect
+    let frame: LiveScanFrame
+}
+
+/// A full-resolution copy of the frame that produced these targets.
+nonisolated final class LiveScanFrame: @unchecked Sendable, Equatable {
+    let image: CGImage
+    let date: Date
+    let detections: [LiveDetection]
+    let expiresAt: Double?
+
+    init(image: CGImage, date: Date, detections: [LiveDetection], expiresAt: Double?) {
+        self.image = image
+        self.date = date
+        self.detections = detections
+        self.expiresAt = expiresAt
+    }
+
+    static func == (lhs: LiveScanFrame, rhs: LiveScanFrame) -> Bool { lhs === rhs }
+
+    func isExpired(at time: Double) -> Bool { expiresAt.map { time >= $0 } ?? false }
 }
 
 /// What the Camera screen shows over the live preview.
@@ -26,9 +39,8 @@ nonisolated struct LiveScanState: Sendable, Equatable {
     /// Size of the analyzed frames, which have the same orientation and aspect as the preview.
     var frameSize: CGSize = .zero
     var hint: LiveGarmentDetector.Hint?
-    /// Detection can't run here (the simulator can't run Vision body pose).
+    /// Detection is unavailable on this device.
     var unavailable = false
-    var engine: LiveGarmentDetector.Engine = .vision
     /// Filled only when the performance overlay is on (FM_DEBUG_PERF_HUD=1).
     var perf: LivePerf?
 }
@@ -37,7 +49,7 @@ nonisolated struct LiveScanState: Sendable, Equatable {
 nonisolated struct LivePerf: Sendable, Equatable {
     /// The last analyzed frame.
     var frame = LiveGarmentDetector.Timings()
-    /// Seconds from the first frame with a person in it until each garment became tappable.
+    /// Seconds from the first frame with the person in it until each garment became tappable.
     var tappableAfter: [GarmentCategory: Double] = [:]
 }
 
@@ -63,13 +75,14 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
     var isSample = false
     var isTestPhoto = false
 
-    /// Pads a region a little and cuts it from `frame`.
+    /// Cuts a top-left-normalized region out of the source image.
     static func crop(_ frame: CGImage, to bounds: CGRect, padding: Double = 0.05) -> CGImage? {
         let w = Double(frame.width), h = Double(frame.height)
         let padded = bounds.insetBy(dx: -bounds.width * padding, dy: -bounds.height * padding)
             .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
         guard !padded.isNull else { return nil }
-        let pixels = CGRect(x: padded.minX * w, y: padded.minY * h, width: padded.width * w, height: padded.height * h).integral
+        let pixels = CGRect(x: padded.minX * w, y: padded.minY * h, width: padded.width * w, height: padded.height * h)
+            .integral.intersection(CGRect(x: 0, y: 0, width: w, height: h))
         guard pixels.width >= 8, pixels.height >= 8 else { return nil }
         return frame.cropping(to: pixels)
     }
@@ -77,95 +90,88 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
 
 // MARK: - Tracker
 
-/// Keeps one track per category so targets don't flicker. A detection must appear in two analyzed
-/// frames before it can be tapped, and disappears once it hasn't been seen for `staleAfter` seconds.
+/// Stabilizes garment geometry on the locked person. Confirmation takes two matching detections.
 nonisolated final class GarmentTracker {
     struct Track {
-        var smoothed: CGRect
-        /// Bounds exactly as detected in `frameID`.
+        var bounds: CGRect
         var raw: CGRect
-        /// Colour measured in `frameID`.
-        var color: SIMD3<Float>?
-        var frameID: Int
         var hits: Int
         var lastSeen: Double
     }
 
     static let minHits = 2
     static let staleAfter = 0.6
-    private static let smoothing = 0.5
+    private var tracks: [GarmentCategory: Track] = [:]
 
-    private(set) var tracks: [GarmentCategory: Track] = [:]
-
-    func update(_ detections: [LiveDetection], frameID: Int, time: Double) {
-        for detection in detections {
-            if var track = tracks[detection.category], iou(track.smoothed, detection.bounds) > 0.15 {
-                track.smoothed = Self.blend(track.smoothed, detection.bounds, Self.smoothing)
-                track.raw = detection.bounds
-                track.color = detection.color
-                track.frameID = frameID
-                track.hits += 1
-                track.lastSeen = time
-                tracks[detection.category] = track
-            } else {
-                // New, or jumped somewhere else (another person): start over without smoothing.
-                tracks[detection.category] = Track(smoothed: detection.bounds, raw: detection.bounds, color: detection.color,
-                                                   frameID: frameID, hits: 1, lastSeen: time)
+    func update(_ detections: [LiveDetection], time: Double) -> [LiveDetection] {
+        tracks = tracks.filter { time - $0.value.lastSeen < Self.staleAfter }
+        return detections.compactMap { detection in
+            let category = detection.category
+            let bounds = detection.bounds.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard bounds.width >= 0.015, bounds.height >= 0.015 else { return nil }
+            var next = Track(bounds: bounds, raw: bounds, hits: 1, lastSeen: time)
+            if let previous = tracks[category], iou(previous.raw, bounds) > 0.15 {
+                // Small variations get more smoothing. Follow big movements promptly.
+                let motion = Self.edgeDistance(previous.bounds, bounds)
+                let weight = min(0.9, 0.28 + motion * 9)
+                next.bounds = CGRect(x: previous.bounds.minX + (bounds.minX - previous.bounds.minX) * weight,
+                                     y: previous.bounds.minY + (bounds.minY - previous.bounds.minY) * weight,
+                                     width: previous.bounds.width + (bounds.width - previous.bounds.width) * weight,
+                                     height: previous.bounds.height + (bounds.height - previous.bounds.height) * weight)
+                next.hits = Self.minHits
             }
+            tracks[category] = next
+            guard next.hits >= Self.minHits else { return nil }
+            var stable = detection
+            stable.bounds = next.bounds
+            return stable
         }
     }
 
-    func expire(now: Double) {
-        tracks = tracks.filter { now - $0.value.lastSeen <= Self.staleAfter }
+    func isConfirming(since time: Double) -> Bool {
+        tracks.values.contains { $0.hits < Self.minHits && $0.lastSeen == time }
     }
 
-    func reset() { tracks = [:] }
+    func reset() { tracks.removeAll() }
 
-    var ready: [GarmentCategory: Track] { tracks.filter { $0.value.hits >= Self.minHits } }
-
-    var targets: [LiveTarget] {
-        ready.map { LiveTarget(category: $0.key, bounds: $0.value.smoothed) }
-            .sorted { $0.bounds.width * $0.bounds.height > $1.bounds.width * $1.bounds.height }
-    }
-
-    private static func blend(_ a: CGRect, _ b: CGRect, _ t: Double) -> CGRect {
-        CGRect(x: a.minX + (b.minX - a.minX) * t, y: a.minY + (b.minY - a.minY) * t,
-               width: a.width + (b.width - a.width) * t, height: a.height + (b.height - a.height) * t)
+    static func edgeDistance(_ a: CGRect, _ b: CGRect) -> Double {
+        max(abs(a.minX - b.minX), abs(a.maxX - b.maxX), abs(a.minY - b.minY), abs(a.maxY - b.maxY))
     }
 }
 
 // MARK: - Analyzer
 
 nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
-    /// Frames are delivered and analyzed here.
     let queue = DispatchQueue(label: "app.fitmix.camera.analysis", qos: .userInitiated)
 
-    private struct Frame {
-        let image: CGImage
-        let date: Date
-    }
-
-    private let detector = LiveGarmentDetector()
     private let tracker = GarmentTracker()
-    private let context = CIContext(options: [.cacheIntermediates: false])
-    private let publish: @Sendable (LiveScanState) -> Void
-    private var frames: [Int: Frame] = [:]
-    private var nextFrameID = 0
-    private var lastRun = 0.0
-    private var recentSharpness = 0.0
-    private var paused = false
-    /// Analyzing a still (debug recorded frame): its targets don't go stale.
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+    private var loadedDetector: LiveGarmentDetector?
+    private var detector: LiveGarmentDetector {
+        if let loadedDetector { return loadedDetector }
+        let detector = LiveGarmentDetector()
+        loadedDetector = detector
+        return detector
+    }
+    private let publish: @Sendable (LiveScanState, Int) -> Void
+    private var lastRun = -Double.infinity
+    private var ranEarly = false
+    private var lastSnapshot = -Double.infinity
+    private var paused = true
+    private var run = 0
     private var holdingStill = false
     private var lastState = LiveScanState()
-    /// When the current person was first seen, for time-to-tappable.
-    private var personSince: Double?
-    private var lastPersonSeen = 0.0
+    private var firstSubjectFrame: Double?
+    private var loggedFirstTarget = false
+    /// Per garment, for the performance overlay: seconds from the subject's first frame to tappable.
     private var tappableAfter: [GarmentCategory: Double] = [:]
     private let signposter = OSSignposter(subsystem: "app.fitmix", category: "LiveGarmentScanner")
     private let log = Logger(subsystem: "app.fitmix", category: "LiveGarmentScanner")
 
     /// Between analyses while nothing is waiting to be confirmed; keeps the phone cool.
     private static let minInterval = 0.12
+    private static let snapshotInterval = 0.24
+    static let rearPortraitOrientation: CGImagePropertyOrientation = .right
     static let perfEnabled: Bool = {
         #if DEBUG
         ProcessInfo.processInfo.environment["FM_DEBUG_PERF_HUD"] == "1"
@@ -174,93 +180,140 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         #endif
     }()
 
-    /// `publish` is called on the main queue.
-    init(publish: @escaping @MainActor @Sendable (LiveScanState) -> Void) {
-        self.publish = { state in DispatchQueue.main.async { publish(state) } }
+    /// The preview fits the same upright image represented by normalized overlay coordinates.
+    static func previewRect(for bounds: CGRect, frameSize: CGSize, in viewSize: CGSize) -> CGRect {
+        guard frameSize.width > 0, frameSize.height > 0 else { return .zero }
+        let fit = AVMakeRect(aspectRatio: frameSize, insideRect: CGRect(origin: .zero, size: viewSize))
+        return CGRect(x: fit.minX + bounds.minX * fit.width, y: fit.minY + bounds.minY * fit.height,
+                      width: bounds.width * fit.width, height: bounds.height * fit.height)
+    }
+
+    init(publish: @escaping @MainActor @Sendable (LiveScanState, Int) -> Void) {
+        self.publish = { state, run in DispatchQueue.main.async { publish(state, run) } }
         super.init()
     }
 
-    /// Paused while Studio is open or the camera is off. Pausing forgets every target.
-    func setPaused(_ paused: Bool) {
+    func setPaused(_ paused: Bool, run: Int) {
         queue.async { [self] in
+            self.run = run
             self.paused = paused
-            if paused { clear() }
+            clear()
         }
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard !paused, !holdingStill else { return }
-        let now = CACurrentMediaTime()
-        // A garment seen once is confirmed on the very next frame instead of after the interval,
-        // so it becomes tappable as soon as two frames agree.
-        let confirming = tracker.tracks.values.contains { $0.hits < GarmentTracker.minHits }
-        guard confirming || now - lastRun >= Self.minInterval, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        lastRun = now
-        let extent = CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels))
-        // A copy, so retained frames don't hold the camera's buffer pool. Vision reads the camera's
-        // buffer directly; the copy is what a tap crops.
-        guard let image = context.createCGImage(CIImage(cvPixelBuffer: pixels), from: extent) else { return }
-        process(image, pixelBuffer: pixels, time: now)
+        let time = CACurrentMediaTime()
+        let elapsed = time - lastRun
+        let early = elapsed < Self.minInterval
+        guard !early || (!ranEarly && elapsed >= 0.06 && tracker.isConfirming(since: lastRun)),
+              let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let date = Date.now
+        lastRun = time
+        ranEarly = early
+
+        let orientation = Self.rearPortraitOrientation
+        let upright = CIImage(cvPixelBuffer: pixels).oriented(orientation)
+        let analysis = signposter.beginInterval("Analyze frame")
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixels, orientation: orientation)
+        let result = detector.detect(handler, time: time) {
+            // Classifier crops only need a smaller upright image. Pose reads the camera buffer.
+            let scale = min(1, 720 / max(upright.extent.width, upright.extent.height))
+            let reduced = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            return Self.context.createCGImage(reduced, from: reduced.extent.integral)
+        }
+        signposter.endInterval("Analyze frame", analysis,
+                              "total \(result.timings.total) ms, pose \(result.timings.pose) ms, mask \(result.timings.mask) ms, model \(result.timings.model) ms, classify \(result.timings.classify) ms")
+
+        process(result, size: upright.extent.size, time: time, date: date) {
+            let copy = signposter.beginInterval("Copy selectable frame")
+            // Own only selectable frames, leaving camera buffers in AVFoundation's pool.
+            defer { signposter.endInterval("Copy selectable frame", copy) }
+            return Self.context.createCGImage(upright, from: upright.extent, format: .RGBA8,
+                                              colorSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                              deferred: false)
+        }
     }
 
-    /// Debug builds: analyze a photo as if it were the live feed, so overlays and taps can be
-    /// checked without a camera. `replay` stands in for the detector with detections recorded
-    /// elsewhere (the simulator can't run body pose).
-    func analyzeStill(_ image: CGImage, replay: [LiveDetection]? = nil) {
+    #if DEBUG
+    func analyzeStill(_ image: CGImage, replay: [LiveDetection]? = nil, run: Int) {
         queue.async { [self] in
+            self.run = run
             clear()
             holdingStill = true
-            paused = false
             let start = CACurrentMediaTime()
-            for i in 0..<GarmentTracker.minHits { process(image, time: start + Double(i) * Self.minInterval, replay: replay) }
-        }
-    }
-
-    private func process(_ image: CGImage, pixelBuffer: CVPixelBuffer? = nil, time: Double, replay: [LiveDetection]? = nil) {
-        let interval = signposter.beginInterval("analyze frame")
-        let result = replay.map { LiveGarmentDetector.Result(detections: $0) } ?? detector.detect(image, pixelBuffer: pixelBuffer, time: time)
-        signposter.endInterval("analyze frame", interval,
-                               "\(result.timings.total, format: .fixed(precision: 1)) ms, classify \(result.timings.classify, format: .fixed(precision: 1)) ms")
-        var state = LiveScanState(frameSize: CGSize(width: image.width, height: image.height), hint: result.hint,
-                                  unavailable: result.failed, engine: detector.engine)
-        if !result.failed {
-            // Keep the recent sharp frame: a frame much blurrier than recent ones (motion blur)
-            // doesn't replace the detections, so a tap always crops a sharp frame.
-            let sharpness = ColorGrid(image, maxWidth: 120)?.sharpness ?? 0
-            recentSharpness = max(sharpness, recentSharpness * 0.95)
-            if holdingStill || sharpness >= recentSharpness * 0.55 {
-                let id = nextFrameID
-                nextFrameID += 1
-                frames[id] = Frame(image: image, date: .now)
-                tracker.update(result.detections, frameID: id, time: time)
+            let size = CGSize(width: image.width, height: image.height)
+            for i in 0..<GarmentTracker.minHits {
+                let time = start + Double(i) * Self.minInterval
+                let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
+                let result = replay.map { LiveGarmentDetector.Result(detections: $0) }
+                    ?? detector.detect(handler, time: time) { image }
+                process(result, size: size, time: time, date: .now) { image }
             }
         }
-        if !holdingStill { tracker.expire(now: time) }
-        let referenced = Set(tracker.tracks.values.map(\.frameID))
-        frames = frames.filter { referenced.contains($0.key) }
-        state.targets = tracker.targets
-        measureTappable(result, targets: state.targets, time: time)
+    }
+    #endif
+
+    private func process(_ result: LiveGarmentDetector.Result, size: CGSize, time: Double, date: Date,
+                         copyFrame: () -> CGImage?) {
+        let now = CACurrentMediaTime()
+        if result.acquiredSubject {
+            tracker.reset()
+            firstSubjectFrame = time
+            loggedFirstTarget = false
+            tappableAfter = [:]
+        }
+        let stable = tracker.update(result.detections, time: time)
+        var targets = result.acquiredSubject ? [] : lastState.targets.filter { !$0.frame.isExpired(at: now) }
+        let byCategory = Dictionary(uniqueKeysWithValues: targets.map { ($0.category, $0) })
+        let shouldSnapshot = stable.contains { detection in
+            guard let target = byCategory[detection.category] else { return true }
+            return GarmentTracker.edgeDistance(target.bounds, detection.bounds) >= 0.009
+        } || (!stable.isEmpty && time - lastSnapshot >= Self.snapshotInterval)
+        if shouldSnapshot, holdingStill || now - time < GarmentTracker.staleAfter, let image = copyFrame() {
+            lastSnapshot = time
+            let expiresAt = holdingStill ? nil : time + GarmentTracker.staleAfter
+            let shown = stable.map { detection in
+                var snapped = detection
+                // Hold tiny changes steady even when renewing the source frame.
+                if let previous = byCategory[detection.category],
+                   GarmentTracker.edgeDistance(previous.bounds, detection.bounds) < 0.009 {
+                    snapped.bounds = previous.bounds
+                }
+                return snapped
+            }
+            let updated = Set(shown.map(\.category))
+            // Keep other garments from this *same* frame available in Studio.
+            let companions = result.detections.filter { !updated.contains($0.category) }
+            let frame = LiveScanFrame(image: image, date: date, detections: shown + companions, expiresAt: expiresAt)
+            targets.removeAll { updated.contains($0.category) }
+            targets += shown.map {
+                LiveTarget(category: $0.category, bounds: $0.bounds, frame: frame)
+            }
+            if !loggedFirstTarget, let firstSubjectFrame {
+                loggedFirstTarget = true
+                let ms = (CACurrentMediaTime() - firstSubjectFrame) * 1000
+                signposter.emitEvent("First usable target", "\(ms) ms")
+                log.info("First usable target: \(ms, format: .fixed(precision: 1)) ms after first subject frame")
+            }
+        }
+        targets.sort {
+            let a = $0.bounds.width * $0.bounds.height, b = $1.bounds.width * $1.bounds.height
+            return a == b ? $0.category.rawValue < $1.category.rawValue : a > b
+        }
+        measureTappable(targets)
+        var state = LiveScanState(targets: targets, frameSize: size, hint: result.hint, unavailable: result.failed)
         if Self.perfEnabled { state.perf = LivePerf(frame: result.timings, tappableAfter: tappableAfter) }
         guard state != lastState else { return }
         lastState = state
-        publish(state)
+        publish(state, run)
     }
 
-    /// Time from first seeing a person to each garment being tappable, once per appearance.
-    private func measureTappable(_ result: LiveGarmentDetector.Result, targets: [LiveTarget], time: Double) {
-        let personVisible = !result.detections.isEmpty || (result.hint != nil && result.hint != .noPerson)
-        if personVisible {
-            if personSince == nil || time - lastPersonSeen > GarmentTracker.staleAfter {
-                personSince = time
-                tappableAfter = [:]
-            }
-            lastPersonSeen = time
-        }
-        guard let since = personSince else { return }
-        // Tappable once this frame's analysis has finished, measured from when the person's first frame arrived.
-        let finished = time + result.timings.total / 1000
+    /// Time from the subject's first frame to each garment being tappable, once per subject.
+    private func measureTappable(_ targets: [LiveTarget]) {
+        guard let firstSubjectFrame else { return }
         for target in targets where tappableAfter[target.category] == nil {
-            let seconds = finished - since
+            let seconds = CACurrentMediaTime() - firstSubjectFrame
             tappableAfter[target.category] = seconds
             signposter.emitEvent("tappable", "\(target.category.rawValue, privacy: .public) after \(seconds, format: .fixed(precision: 3)) s")
             log.info("\(target.category.rawValue, privacy: .public) tappable \(Int(seconds * 1000)) ms after the person appeared")
@@ -268,35 +321,34 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
     }
 
     private func clear() {
+        loadedDetector?.reset()
         tracker.reset()
-        personSince = nil
-        tappableAfter = [:]
-        frames = [:]
         holdingStill = false
-        recentSharpness = 0
+        lastRun = -.infinity
+        ranEarly = false
+        lastSnapshot = -.infinity
+        firstSubjectFrame = nil
+        loggedFirstTarget = false
+        tappableAfter = [:]
         lastState = LiveScanState()
-        publish(lastState)
     }
 
-    /// The tapped garment and the others detected in the same frame, cut from that frame.
-    /// `completion` runs on the main queue, with nil if the target has just gone away.
-    func selection(of category: GarmentCategory, completion: @escaping @MainActor @Sendable (LiveGarmentSelection?) -> Void) {
-        queue.async { [self] in
-            let ready = tracker.ready
-            guard let track = ready[category], let frame = frames[track.frameID] else {
+    /// Resolve the displayed frame and exact bounds from the tap, even if newer targets arrived.
+    func selection(of target: LiveTarget, tappedAt time: Double,
+                   completion: @escaping @MainActor @Sendable (LiveGarmentSelection?) -> Void) {
+        queue.async {
+            let frame = target.frame
+            guard !frame.isExpired(at: time) else {
                 DispatchQueue.main.async { completion(nil) }
                 return
             }
-            let garments = ready
-                .filter { $0.value.frameID == track.frameID }
-                .compactMap { category, track -> LiveGarmentSelection.Garment? in
-                    LiveGarmentSelection.crop(frame.image, to: track.raw).map {
-                        LiveGarmentSelection.Garment(category: category, bounds: track.raw, crop: $0, color: track.color)
-                    }
-                }
-                .sorted { GarmentCategory.liveScannable.firstIndex(of: $0.category) ?? 0 < GarmentCategory.liveScannable.firstIndex(of: $1.category) ?? 0 }
-            let selection = garments.contains { $0.category == category }
-                ? LiveGarmentSelection(frame: frame.image, capturedAt: frame.date, garments: garments, selected: category)
+            let garments = GarmentCategory.liveScannable.compactMap { category -> LiveGarmentSelection.Garment? in
+                guard let detection = frame.detections.first(where: { $0.category == category }),
+                      let crop = LiveGarmentSelection.crop(frame.image, to: detection.bounds, padding: 0) else { return nil }
+                return LiveGarmentSelection.Garment(category: category, bounds: detection.bounds, crop: crop, color: detection.color)
+            }
+            let selection = garments.contains { $0.category == target.category && $0.bounds == target.bounds }
+                ? LiveGarmentSelection(frame: frame.image, capturedAt: frame.date, garments: garments, selected: target.category)
                 : nil
             DispatchQueue.main.async { completion(selection) }
         }

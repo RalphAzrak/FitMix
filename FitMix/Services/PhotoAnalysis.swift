@@ -4,21 +4,11 @@ import Foundation
 import UIKit
 import Vision
 
-/// Checks a full-body photo on-device and measures the body outline.
+/// Checks on-device that a photo shows a whole person, head to feet.
 nonisolated enum BodyPhotoAnalyzer {
     /// Returns `nil` when the check itself could not run (for example, Vision is unavailable).
     @concurrent
-    static func analyze(fileURL: URL) async -> BodyPhotoAnalysis? {
-        guard let cgImage = UIImage(contentsOfFile: fileURL.path)?.cgImage else { return nil }
-        return analyze(cgImage)
-    }
-
-    @concurrent
-    static func analyze(image: CGImage) async -> BodyPhotoAnalysis? {
-        analyze(image)
-    }
-
-    private static func analyze(_ cgImage: CGImage) -> BodyPhotoAnalysis? {
+    static func analyze(image cgImage: CGImage) async -> BodyPhotoAnalysis? {
         let request = VNGeneratePersonSegmentationRequest()
         request.qualityLevel = .accurate
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
@@ -61,34 +51,7 @@ nonisolated enum BodyPhotoAnalyzer {
         let widest = Double(rowCounts[top...bottom].max() ?? 0) * sx
         let margin = max(1, Int(Double(h) * 0.012))
         let fullBody = top >= margin && bottom <= h - 1 - margin && widest > 0 && bodyHeight / widest > 1.8
-
-        // Horizontal centre of the torso.
-        var sumX = 0.0, count = 0.0
-        for y in (top + bodyRows / 5)...(top + bodyRows / 2) {
-            for x in 0..<w where on(x, y) { sumX += Double(x); count += 1 }
-        }
-        guard count > 0 else { return BodyPhotoAnalysis(personDetected: true, fullBodyVisible: fullBody) }
-        let centre = Int((sumX / count).rounded())
-
-        /// Width of the outline through the body's centre line, at a fraction of the height measured from the top.
-        func ratio(at t: Double) -> Double? {
-            var runs: [Int] = []
-            let mid = top + Int(Double(bodyRows) * t)
-            for y in (mid - 2)...(mid + 2) where y >= 0 && y < h {
-                guard on(centre, y) else { continue }
-                var l = centre, r = centre
-                while l > 0, on(l - 1, y) { l -= 1 }
-                while r < w - 1, on(r + 1, y) { r += 1 }
-                runs.append(r - l + 1)
-            }
-            guard !runs.isEmpty else { return nil }
-            runs.sort()
-            return Double(runs[runs.count / 2]) * sx / bodyHeight
-        }
-
-        return BodyPhotoAnalysis(personDetected: true, fullBodyVisible: fullBody,
-                                 shoulderRatio: ratio(at: 0.19), chestRatio: ratio(at: 0.27),
-                                 waistRatio: ratio(at: 0.385), hipRatio: ratio(at: 0.48))
+        return BodyPhotoAnalysis(personDetected: true, fullBodyVisible: fullBody)
     }
 }
 

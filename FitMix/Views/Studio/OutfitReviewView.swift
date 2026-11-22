@@ -50,14 +50,10 @@ struct OutfitReviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     photo
-                    if isAnalyzing {
-                        NoticeRow(tone: .info, text: "Finding garments in this photo. This runs on your iPhone; the photo isn't uploaded.")
-                            .accessibilityIdentifier("reviewAnalyzing")
-                    } else if scan.garments.isEmpty {
-                        NoticeRow(tone: .caution, text: analysis?.problem ?? "No garments were found in this photo.")
+                    if scan.garments.isEmpty {
+                        NoticeRow(tone: .caution, text: "No garments were found in this photo.")
                             .accessibilityIdentifier("reviewNoGarments")
                     } else {
-                        if let problem = analysis?.problem { NoticeRow(tone: .info, text: problem) }
                         HStack {
                             Text("CHOOSE PIECES TO TRY")
                                 .font(.system(size: 13, weight: .bold)).tracking(0.7)
@@ -70,7 +66,6 @@ struct OutfitReviewView: View {
                         Text("Pieces you don't choose stay as you're wearing them in your photo.")
                             .font(.system(size: 12)).foregroundStyle(AuthPalette.secondary)
                     }
-                    if let note = analysis?.note { NoticeRow(tone: .info, text: note) }
                 }
                 .padding(16)
             }
@@ -82,13 +77,6 @@ struct OutfitReviewView: View {
             TryOnPhotoSheet { photo in proceed(with: photo) }
         }
     }
-
-    /// Analysis results for this scan (not for an earlier photo).
-    private var analysis: CaptureAnalysis? {
-        studio.analysis.flatMap { $0.scan.id == scan.id ? $0 : nil }
-    }
-
-    private var isAnalyzing: Bool { studio.isAnalyzing && studio.pendingScan?.id == scan.id }
 
     private var photo: some View {
         GeometryReader { proxy in
@@ -119,17 +107,7 @@ struct OutfitReviewView: View {
         .background(AuthPalette.containerHigh)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(alignment: .bottom) {
-            if isAnalyzing {
-                HStack(spacing: 8) {
-                    ProgressView().tint(.white)
-                    Text("Finding garments…").font(.system(size: 13, weight: .semibold))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14).frame(minHeight: 36)
-                .background(.black.opacity(0.6), in: Capsule())
-                .padding(12)
-                .accessibilityElement(children: .combine)
-            } else if !scan.garments.isEmpty {
+            if !scan.garments.isEmpty {
                 Button {
                     withAnimation(.snappy(duration: 0.25)) { isolated.toggle() }
                 } label: {
@@ -180,12 +158,7 @@ struct OutfitReviewView: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
-            if isAnalyzing {
-                Button {} label: { Label("Finding garments…", systemImage: "hourglass") }
-                    .buttonStyle(AuthPrimaryButtonStyle())
-                    .disabled(true)
-                    .opacity(0.5)
-            } else if scan.garments.isEmpty {
+            if scan.garments.isEmpty {
                 Button(action: retake) { Label("Retake Photo", systemImage: "camera") }
                     .buttonStyle(AuthPrimaryButtonStyle())
                     .accessibilityIdentifier("reviewRetake")

@@ -28,6 +28,17 @@ extension AvatarRecord {
     }
 }
 
+/// What the saved 3D model was built from. It belongs to one portrait: accepting a new avatar removes it.
+nonisolated struct Avatar3DRecord: Codable, Equatable, Sendable {
+    var createdAt: Date
+    /// False when the head could not be placed precisely on the model, so the face has only the lower detail of
+    /// the whole-figure texture.
+    var faceSharpened: Bool
+    /// The model's file name. Every build gets its own, so a rebuilt model is a new file the 3D view has to load
+    /// rather than the same address it has already shown. `nil` for models saved before names were recorded.
+    var file: String?
+}
+
 /// Everything FitMix remembers about the avatar, apart from the pictures themselves.
 nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
     var hasBodyPhoto = false
@@ -44,6 +55,10 @@ nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
     var avatar: AvatarRecord?
     /// A newly generated portrait the user has not decided on yet.
     var candidate: AvatarRecord?
+    /// The 3D model built from `avatar`, if the user has built one.
+    var model3D: Avatar3DRecord?
+    /// The backend's id for a 3D build that hasn't finished, so reopening FitMix picks it up again.
+    var model3DJob: String?
 
     var hasMetrics: Bool { heightCm != nil && weightKg != nil }
     var setupStarted: Bool { hasBodyPhoto || hasSelfie || hasMetrics || avatar != nil || candidate != nil }
@@ -57,8 +72,7 @@ nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
 
     init() {}
 
-    /// Also reads profiles saved by the earlier 3D-avatar version of FitMix: the full-body photo, height, weight
-    /// and units carry over, and everything that version stored about its 3D model is ignored.
+    /// Reads what it can: a profile saved by another version of FitMix keeps every field that still makes sense.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         hasBodyPhoto = (try? c.decodeIfPresent(Bool.self, forKey: .hasBodyPhoto)) ?? false
@@ -71,17 +85,15 @@ nonisolated struct AvatarProfile: Codable, Equatable, Sendable {
         selfieHasFace = try? c.decodeIfPresent(Bool.self, forKey: .selfieHasFace)
         avatar = try? c.decodeIfPresent(AvatarRecord.self, forKey: .avatar)
         candidate = try? c.decodeIfPresent(AvatarRecord.self, forKey: .candidate)
+        model3D = try? c.decodeIfPresent(Avatar3DRecord.self, forKey: .model3D)
+        model3DJob = try? c.decodeIfPresent(String.self, forKey: .model3DJob)
     }
 }
 
-/// What the full-body photo check measured. Widths are fractions of the person's height in the photo.
+/// What the full-body photo check found.
 nonisolated struct BodyPhotoAnalysis: Codable, Equatable, Sendable {
     var personDetected: Bool
     var fullBodyVisible: Bool
-    var shoulderRatio: Double?
-    var chestRatio: Double?
-    var waistRatio: Double?
-    var hipRatio: Double?
 }
 
 nonisolated enum BodyMeasurements {

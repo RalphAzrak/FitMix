@@ -1,12 +1,12 @@
 import AVFoundation
+import QuartzCore
 import UIKit
 
 // MARK: - Camera session (AVFoundation, off the main thread)
 //
 // `CameraSession` owns the AVCaptureSession and does every configuration, start/stop, zoom and
-// torch call on its own serial queue. Its video data output delivers upright frames (rotated like
-// the preview) to `LiveGarmentAnalyzer`. `CameraController` (below) is the main-actor face the
-// Camera screen observes. There is no shutter: garments are picked from the live feed.
+// torch call on its own serial queue. The iPhone interface is portrait and the scanner uses the
+// rear camera. The preview is fixed to that geometry, and the analyzer orients the native buffers.
 // See Docs/LiveGarmentMatch.md.
 
 /// A zoom stop the current camera can actually reach, e.g. "0.5×" on a device with an ultra-wide.
@@ -37,8 +37,7 @@ nonisolated final class CameraSession: @unchecked Sendable {
     private let videoOutput = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
     private var configured = false
-    /// Rotation applied to delivered frames, kept in step with the preview's.
-    private var videoRotationAngle: CGFloat = 90
+    static let rearPortraitAngle: CGFloat = 90
 
     /// Rear cameras in preference order. Virtual devices first, so 0.5× and 2× switch lenses
     /// automatically where the hardware has them.
@@ -55,9 +54,6 @@ nonisolated final class CameraSession: @unchecked Sendable {
         }
         return nil
     }
-
-    /// The configured camera, once `start` has succeeded. For the rotation coordinator.
-    var currentDevice: AVCaptureDevice? { queue.sync { device } }
 
     /// Configures the session the first time, then starts it. Completion runs on the main queue.
     func start(completion: @escaping @MainActor @Sendable (Result<CameraCapabilities, CameraSessionError>) -> Void) {
@@ -117,19 +113,16 @@ nonisolated final class CameraSession: @unchecked Sendable {
         queue.async { [self] in videoOutput.setSampleBufferDelegate(delegate, queue: delegateQueue) }
     }
 
-    /// Rotates delivered frames like the preview, so a frame looks exactly like what's on screen.
-    func setVideoRotation(_ angle: CGFloat) {
-        queue.async { [self] in
-            videoRotationAngle = angle
-            applyVideoRotationLocked()
-        }
-    }
-
     // MARK: Queue-only
 
-    private func applyVideoRotationLocked() {
-        guard let connection = videoOutput.connection(with: .video), connection.isVideoRotationAngleSupported(videoRotationAngle) else { return }
-        connection.videoRotationAngle = videoRotationAngle
+    static func configureGeometry(_ connection: AVCaptureConnection, rotation: CGFloat) {
+        if connection.isVideoRotationAngleSupported(rotation), connection.videoRotationAngle != rotation {
+            connection.videoRotationAngle = rotation
+        }
+        if connection.isVideoMirroringSupported {
+            if connection.automaticallyAdjustsVideoMirroring { connection.automaticallyAdjustsVideoMirroring = false }
+            if connection.isVideoMirrored { connection.isVideoMirrored = false }
+        }
     }
 
     @discardableResult
@@ -167,7 +160,9 @@ nonisolated final class CameraSession: @unchecked Sendable {
             throw CameraSessionError.cannotUseCamera("The video output couldn't be added.")
         }
         session.addOutput(videoOutput)
-        applyVideoRotationLocked()
+        if let connection = videoOutput.connection(with: .video) {
+            Self.configureGeometry(connection, rotation: 0)
+        }
 
         let capabilities = Self.capabilities(of: camera)
         // Virtual devices start on their widest lens; open at 1× like the system Camera.
@@ -225,8 +220,9 @@ final class CameraController {
 
     @ObservationIgnored let camera = CameraSession()
     @ObservationIgnored private var analyzer: LiveGarmentAnalyzer!
-    @ObservationIgnored private var rotation: AVCaptureDevice.RotationCoordinator?
-    @ObservationIgnored private var previewRotationObservation: NSKeyValueObservation?
+    @ObservationIgnored private var scanExpiry: Task<Void, Never>?
+    @ObservationIgnored private var analysisRun = 0
+    @ObservationIgnored private var sessionStart = 0
     @ObservationIgnored private weak var previewLayer: AVCaptureVideoPreviewLayer?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     /// False once the screen has gone away, so late callbacks don't restart the camera.
@@ -235,7 +231,10 @@ final class CameraController {
     var session: AVCaptureSession { camera.session }
 
     init() {
-        analyzer = LiveGarmentAnalyzer { [weak self] state in self?.scan = state }
+        analyzer = LiveGarmentAnalyzer { [weak self] state, run in
+            guard let self, self.analysisRun == run, self.active else { return }
+            self.publishScan(state)
+        }
         camera.setFrameDelegate(analyzer, queue: analyzer.queue)
     }
 
@@ -263,14 +262,13 @@ final class CameraController {
     /// Camera screen went away or the app went to the background.
     func deactivate(release: Bool) {
         active = false
+        sessionStart += 1
         torchOn = false
-        analyzer.setPaused(true)
+        resetAnalysis(paused: true)
         camera.stop(release: release)
         if release {
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
-            previewRotationObservation = nil
-            rotation = nil
         }
     }
 
@@ -281,8 +279,10 @@ final class CameraController {
 
     private func startSession() {
         if phase != .live { phase = .starting }
+        sessionStart += 1
+        let start = sessionStart
         camera.start { [weak self] result in
-            guard let self, self.active else { return }
+            guard let self, self.active, self.sessionStart == start, self.stillFrame == nil, !self.isSelecting else { return }
             switch result {
             case .success(let capabilities):
                 self.capabilities = capabilities
@@ -293,8 +293,8 @@ final class CameraController {
                     self.zoom = capabilities.defaultZoom
                 }
                 self.phase = self.session.isInterrupted ? .interrupted(Self.message(for: nil)) : .live
-                self.attachRotation()
-                self.analyzer.setPaused(false)
+                self.applyPreviewGeometry()
+                self.resetAnalysis(paused: self.session.isInterrupted)
             case .failure(.noRearCamera):
                 self.phase = .unavailable
             case .failure(let error):
@@ -303,21 +303,45 @@ final class CameraController {
         }
     }
 
+    private func resetAnalysis(paused: Bool) {
+        analysisRun += 1
+        isSelecting = false
+        publishScan(LiveScanState())
+        analyzer.setPaused(paused, run: analysisRun)
+    }
+
+    private func publishScan(_ state: LiveScanState) {
+        scanExpiry?.cancel()
+        let now = CACurrentMediaTime()
+        var visible = state
+        visible.targets.removeAll { $0.frame.isExpired(at: now) }
+        if scan != visible { scan = visible }
+        if let deadline = visible.targets.compactMap({ $0.frame.expiresAt }).min() {
+            scanExpiry = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(0, deadline - CACurrentMediaTime())))
+                guard !Task.isCancelled, let self else { return }
+                self.publishScan(self.scan)
+            }
+        } else {
+            scanExpiry = nil
+        }
+    }
+
     // MARK: Selecting a garment
 
-    /// The user tapped a live target. Stops the camera and hands back the garment, cut from the
-    /// frame it was detected in, plus that whole frame. If the garment left the view in the
-    /// meantime, nothing happens and the camera keeps going.
+    /// Stops the camera and hands Studio the tapped target's frame and crop while still fresh.
     func select(_ target: LiveTarget, completion: @escaping (LiveGarmentSelection) -> Void) {
-        guard !isSelecting else { return }
+        let now = CACurrentMediaTime()
+        guard active, !isSelecting, phase == .live || stillFrame != nil, !target.frame.isExpired(at: now) else { return }
         isSelecting = true
-        analyzer.selection(of: target.category) { [weak self] selection in
-            guard let self else { return }
+        let run = analysisRun
+        analyzer.selection(of: target, tappedAt: now) { [weak self] selection in
+            guard let self, self.active, self.analysisRun == run else { return }
             guard let selection else {
                 self.isSelecting = false
                 return
             }
-            self.analyzer.setPaused(true)
+            self.resetAnalysis(paused: true)
             self.torchOn = false
             self.camera.stop()
             completion(selection)
@@ -328,17 +352,21 @@ final class CameraController {
     /// Debug builds: show a photo in place of the preview and analyze it like a live frame.
     func analyzeStill(_ image: UIImage, replay: [LiveDetection]? = nil) {
         guard let cgImage = image.cgImage else { return }
+        active = true
         stillFrame = image
+        resetAnalysis(paused: true)
         camera.stop()
-        analyzer.analyzeStill(cgImage, replay: replay)
+        analyzer.analyzeStill(cgImage, replay: replay, run: analysisRun)
     }
     #endif
 
     // MARK: Controls
 
     func select(_ preset: ZoomPreset) {
+        guard phase == .live, preset != zoom, !isSelecting else { return }
         zoom = preset
         camera.setZoom(preset)
+        resetAnalysis(paused: false)
     }
 
     func toggleTorch() {
@@ -348,27 +376,13 @@ final class CameraController {
     // MARK: Preview orientation
 
     func attach(previewLayer: AVCaptureVideoPreviewLayer) {
-        if self.previewLayer !== previewLayer {
-            rotation = nil
-            previewRotationObservation = nil
-        }
         self.previewLayer = previewLayer
-        attachRotation()
+        applyPreviewGeometry()
     }
 
-    private func attachRotation() {
-        guard rotation == nil, let previewLayer, let device = camera.currentDevice else { return }
-        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
-        rotation = coordinator
-        previewRotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) { [weak previewLayer, camera] coordinator, _ in
-            let angle = coordinator.videoRotationAngleForHorizonLevelPreview
-            // Frames follow the preview's rotation, so detections map straight onto the screen.
-            camera.setVideoRotation(angle)
-            DispatchQueue.main.async {
-                guard let connection = previewLayer?.connection, connection.isVideoRotationAngleSupported(angle) else { return }
-                connection.videoRotationAngle = angle
-            }
-        }
+    private func applyPreviewGeometry() {
+        guard let connection = previewLayer?.connection else { return }
+        CameraSession.configureGeometry(connection, rotation: CameraSession.rearPortraitAngle)
     }
 
     // MARK: Session notifications
@@ -381,24 +395,28 @@ final class CameraController {
                 let raw = note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int
                 let reason = raw.flatMap(AVCaptureSession.InterruptionReason.init(rawValue:))
                 MainActor.assumeIsolated {
-                    guard let self, self.phase == .live || self.phase == .starting else { return }
+                    guard let self, self.stillFrame == nil, self.phase == .live || self.phase == .starting else { return }
                     // Backgrounding is handled by the screen; don't flash a message on the way out.
                     if reason == .videoDeviceNotAvailableInBackground { return }
                     self.torchOn = false
+                    self.resetAnalysis(paused: true)
                     self.phase = .interrupted(Self.message(for: reason))
                 }
             },
             center.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self, case .interrupted = self.phase else { return }
+                    guard let self, self.active, self.stillFrame == nil, case .interrupted = self.phase else { return }
                     self.phase = .live
+                    self.applyPreviewGeometry()
+                    self.resetAnalysis(paused: false)
                 }
             },
             center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { [weak self] note in
                 let error = note.userInfo?[AVCaptureSessionErrorKey] as? AVError
                 MainActor.assumeIsolated {
-                    guard let self, self.active else { return }
-                    if error?.code == .mediaServicesWereReset, !self.isSelecting {
+                    guard let self, self.active, self.stillFrame == nil, !self.isSelecting else { return }
+                    self.resetAnalysis(paused: true)
+                    if error?.code == .mediaServicesWereReset {
                         self.startSession()
                     } else {
                         self.phase = .failed(error?.localizedDescription ?? "The camera stopped unexpectedly.")

@@ -147,7 +147,7 @@ struct ProfileView: View {
                 .foregroundStyle(AuthPalette.primaryContainer)
                 .frame(minHeight: 44)
         }
-        .profileCard()
+        .fmCard()
     }
 
     private func signOut() {
@@ -241,7 +241,7 @@ private struct AccountCard: View {
             .accessibilityLabel("Edit account details")
             .accessibilityIdentifier("profileEditAccount")
         }
-        .profileCard()
+        .fmCard()
     }
 }
 
@@ -275,7 +275,7 @@ private struct TryOnPhotoCard: View {
                 empty
             }
         }
-        .profileCard()
+        .fmCard()
         .photoPicker(request: $request, camera: .rear) { image in
             Task { candidate = await avatar.checkBodyPhoto(image) }
         }
@@ -364,17 +364,6 @@ private struct TryOnPhotoCard: View {
 
 // MARK: Shared components
 
-extension View {
-    /// A rounded white card on the Profile background.
-    func profileCard(padding: CGFloat = 16) -> some View {
-        self
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.fmCard, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.fmHairline))
-    }
-}
-
 /// A titled group of rows in one white card.
 struct ProfileSection<Content: View>: View {
     var title: String
@@ -389,7 +378,7 @@ struct ProfileSection<Content: View>: View {
                 .accessibilityAddTraits(.isHeader)
                 .padding(.leading, 4)
             VStack(spacing: 0) { content }
-                .profileCard(padding: 0)
+                .fmCard(padding: 0)
         }
     }
 }
@@ -481,7 +470,7 @@ struct ProfileEmptyState<Actions: View>: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity)
-        .profileCard()
+        .fmCard()
     }
 }
 

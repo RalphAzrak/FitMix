@@ -23,7 +23,7 @@ this module.
 import asyncio
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -312,7 +312,3 @@ async def search_all(providers: list[VisualProvider], crop: bytes, clues: Clues,
         refreshed = [assess(e, clues, consensus) if isinstance(e, Candidate) else r for r, e in zip(top, enriched)]
         ranked = sorted(refreshed + ranked[ENRICH_TOP:], key=lambda r: r.score, reverse=True)
     return SearchOutcome(ranked[:MAX_RESULTS], report)
-
-
-def to_dict(c: Candidate) -> dict:
-    return asdict(c)

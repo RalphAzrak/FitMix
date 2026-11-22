@@ -29,7 +29,7 @@ struct OrderHistoryView: View {
                                   message: "Orders placed through FitMix will appear here.")
                 NoticeRow(tone: .info, text: "Purchases you make on a retailer's website, including from View at retailer, don't appear here automatically. Check your email or the retailer's account for those orders.")
                     .fixedSize(horizontal: false, vertical: true)
-                    .profileCard()
+                    .fmCard()
             }
             .padding(16)
         }
@@ -116,6 +116,6 @@ struct PrivacyDataView: View {
             extra()
         }
         .foregroundStyle(AuthPalette.onSurface)
-        .profileCard()
+        .fmCard()
     }
 }

@@ -5,33 +5,35 @@ garment only. There is no shutter.
 
 ## The flow
 
-1. **Camera** (`CameraView`, `CameraController`). The rear camera's video output delivers upright 1080p frames,
-   rotated like the preview, to `LiveGarmentAnalyzer` on its own queue. It analyzes at most ~8 frames a
-   second. AVFoundation drops the frames that arrive while a frame is being analyzed, so the preview never waits.
-2. **Detection** (`LiveGarmentDetector`). This finds **Jacket, T-shirt, Pants and Shoes** on the most prominent
-   person. It runs on the iPhone, and frames never leave it.
-3. **Stable targets** (`GarmentTracker`). A garment becomes tappable after it has been seen in two analyzed
-   frames. It is smoothed between frames and cleared once it has been out of view for 0.6 s. Frames much
-   blurrier than recent ones don't replace the detections, so a tap always uses a recent sharp frame.
-   **Tap to Isolate** shows when at least one target is ready.
-4. **Tap** (`CameraController.select`). The tapped garment is cut from **the exact frame it was detected in**,
-   along with every other garment detected in that frame. The camera stops and Studio opens
-   (`StudioStore.openLive`).
+1. **Camera** (`CameraView`, `CameraController`). The preview uses the rear camera in portrait.
+   The analyzer reads native camera buffers with a portrait orientation and runs on a serial queue.
+   Analysis usually runs at most 8 times per second. A garment awaiting confirmation gets one earlier
+   check. AVFoundation drops callbacks that arrive while the analysis queue is busy.
+2. **Detection** (`LiveGarmentDetector`). Vision body pose locks onto a subject and matches its
+   landmarks across frames. If the match is lost or ambiguous, the lock can recover for up to 0.6 s.
+   A new subject starts a fresh set of garment tracks.
+3. **Stable targets** (`GarmentTracker`). Each garment needs two matching detections. Smoothing and
+   a small movement threshold suppress jitter. The analyzer copies the full frame when a selectable
+   target first appears, moves enough, or needs a fresher source frame. Each highlight expires 0.6 s
+   after its source frame, including when the camera stops delivering frames.
+4. **Tap** (`CameraController.select`). Each target carries its source image and crop bounds. A tap
+   opens Studio on that image with the exact highlight rectangle and other garments detected in
+   the same frame. Cropping uses the rectangle edges rounded out to whole pixels.
 5. **Studio**. The large image is that whole frame, with the tapped garment outlined. Layers & Garments shows
    the garments from that frame with the tapped one selected, and its card starts a retailer search right
    away. Tapping another card searches for that garment instead. Any search still running is cancelled, and
    its result is dropped even if it arrives late (each search has a token).
-6. **Search**, only after the tap (`RetailerSearch.swift` → `POST /v1/garment-match`). The phone sends only the
+6. **Search**, only after the tap (`LensSearch.swift` → `POST /v1/lens-search`). The phone sends only the
    selected garment's crop (JPEG, long edge ≤ 640 px, no metadata), its category, and the clues it read on-device
    (`GarmentClues`). Full frames, profile photos and avatar images are never sent. The backend holds every
    provider credential.
 
 ## Overlays and taps
 
-- The preview is aspect-fit, and frames are rotated to match the preview's rotation. A box normalized to the
-  frame therefore maps onto the screen through the same `AVMakeRect` fit at any view size.
-- The iPhone UI is portrait-only. If the phone is turned sideways, the preview and frames rotate together, so
-  boxes still line up (people then appear sideways to the detector).
+- The rear preview is aspect-fit, portrait, and unmirrored. Vision and the copied frame use the same
+  portrait orientation. Top-left normalized bounds map onto the displayed image using `AVMakeRect`.
+- FitMix targets iPhone with a portrait-only interface. Test phone tilt and rear zoom presets on
+  hardware. Vision should be used with the phone held upright.
 - Boxes are drawn largest first, so an inner T-shirt sits above the Jacket around it. A tap on the T-shirt strip
   selects the T-shirt, and a tap on the jacket's sides or sleeves selects the Jacket.
 - Each garment also has its own labeled chip button, drawn above every box. Chips sit in separate places
@@ -40,29 +42,22 @@ garment only. There is no shutter.
 
 ## Detection: what runs today and its limits
 
-Vision has no clothing detector. Two engines produce the same output:
+Vision pose uses confident shoulder, hip, knee, and ankle landmarks to place garment regions.
+A person-instance mask refines them when most of the subject's pose probes agree on one label.
+If another pose shares the label, the mask is discarded and pose bounds still work. Mask requests
+are paced, with brief reuse when the visible joints stay aligned.
 
-- **Garment model (preferred, not included).** If the app bundle contains `GarmentDetector.mlmodelc`, a Core ML
-  object detector exported with NMS (for example YOLO), its boxes are used directly. Labels are mapped by
-  `LiveGarmentDetector.modelCategory(for:)`: jacket/coat/outerwear, t-shirt/tee/top, pants/trousers/jeans,
-  shoes/footwear/boots/sneakers. Drop a compiled model into `FitMix/` and nothing else needs to change.
-  Datasets with these classes (ModaNet, DeepFashion2) have their own licences; check them before shipping.
-- **Vision fallback (what runs now).** Regions come from body pose and person segmentation. A garment is only
-  reported when there is evidence for its category; otherwise it gets no target:
-  - **Shoes:** a box from the ankles down, trimmed to the person mask, confirmed by Vision's built-in image
-    classifier (shoes / footwear / sneaker / boot).
-  - **Pants:** hips to the lowest ankle, where the shin matches the thigh and isn't bare skin. Shorts and bare
-    legs get no Pants target.
-  - **Jacket over T-shirt:** the centre of the torso differs from both side panels from chest to hem. The
-    classifier's jacket/hoodie score lowers how much contrast is needed. The T-shirt is the inner strip only.
-  - **Jacket alone:** the classifier says jacket, hoodie or suit (≥ 0.2), and the sleeves aren't short.
-  - **T-shirt alone:** short sleeves (a bare forearm matching the face's skin tone).
-  - Known limits: long-sleeve tops that aren't jackets get no target. A shirt, hoodie or sweater worn under an
-    open jacket is labeled T-shirt. Jackets need both shoulders and hips in frame, and Shoes need the feet in
-    frame (the Camera then says "Step back to include the shoes"). Thresholds were set on a handful of photos
-    and need checking on an iPhone across lighting and outfits.
+- **Jacket and T-shirt.** The image classifier and torso colour samples identify likely jackets,
+  short sleeves, and contrasting inner layers. An inner shirt under an open jacket gets its own
+  narrower target.
+- **Pants.** Hip, knee, and ankle landmarks set the region. Colour continuity and the classifier help
+  distinguish covered legs from shorts or bare shins.
+- **Shoes.** Ankles and leg length set the region, and the classifier confirms footwear.
+- **Optional Core ML detector.** When `GarmentDetector.mlmodelc` is bundled, it can refine boxes for
+  the locked pose. A box shared with another pose is discarded. The project ships without this model.
 
-**The simulator can't run Vision body pose.** There, the Camera shows "Live garment detection needs an iPhone".
+Low-confidence frames show a framing or lighting hint. Category thresholds are heuristic and
+benefit from real-world checks across clothing, lighting, and partial poses.
 
 ## Camera speed
 
@@ -170,7 +165,7 @@ fetched images, and whether images are passed to Google or others.
 | `FM_DEBUG_AUTO_SELECT=<category>` | Selects that live target through the same path as a tap, once it is ready. |
 | `FITMIX_VISUAL_PROVIDERS=fixture` (backend) | The backend returns labeled fixtures without calling any provider. |
 
-## What still needs an iPhone
+## iPhone verification
 
 - Real time-to-tappable and frame cost (`FM_DEBUG_PERF_HUD=1`), and stable targets while moving.
 - Physical taps on targets (in the simulator, selection is checked through the same `select` path a tap uses).
@@ -178,3 +173,21 @@ fetched images, and whether images are passed to Google or others.
   clues came back empty there and the re-ranker kept the backend order. Both were checked on a Mac.
 - A live Scrappa result: needs `SCRAPPA_API_KEY`, an https `FITMIX_PUBLIC_BASE_URL` that reaches the backend, and
   an approved garment-only photo.
+
+Run the baseline and updated build on the same iPhone. Record the screen with the same subject,
+outfit, lighting, and starting distance. Compare these scenarios.
+
+| Scenario | What to check |
+| --- | --- |
+| Still subject | Time from framing the subject to the first tappable highlight. Compare edge movement while the phone and subject hold still. |
+| Walking subject | Highlights follow the right garment and settle when the subject stops. |
+| Person walking behind | The original subject keeps the highlights. Brief occlusion can recover. After a longer loss, confirm that the old highlights clear before the next subject is selectable. |
+| Partial framing | Crop the feet, then the shoulders or hips out of frame. Confirm the hint and check which remaining garments are tappable. |
+| Quick tap while panning | Tap an outline and its chip in separate takes. Compare the highlighted garment with the selected outline in Studio, especially where the jacket and T-shirt overlap. |
+| Rear camera modes | Repeat with each available zoom stop, torch on and off, and after backgrounding and resuming. Tilt the iPhone within its portrait interface and check alignment. |
+
+In Instruments, use Points of Interest for `app.fitmix / LiveGarmentScanner`. **Analyze frame**
+includes timings for pose, mask, model, and classifier. **Copy selectable frame** measures the
+full-resolution copy. **First usable target** measures elapsed time from the first analyzed frame
+that acquired the subject to the first selectable snapshot. A screen recording measures what the
+user actually sees, including preview startup and display latency.

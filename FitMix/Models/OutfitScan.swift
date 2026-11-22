@@ -3,12 +3,13 @@ import UIKit
 
 // MARK: - Camera → Studio handoff contract
 //
-// The Camera scanner builds one `OutfitScan` per confirmed capture and hands it to Studio with
-// `StudioStore.open(_:)`. Everything Studio shows about the street look comes from this value.
+// One `OutfitScan` is built per garment tapped in the Camera (`StudioStore.openLive`), or comes ready-made
+// from a Debug sample scan through Outfit Review (`StudioStore.open`). Everything Studio shows about the
+// street look comes from this value.
 // Fields are optional wherever the vision pipeline may not produce them; Studio shows an honest
 // fallback for each one.
 
-/// What the Camera produced for one confirmed capture of one chosen person.
+/// What the Camera produced for one frame of one chosen person.
 struct OutfitScan: Identifiable {
     let id: UUID
     let capturedAt: Date
@@ -189,12 +190,10 @@ struct WorkingLook {
         var displayName: String? { replacement?.name ?? retailerMatch?.name ?? detected.label ?? detected.matches.first?.name }
     }
 
-    let scanID: UUID
     var pieces: [Piece]
 
     /// - Parameter selected: garments chosen in Outfit Review; nil keeps every detected garment.
     init(scan: OutfitScan, selected: Set<UUID>? = nil) {
-        scanID = scan.id
         pieces = scan.garments.filter { selected?.contains($0.id) ?? true }.map { Piece(detected: $0) }
     }
 

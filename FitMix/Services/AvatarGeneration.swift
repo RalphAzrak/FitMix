@@ -103,14 +103,31 @@ nonisolated struct BackendAvatarGenerator: AvatarGenerating {
     }
 
     func generate(_ request: AvatarGenerationRequest) async throws -> Data {
-        guard let config else { throw AvatarGenerationError.notConfigured }
         var form = MultipartForm()
         form.add(file: request.bodyPhoto, name: "body_photo", fileName: "body.jpg", type: "image/jpeg")
         if let selfie = request.selfie { form.add(file: selfie, name: "selfie", fileName: "selfie.jpg", type: "image/jpeg") }
         form.add(value: String(format: "%.1f", request.heightCm), name: "height_cm")
         form.add(value: String(format: "%.1f", request.weightKg), name: "weight_kg")
 
-        var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent("v1/avatar"))
+        return try await uploadImage(form, endpoint: "v1/avatar").0
+    }
+
+    func style(portrait: Data, garments: [(AvatarOutfitSlot, Data)]) async throws -> Data {
+        var form = MultipartForm()
+        form.add(file: portrait, name: "portrait", fileName: "portrait.jpg", type: "image/jpeg")
+        for (slot, data) in garments {
+            form.add(file: data, name: slot.rawValue, fileName: "\(slot.rawValue).jpg", type: "image/jpeg")
+        }
+        let (data, response) = try await uploadImage(form, endpoint: "v1/avatar-outfit")
+        guard response.value(forHTTPHeaderField: "X-FitMix-Mock") != "1" else {
+            throw AvatarGenerationError.service("This FitMix server is in test mode. A live server is needed to preview your outfit.")
+        }
+        return data
+    }
+
+    private func uploadImage(_ form: MultipartForm, endpoint: String) async throws -> (Data, HTTPURLResponse) {
+        guard let config else { throw AvatarGenerationError.notConfigured }
+        var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent(endpoint))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
         if let token = config.token, !token.isEmpty { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
@@ -136,7 +153,7 @@ nonisolated struct BackendAvatarGenerator: AvatarGenerating {
         // Only hand back something that really is a picture.
         guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
               CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { throw AvatarGenerationError.invalidResponse }
-        return data
+        return (data, http)
     }
 }
 

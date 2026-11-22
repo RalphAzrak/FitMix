@@ -11,10 +11,9 @@ nonisolated struct AvatarFiles: Sendable {
     var avatar: URL { directory.appendingPathComponent("avatar.png") }
     /// A generated portrait waiting for the user's decision.
     var candidate: URL { directory.appendingPathComponent("candidate.png") }
-    /// Face scans and 3D-model data kept by the earlier 3D-avatar version. Nothing reads them any more.
-    var legacy: [URL] {
-        ["faceMesh.plist", "faceTexture.jpg", "faceThumbnail.jpg", "personalization.json"].map { directory.appendingPathComponent($0) }
-    }
+    /// The 3D model built from the accepted portrait, under the name used before each build had its own.
+    var model3D: URL { directory.appendingPathComponent("avatar3d.usdz") }
+    func model3D(_ record: Avatar3DRecord) -> URL { record.file.map { directory.appendingPathComponent($0) } ?? model3D }
 
     static var standard: AvatarFiles {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -41,6 +40,17 @@ enum GenerationPhase: Equatable {
     case failed(String)
 }
 
+/// Where a 3D build stands. Not saved, apart from the backend's job id (see `AvatarProfile.model3DJob`).
+enum Build3DPhase: Equatable {
+    case idle
+    /// `stage` is the builder's current step, `ahead` is how many other builds are in front of this one, and
+    /// `percent` is how far the whole build is (0 to 100).
+    case building(stage: String?, ahead: Int, percent: Int)
+    case failed(String)
+
+    var isBuilding: Bool { if case .building = self { true } else { false } }
+}
+
 enum HomeState: Equatable {
     case empty
     case setupInProgress
@@ -63,6 +73,7 @@ final class AvatarStore {
     private(set) var avatarImage: UIImage?
     private(set) var candidateImage: UIImage?
     private(set) var generation: GenerationPhase = .idle
+    private(set) var build3D: Build3DPhase = .idle
     /// Set when saving to disk fails, so the UI can say so.
     var storageErrorMessage: String?
 
@@ -70,7 +81,9 @@ final class AvatarStore {
     /// False when this build has no avatar service to call.
     let generationAvailable: Bool
     @ObservationIgnored private let generator: any AvatarGenerating
+    @ObservationIgnored private let builder3D: any Avatar3DBuilding
     @ObservationIgnored private var generationTask: Task<Void, Never>?
+    @ObservationIgnored private var build3DTask: Task<Void, Never>?
     @ObservationIgnored private var photoSaveTask: Task<Void, Never>?
 
     init(files: AvatarFiles = .standard, backend: BackendConfig? = .current) {
@@ -81,6 +94,7 @@ final class AvatarStore {
         self.files = files
         generationAvailable = backend != nil
         generator = BackendAvatarGenerator(config: backend)
+        builder3D = BackendAvatar3DBuilder(config: backend)
 
         let manager = FileManager.default
         if let data = try? Data(contentsOf: files.profile), let saved = try? JSONDecoder().decode(AvatarProfile.self, from: data) {
@@ -91,8 +105,10 @@ final class AvatarStore {
         profile.hasSelfie = manager.fileExists(atPath: files.selfie.path)
         if !manager.fileExists(atPath: files.avatar.path) { profile.avatar = nil }
         if !manager.fileExists(atPath: files.candidate.path) { profile.candidate = nil }
-        // Face scans from the earlier 3D-avatar version are not used any more, so they are not kept.
-        for old in files.legacy { try? manager.removeItem(at: old) }
+        if let model = profile.model3D, profile.avatar == nil || !manager.fileExists(atPath: files.model3D(model).path) {
+            profile.model3D = nil
+        }
+        if profile.avatar == nil { profile.model3DJob = nil }
 
         #if DEBUG
         // Which things are saved, never the things themselves.
@@ -107,6 +123,8 @@ final class AvatarStore {
             if avatarImage == nil { avatarImage = images.avatar }
             if candidateImage == nil { candidateImage = images.candidate }
         }
+        // A 3D build that was still running when FitMix was last closed carries on from where it is.
+        if let job = profile.model3DJob { resume3DBuild(job) }
     }
 
     var homeState: HomeState {
@@ -309,15 +327,119 @@ final class AvatarStore {
         profile.avatar = record
         profile.candidate = nil
         profile.currentStep = .bodyPhoto
+        remove3DModel()   // it shows the previous avatar
         persist()
         return true
     }
 
-    func discardCandidate() {
-        try? FileManager.default.removeItem(at: files.candidate)
-        candidateImage = nil
-        profile.candidate = nil
+    // MARK: 3D avatar
+
+    /// The 3D model of the current avatar, once one has been built.
+    var model3DURL: URL? { profile.model3D.map(files.model3D) }
+
+    /// Sends the accepted portrait to the FitMix backend, which builds a 3D model from it, and saves the model
+    /// when it is ready. Call only after the user has agreed to the upload.
+    func build3DAvatar() {
+        guard !build3D.isBuilding, profile.avatar != nil else { return }
+        build3D = .building(stage: nil, ahead: 0, percent: 0)
+        let files = files, builder = builder3D
+        build3DTask = Task { [weak self] in
+            do {
+                let portrait = try await AvatarStore.read(files.avatar)
+                let started = try await builder.start(portrait: portrait)
+                guard let self else { return }
+                profile.model3DJob = started.job
+                persist()
+                try await follow3DBuild(started)
+            } catch is CancellationError {
+                // The user cancelled; nothing was changed.
+            } catch {
+                self?.fail3DBuild(error.localizedDescription)
+            }
+        }
+    }
+
+    func cancel3DBuild() {
+        build3DTask?.cancel()
+        build3DTask = nil
+        if let job = profile.model3DJob {
+            let builder = builder3D
+            Task { await builder.cancel(job) }
+        }
+        profile.model3DJob = nil
         persist()
+        build3D = .idle
+    }
+
+    private func resume3DBuild(_ job: String) {
+        build3D = .building(stage: nil, ahead: 0, percent: 0)
+        let builder = builder3D
+        build3DTask = Task { [weak self] in
+            do {
+                let state = try await builder.state(of: job)
+                try await self?.follow3DBuild(state)
+            } catch is CancellationError {
+            } catch {
+                self?.fail3DBuild(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Checks on the build every few seconds until it ends, then collects and saves the model.
+    private func follow3DBuild(_ first: Avatar3DBuildState) async throws {
+        let portraitDate = profile.avatar?.createdAt
+        var state = first
+        var missed = 0
+        while true {
+            switch state.status {
+            case .queued, .running:
+                build3D = .building(stage: state.stage, ahead: state.position, percent: state.progress ?? 0)
+            case .failed:
+                fail3DBuild(state.error?.message ?? "The 3D avatar couldn't be built. Try again.")
+                return
+            case .done:
+                let data = try await builder3D.model(of: state.job)
+                // The model belongs to the portrait it was built from. If that was replaced meanwhile, drop it.
+                guard profile.avatar?.createdAt == portraitDate else { cancel3DBuild(); return }
+                try prepareDirectory()
+                let previous = profile.model3D.map(files.model3D)
+                let record = Avatar3DRecord(createdAt: .now, faceSharpened: state.faceSharpened ?? false,
+                                            file: "avatar3d-\(Int(Date.now.timeIntervalSince1970)).usdz")
+                guard await AvatarStore.save(data, to: files.model3D(record)) else { throw AvatarError.saveFailed }
+                profile.model3D = record
+                profile.model3DJob = nil
+                guard persist() else { throw AvatarError.saveFailed }
+                // The model it replaces goes only now that the new one is safely saved.
+                if let previous, previous != files.model3D(record) { try? FileManager.default.removeItem(at: previous) }
+                build3D = .idle
+                let builder = builder3D, job = state.job
+                Task { await builder.cancel(job) }   // the server can forget it now
+                return
+            }
+            try await Task.sleep(for: .seconds(3))
+            do {
+                state = try await builder3D.state(of: state.job)
+                missed = 0
+            } catch let error as AvatarGenerationError where error == .unreachable || error == .timedOut || error == .offline {
+                // A dropped connection (or the app coming back from the background) is not the end of the build.
+                missed += 1
+                if missed > 20 { throw error }
+            }
+        }
+    }
+
+    private func fail3DBuild(_ message: String) {
+        profile.model3DJob = nil
+        persist()
+        build3D = .failed(message)
+    }
+
+    /// Removes the 3D model. Used when the avatar it was built from is replaced.
+    private func remove3DModel() {
+        if build3D.isBuilding || profile.model3DJob != nil { cancel3DBuild() }
+        if let model = profile.model3D { try? FileManager.default.removeItem(at: files.model3D(model)) }
+        profile.model3D = nil
+        build3D = .idle
     }
 
     /// Removes the avatar, the photos and the measurements from this iPhone.
@@ -326,6 +448,8 @@ final class AvatarStore {
         generationTask = nil
         photoSaveTask?.cancel()
         photoSaveTask = nil
+        if build3D.isBuilding || profile.model3DJob != nil { cancel3DBuild() }
+        build3D = .idle
         try? FileManager.default.removeItem(at: files.directory)
         profile = AvatarProfile()
         bodyPhoto = nil
@@ -355,6 +479,16 @@ final class AvatarStore {
         guard let image = UIImage(data: data) else { return nil }
         do { try data.write(to: url, options: [.atomic, .completeFileProtection]) } catch { return nil }
         return image.preparingForDisplay() ?? image
+    }
+
+    @concurrent
+    private nonisolated static func read(_ url: URL) async throws -> Data {
+        try Data(contentsOf: url)
+    }
+
+    @concurrent
+    private nonisolated static func save(_ data: Data, to url: URL) async -> Bool {
+        (try? data.write(to: url, options: [.atomic, .completeFileProtection])) != nil
     }
 
     @concurrent
@@ -419,7 +553,7 @@ final class AvatarStore {
 ///   FM_DEBUG_SEED_SELFIE  path to a picture used as the saved selfie
 ///   FM_DEBUG_SEED_BODY    "heightCm,weightKg"
 ///   FM_DEBUG_SEED_AVATAR  path to a picture used as the accepted avatar
-///   FM_DEBUG_SEED_LEGACY  1 = write the profile the way the earlier 3D-avatar version did, to check the carry-over
+///   FM_DEBUG_SEED_MODEL   path to a USDZ used as the saved 3D model of that avatar
 enum DebugSeed {
     static func prepare() -> AvatarFiles? {
         let env = ProcessInfo.processInfo.environment
@@ -438,14 +572,6 @@ enum DebugSeed {
         let hasSelfie = copy(env["FM_DEBUG_SEED_SELFIE"], to: files.selfie)
         let hasAvatar = copy(env["FM_DEBUG_SEED_AVATAR"], to: files.avatar, png: true)
         let body = (env["FM_DEBUG_SEED_BODY"] ?? "").split(separator: ",").compactMap { Double($0) }
-        if env["FM_DEBUG_SEED_LEGACY"] != nil {
-            let old: [String: Any] = ["setupCompleted": true, "currentStep": 3, "faceKind": "mesh", "hasBodyPhoto": hasPhoto,
-                                      "heightCm": body.first ?? 178, "weightKg": body.count > 1 ? body[1] : 74, "units": "imperial",
-                                      "generation": ["ready": [String: Any]()]]
-            try? JSONSerialization.data(withJSONObject: old).write(to: files.profile)
-            try? Data("old face scan".utf8).write(to: files.legacy[0])
-            return files
-        }
         var profile = AvatarProfile()
         profile.hasBodyPhoto = hasPhoto
         profile.hasSelfie = hasSelfie
@@ -454,6 +580,9 @@ enum DebugSeed {
             // FM_DEBUG_SEED_AVATAR_OLD: the avatar was made before the weight was last edited.
             let weight = (profile.weightKg ?? 74) - (env["FM_DEBUG_SEED_AVATAR_OLD"] != nil ? 6 : 0)
             profile.avatar = AvatarRecord(createdAt: .now, usedSelfie: hasSelfie, heightCm: profile.heightCm ?? 178, weightKg: weight)
+            if let model = env["FM_DEBUG_SEED_MODEL"], (try? manager.copyItem(atPath: model, toPath: files.model3D.path)) != nil {
+                profile.model3D = Avatar3DRecord(createdAt: .now, faceSharpened: true)
+            }
         }
         if let step = env["FM_DEBUG_STEP"].flatMap(SetupStep.init(rawValue:)) { profile.currentStep = step }
         try? JSONEncoder().encode(profile).write(to: files.profile)

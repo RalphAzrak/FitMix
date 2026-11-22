@@ -4,11 +4,17 @@ Backend/.venv/
 __pycache__/
 .pytest_cache/
 
+# Tools and model weights for the 3D avatar builder (installed by Backend/avatar3d/setup.sh, about 6 GB)
+Backend/avatar3d/.tools/
+
 # Where debug builds find the backend on this Mac (written by Backend/run.sh)
 FitMix/Resources/Backend.local.json
 
 .DS_Store
 
-# Leftover downloads from the removed Blender pipeline (1.6 GB). Safe to delete.
+# Trial outputs from choosing the 3D avatar approach (comparison renders and sample models). Not used by the app.
 AvatarPipeline/
 Backend/.cache/
+
+# Supabase CLI working state
+/supabase/.temp/

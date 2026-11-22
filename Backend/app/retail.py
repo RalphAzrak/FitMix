@@ -6,7 +6,6 @@ category check for its results, and turning an item summary into listing fields.
 import asyncio
 import base64
 import logging
-import re
 import time
 from dataclasses import asdict, dataclass
 

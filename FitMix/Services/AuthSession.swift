@@ -132,7 +132,7 @@ final class AuthSession {
         return nil
     }
 
-    @ObservationIgnored private let client: SupabaseClient
+    @ObservationIgnored let client: SupabaseClient
     @ObservationIgnored private var listener: Task<Void, Never>?
 
     init() {

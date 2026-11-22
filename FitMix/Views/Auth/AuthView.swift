@@ -35,13 +35,11 @@ struct AuthView: View {
     @State private var showForgotPassword = false
     @FocusState private var focus: Field?
 
-    var showsClose: Bool
     /// Called once the user has a session, with the mode they used to get it.
     var onAuthenticated: (Mode) -> Void
 
-    init(mode: Mode = .signIn, showsClose: Bool = true, onAuthenticated: @escaping (Mode) -> Void = { _ in }) {
+    init(mode: Mode = .signIn, onAuthenticated: @escaping (Mode) -> Void = { _ in }) {
         _mode = State(initialValue: mode)
-        self.showsClose = showsClose
         self.onAuthenticated = onAuthenticated
         #if DEBUG
         // Debug builds only: FM_DEBUG_CHECK_EMAIL=<address> opens on the "Check your email" state
@@ -109,11 +107,7 @@ struct AuthView: View {
 
     private var topBar: some View {
         HStack {
-            if showsClose {
-                CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
-            } else {
-                Color.clear.frame(width: 36, height: 36)
-            }
+            CircleIconButton(systemName: "xmark", label: "Close") { dismiss() }
             Spacer()
             FitMixWordmark()
                 .accessibilityAddTraits(.isHeader)
@@ -355,9 +349,6 @@ struct AuthForm: Equatable {
     }
 }
 
-// MARK: Palette
-
-/// Surface and accent tokens from the Stitch project's theme, used only on this screen.
 // MARK: Components
 
 /// The FitMix logotype shown at the top of the auth and account screens.

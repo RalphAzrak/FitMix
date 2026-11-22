@@ -11,7 +11,16 @@ import Foundation
 /// `POST /v1/lens-search` on the FitMix backend. Answers `.lensMatch(listing)` or `.lensNoMatch`.
 nonisolated struct LensRetailerSearch: RetailerSearching {
     var config: BackendConfig?
-    var session: URLSession = BackendRetailerSearch.makeSession()
+    var session: URLSession = LensRetailerSearch.makeSession()
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral  // nothing cached on disk
+        // Visual search providers can take tens of seconds (Scrappa advises a 45 s client timeout).
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 70
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }
 
     private struct Response: Decodable {
         struct Listing: Decodable {

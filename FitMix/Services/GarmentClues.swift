@@ -6,7 +6,6 @@ import Vision
 //
 // The clues travel with the crop to the backend, which uses them to search and to decide how sure a match is:
 // - text: every word or code printed on the garment (Vision text recognition), e.g. "converse", "dd8959-100".
-// - brandHints: the alphabetic words among them, likeliest brand words first.
 // - color: measured on the person's pixels at detection, else the crop's centre if one colour dominates.
 // - pattern / style: from Vision's image classifier ("polka dots", "leopard"; "sneaker", "boot", "hoodie"…).
 //   Vision has no stripes/plaid/logo labels, so those aren't detected; printed text counts as "text print".
@@ -16,7 +15,6 @@ import Vision
 
 nonisolated struct GarmentClueSet: Sendable, Equatable {
     var color: String?
-    var brandHints: [String] = []
     var text: [String] = []
     var pattern: String?
     var style: String?
@@ -29,8 +27,6 @@ nonisolated enum GarmentClues {
         var clues = GarmentClueSet()
         clues.color = measuredColor.flatMap(colorName(of:)) ?? dominantColorName(of: crop)
         clues.text = Array(text.prefix(12))
-        // Long alphabetic words first: brand names ("converse") before small words ("all").
-        clues.brandHints = Array(text.filter { $0.count >= 3 && $0.allSatisfy(\.isLetter) }.sorted { $0.count > $1.count }.prefix(3))
         if (labels["polka_dots"] ?? 0) >= 0.2 { clues.pattern = "polka dots" }
         else if (labels["leopard"] ?? 0) >= 0.2 { clues.pattern = "leopard" }
         else if text.count >= 2 && category != .shoes { clues.pattern = "text print" }

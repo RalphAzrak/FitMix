@@ -193,23 +193,18 @@ extension View {
 
 // MARK: - Buttons
 
-/// Full-width capsule for the main action. Cobalt uses the brand gradient and a soft blue glow;
-/// any other color is a solid fill.
+/// Full-width capsule for the main action: the brand gradient with a soft blue glow.
 struct FMFilledButtonStyle: ButtonStyle {
-    var color: Color = .fmCobalt
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        let isBrand = color == .fmCobalt
         configuration.label
             .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 18)
             .frame(maxWidth: .infinity, minHeight: 54)
-            .background {
-                if isBrand { Capsule().fill(.fmPrimaryGradient) } else { Capsule().fill(color) }
-            }
-            .shadow(color: (isBrand ? Color.fmCobalt : .black).opacity(isEnabled ? 0.3 : 0), radius: 12, y: 6)
+            .background(.fmPrimaryGradient, in: Capsule())
+            .shadow(color: Color.fmCobalt.opacity(isEnabled ? 0.3 : 0), radius: 12, y: 6)
             .opacity(isEnabled ? (configuration.isPressed ? 0.88 : 1) : 0.4)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)

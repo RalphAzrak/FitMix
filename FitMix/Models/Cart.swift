@@ -96,10 +96,6 @@ nonisolated struct ShopifyLine: Codable, Equatable, Sendable {
             return choice.value.isEmpty ? nil : "\(choice.name) \(choice.value)"
         }
     }
-
-    var colour: String? {
-        options.first { ["color", "colour", "couleur"].contains($0.name.lowercased()) }?.value
-    }
 }
 
 /// What FitMix saves for one account's cart on this iPhone.

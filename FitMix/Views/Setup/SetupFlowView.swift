@@ -464,14 +464,14 @@ struct ReviewStepView: View {
     @Environment(AvatarStore.self) private var store
 
     var body: some View {
-        StepScaffold(title: "Review your avatar", subtitle: "An AI-generated illustration and an approximate likeness.") {
+        StepScaffold(title: "Review your avatar", subtitle: "An AI-generated portrait of you.") {
             if let portrait = store.candidateImage {
                 Image(uiImage: portrait)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: 400)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .accessibilityLabel("Your new avatar: a full-body animated-style portrait")
+                    .accessibilityLabel("Your new full-body avatar portrait")
             } else {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 300)
             }

@@ -40,7 +40,6 @@ nonisolated struct ShopifyProductLink: Equatable, Sendable {
     }
 
     var productDataURL: URL { URL(string: "https://\(host)/products/\(handle).js")! }
-    var productPageURL: URL { URL(string: "https://\(host)/products/\(handle)")! }
 }
 
 /// One product's purchasable variants, from the store's public product data.

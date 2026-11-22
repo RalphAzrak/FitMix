@@ -2,7 +2,6 @@
 httpx.MockTransport: no keys, nothing sent."""
 
 import asyncio
-import json
 import time
 from urllib.parse import parse_qs, urlparse
 

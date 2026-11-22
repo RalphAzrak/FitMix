@@ -167,3 +167,5 @@ def test_the_real_openai_client_sends_both_pictures_and_reads_the_result():
     assert body.count(b'name="image[]"') == 2 and body.index(b'filename="body.jpeg"') < body.index(b'filename="selfie.png"')
     assert JPEG in body and b'name="model"' in body and b"gpt-image-2" in body and b"1024x1536" in body
     assert b"178 cm" in body and b"74.3 kg" in body
+    assert b"photorealistic, full-body studio photograph" in body
+    assert b"realistic skin texture" in body and b"3D animated-style" not in body

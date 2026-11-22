@@ -13,12 +13,9 @@ import Foundation
 ///   cart logic (which lines are cleared), never that Shopify created an order, and is labeled so.
 /// - `FM_DEBUG_CHECKOUT_PREFILL=montreal`: pre-fills a public Montréal address in the permalink.
 struct DebugCheckoutScript {
-    struct Pick: Equatable {
+    struct Pick {
         var options: [(String, String)]
         var quantity: Int
-        static func == (a: Pick, b: Pick) -> Bool {
-            a.quantity == b.quantity && a.options.map { "\($0.0)=\($0.1)" } == b.options.map { "\($0.0)=\($0.1)" }
-        }
     }
 
     var picks: [GarmentCategory: Pick]

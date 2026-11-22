@@ -28,7 +28,9 @@ struct StudioView: View {
     var body: some View {
         VStack(spacing: 0) {
             FMTopBar { FMBagButton(count: cart.count) { router.showCart = true } }
-            if let scan = studio.scan, let look = studio.look, let hero = studio.hero {
+            if let item = studio.wardrobeItem {
+                wardrobeTryOn(item)
+            } else if let scan = studio.scan, let look = studio.look, let hero = studio.hero {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         lookHeader.padding(.top, 10).padding(.bottom, 8)
@@ -57,7 +59,7 @@ struct StudioView: View {
         // FM_DEBUG_AUTO_TRYON=1: press "Try on my avatar" once the selected garment's match arrives.
         .task(id: studio.selectedPiece.flatMap { studio.matchStates[$0.id] }) {
             // Runs on appear too, in case the match arrived before Studio did.
-            guard ProcessInfo.processInfo.environment["FM_DEBUG_AUTO_TRYON"] == "1", studio.avatarTryOn == nil,
+            guard ProcessInfo.processInfo.environment["FM_DEBUG_AUTO_TRYON"] == "1", studio.avatarTryOn == nil, studio.wardrobeItem == nil,
                   let piece = studio.selectedPiece, case .found? = studio.matchStates[piece.id] else { return }
             try? await Task.sleep(for: .seconds(2))
             tryOnAvatar(piece)
@@ -86,6 +88,32 @@ struct StudioView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(liveTwinMessage)
+        }
+    }
+
+    private func wardrobeTryOn(_ item: WardrobeItem) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                FMTitleLine(title: item.title, caption: "Wardrobe Try-On")
+                TryOnHero(preview: studio.preview, source: studio.wardrobePerson, wardrobeItemName: item.title,
+                          addPhoto: { addPhoto = true }, retry: studio.retryPreview)
+                    .frame(height: 380)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                if let image = studio.wardrobeGarment?.image {
+                    HStack(spacing: 12) {
+                        Image(uiImage: image).resizable().scaledToFit()
+                            .frame(width: 66, height: 66)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 10))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title).font(.headline)
+                            Text(item.category.title).font(.subheadline).foregroundStyle(Color.fmSecondary)
+                        }
+                    }
+                }
+                Button("Close Wardrobe Try-On") { studio.closeWardrobeItem() }.buttonStyle(FMOutlineButtonStyle())
+            }
+            .padding(16)
         }
     }
 
@@ -162,7 +190,7 @@ struct StudioView: View {
                 TryOnHero(preview: studio.preview, source: studio.tryOnSource, avatarListing: studio.avatarTryOn,
                           addPhoto: { addPhoto = true }, retry: studio.retryPreview)
             case .street:
-                HeroCapture(scan: scan, hero: hero, look: look, selectedID: studio.selectedPieceID,
+                HeroCapture(hero: hero, look: look, selectedID: studio.selectedPieceID,
                             tooltip: studio.selectedPiece.flatMap(tooltip))
             }
         }
@@ -373,7 +401,6 @@ struct StudioView: View {
 /// garment is marked with a hotspot and a tooltip. Swaps never change this image. The parent supplies
 /// the frame, chips and floating buttons.
 private struct HeroCapture: View {
-    var scan: OutfitScan
     var hero: HeroFrame
     var look: WorkingLook
     var selectedID: UUID?

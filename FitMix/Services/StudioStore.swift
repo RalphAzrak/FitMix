@@ -46,6 +46,9 @@ final class StudioStore {
     @ObservationIgnored private var listingPhotos: [String: CGImage] = [:]
     /// The listing the user chose to try on their avatar, if any.
     private(set) var avatarTryOn: AvatarTryOn?
+    private(set) var wardrobeItem: WardrobeItem?
+    private(set) var wardrobeGarment: TryOnGarment?
+    private(set) var wardrobePerson: UIImage?
     /// Crops used as search input only, never shown. Cut from the same frame as the scan image,
     /// with the colour measured on the garment there.
     @ObservationIgnored private var searchCrops: [UUID: (image: CGImage, color: SIMD3<Float>?)] = [:]
@@ -65,44 +68,13 @@ final class StudioStore {
 
     // MARK: Camera → Outfit Review → Studio
 
-    /// True while garments are being found on `pendingScan`'s photo.
-    private(set) var isAnalyzing = false
-    /// What the analysis wants the user to know about `pendingScan` (no garments, only a top, …).
-    private(set) var analysis: CaptureAnalysis?
-    @ObservationIgnored private var analysisTask: Task<Void, Never>?
-
     /// Hand-off for a ready-made scan (debug samples and fixtures): hold it for Outfit Review.
     func review(_ scan: OutfitScan) {
-        cancelAnalysis()
         pendingScan = scan
     }
 
-    /// Camera hand-off: show the photo in Outfit Review right away and find its garments in the
-    /// background. The result replaces `pendingScan` (same photo, now with garments).
-    func review(_ capture: ConfirmedCapture) {
-        cancelAnalysis()
-        let placeholder = CaptureHandoff.scan(for: capture)
-        pendingScan = placeholder
-        isAnalyzing = true
-        analysisTask = Task { [weak self] in
-            let result = await CaptureHandoff.analyze(capture)
-            guard !Task.isCancelled, let self, self.pendingScan?.id == placeholder.id else { return }
-            self.pendingScan = result.scan
-            self.analysis = result
-            self.isAnalyzing = false
-        }
-    }
-
     func discardReview() {
-        cancelAnalysis()
         pendingScan = nil
-    }
-
-    private func cancelAnalysis() {
-        analysisTask?.cancel()
-        analysisTask = nil
-        isAnalyzing = false
-        analysis = nil
     }
 
     /// Try Full Look: replaces the previous look entirely with the chosen garments from `scan`.
@@ -113,6 +85,9 @@ final class StudioStore {
         matchLists = [:]
         listingPhotos = [:]
         avatarTryOn = nil
+        wardrobeItem = nil
+        wardrobeGarment = nil
+        wardrobePerson = nil
         searchCrops = [:]
         cropPreviews = [:]
         isLiveLook = false
@@ -123,10 +98,7 @@ final class StudioStore {
         selectedPieceID = look.pieces.first?.id
         lastSwap = nil
         lookNumber += 1
-        if pendingScan?.id == scan.id {
-            pendingScan = nil
-            analysis = nil
-        }
+        if pendingScan?.id == scan.id { pendingScan = nil }
         self.tryOnSource = tryOnSource
         refreshPreview()
     }
@@ -285,9 +257,25 @@ final class StudioStore {
                        retailerURL: listing.listingURL, isFixture: listing.isFixture, evidence: listing.evidence)
     }
 
+    func openWardrobeItem(_ item: WardrobeItem, garment: UIImage, person: UIImage?) {
+        wardrobeItem = item
+        wardrobeGarment = TryOnGarment(pieceID: item.id, category: item.category.garment,
+                                        productID: nil, image: garment, sourceBounds: nil)
+        wardrobePerson = person
+        refreshPreview()
+    }
+
+    func closeWardrobeItem() {
+        guard wardrobeItem != nil else { return }
+        wardrobeItem = nil
+        wardrobeGarment = nil
+        wardrobePerson = nil
+        refreshPreview()
+    }
+
     /// The user added their photo from Studio. Renders the current look on it.
     func setTryOnSource(_ image: UIImage) {
-        tryOnSource = image
+        if wardrobeItem != nil { wardrobePerson = image } else { tryOnSource = image }
         refreshPreview()
     }
 
@@ -326,14 +314,17 @@ final class StudioStore {
         refreshPreview()
     }
 
-    var hasSwaps: Bool { look?.pieces.contains(where: \.isSwapped) ?? false }
-
     // MARK: Try-on
 
     func retryPreview() { refreshPreview() }
 
     /// The request for the current look, or nil when there's nothing to render.
     var currentRequest: TryOnRequest? {
+        if let item = wardrobeItem, let garment = wardrobeGarment {
+            guard let wardrobePerson else { return nil }
+            return TryOnRequest(person: wardrobePerson, garments: [garment],
+                                signature: "wardrobe:\(item.id.uuidString):\(item.photoRevision.uuidString):\(item.category.rawValue)")
+        }
         guard let tryOnSource, let look, !look.pieces.isEmpty else { return nil }
         if let avatarTryOn {
             // Only the chosen listing goes on the avatar, identified by its listing id.
@@ -358,7 +349,7 @@ final class StudioStore {
     private func refreshPreview() {
         renderTask?.cancel()
         renderTask = nil
-        guard tryOnSource != nil else { preview = .needsPhoto; return }
+        guard (wardrobeItem == nil ? tryOnSource : wardrobePerson) != nil else { preview = .needsPhoto; return }
         guard let request = currentRequest else { preview = .nothingSelected; return }
         guard let renderer = TryOnRenderers.current else { preview = .unavailable; return }
 
@@ -371,7 +362,7 @@ final class StudioStore {
                 self.preview = .ready(image, isTryOn: renderer.producesTryOn, signature: signature)
             } catch is CancellationError {
             } catch {
-                guard let self, self.isCurrent(signature) else { return }
+                guard !Task.isCancelled, let self, self.isCurrent(signature) else { return }
                 self.preview = .failed(error.localizedDescription, signature: signature)
             }
         }

@@ -4,7 +4,10 @@ A small server between the iPhone app and the services it uses. Provider keys li
 variables. They are never in the app or in Git.
 
 - **Avatars:** the app sends the user's full-body photo, optional selfie, height and weight. The server adds the
-  drawing instruction, calls OpenAI's Image Edits API, and returns the finished portrait.
+  prompt for a photorealistic portrait, calls OpenAI's Image Edits API, and returns the finished image.
+- **3D avatars:** the app sends the portrait the user accepted. The server builds a 3D model from it on this
+  computer and the app collects it when it is ready. Nothing is sent to another service. See
+  [3D avatars](#3d-avatars).
 - **Retailer match:** the app sends the crop of one garment the user tapped in the live camera, with its
   category and the clues read on the phone. The server asks each enabled visual search provider, reads the
   listing pages, and returns ranked real listings labeled exact / brand / similar. See
@@ -41,6 +44,45 @@ using the app. `GET /health` says whether the server is ready.
 
 The instruction sent with the photos is in `app/prompt.py`. Model, quality and limits are set in `.env`
 (see `.env.example`).
+
+## 3D avatars
+
+`avatar3d/build.sh portrait.png out.usdz` turns one full-body portrait into a 3D avatar, in about 5 minutes on an
+Apple-silicon Mac:
+
+1. **Cutout:** the person is cut out of the portrait (Apple Vision).
+2. **Shape:** TRELLIS.2, run locally by [trellis.cpp](https://github.com/pwilkin/trellis.cpp), turns that one
+   picture into a textured mesh. It takes a single image, so no other angles are generated or asked for; the
+   sides and back are the model's estimate. The seed is fixed, so the same portrait always gives the same avatar.
+3. **Face:** the generated texture is coarse and its colours drift from the portrait's, so the portrait
+   (enlarged 4x with Real-ESRGAN, no face restoration) is used for everything the camera saw:
+   - It is laid over the model's front view, outline to outline, and becomes the texture of the whole front:
+     clothes, arms, hands, shoes.
+   - Wherever the two show the same point, the pair says how the generator changed that colour. That correction
+     is applied to the whole texture, so skin, hair and clothes are the same colour all the way round.
+   - The head is done again at higher detail. It is placed by the landmarks found on the model's own texture,
+     or by the mesh's nose when no face can be read there, and checked against the mesh: the model's nose tip
+     must sit inside the portrait's nose.
+
+   The mesh is not changed, so shapes (the hair, the hands) are still the generator's, and the sides and back
+   keep its texture, recoloured. A part that can't be placed with confidence is skipped and the server log says why.
+4. **Package:** a self-contained USDZ, upright, 1.75 m tall, feet on the floor.
+
+Set it up once with `avatar3d/setup.sh`. It installs everything into `avatar3d/.tools` (ignored by Git, about
+6 GB, mostly the TRELLIS.2 weights) and needs Xcode's command-line tools, Blender 5, cmake and ninja. Until then
+`GET /health` reports `"avatar3d_ready": false` and the app's **Build 3D Avatar** says the builder isn't set up.
+Check the licences of the TRELLIS.2 and DINOv3 weights before shipping avatars made with them commercially.
+
+| Request | |
+|---|---|
+| `POST /v1/avatar-3d` (multipart, `portrait`) | Starts a build. Returns `202` with the build's state. |
+| `GET /v1/avatar-3d/{job}` | `{"job", "status": "queued" \| "running" \| "done" \| "failed", "stage", "progress", "position", "face_sharpened", "error"}`. `stage` is `cutout`, `shape`, `face` or `package`; `progress` is 0 to 100, counted from the generator's own steps. |
+| `GET /v1/avatar-3d/{job}/model` | The finished USDZ (`model/vnd.usdz+zip`). |
+| `DELETE /v1/avatar-3d/{job}` | Stops a build that is no longer wanted. |
+
+One build runs at a time and others wait their turn. The portrait is written to a private temporary folder for the
+length of its build and deleted with it; a finished model is kept in memory for 30 minutes. With `FITMIX_MOCK=1`
+a plain placeholder figure is returned after a few seconds, with no tools needed.
 
 `POST /v1/garment-match` (multipart form)
 

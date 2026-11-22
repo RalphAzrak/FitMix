@@ -19,6 +19,7 @@ import SwiftUI
     /// The step the avatar flow is open at, or `nil` when it is closed.
     var flow: SetupStep?
     var authPreview: AuthView.Mode?
+    var showOutfit = false
     var showCart = false
     var showShopLook = false
     var showMetricsEditor = false
@@ -42,7 +43,7 @@ struct AppShell: View {
                 // Home and Studio stay alive in the background so switching tabs keeps their place.
                 layer(.home) { HomeView() }
                 layer(.studio) { StudioView(openCamera: router.openCamera) }
-                if router.tab == .closet { ClosetView() }
+                if router.tab == .closet { WardrobeView() }
                 if router.tab == .saved { SavedView() }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -52,6 +53,7 @@ struct AppShell: View {
         .ignoresSafeArea(.keyboard)
         .environment(router)
         .tint(Color.fmCobalt)
+        .fullScreenCover(isPresented: $router.showOutfit) { OutfitBuilderView() }
         .fullScreenCover(item: $router.flow) { SetupFlowView(startAt: $0) }
         .fullScreenCover(item: $router.capture) { route in
             switch route {
@@ -79,7 +81,7 @@ struct AppShell: View {
                         router.tab = .studio
                         router.capture = nil
                     })
-                    // A finished analysis replaces the scan; start its selection fresh.
+                    // Another scan starts its selection fresh.
                     .id(scan.id)
                 }
             }
@@ -154,7 +156,8 @@ struct AppShell: View {
                     }
                 }
             #endif
-            case "closet": router.tab = .closet
+            case "outfit": router.showOutfit = true
+            case "closet", "wardrobe": router.tab = .closet
             case "saved": router.tab = .saved
             case "camera": router.capture = .camera
             default: break
@@ -174,10 +177,11 @@ struct AppShell: View {
     /// presented here closes first (the avatar flow saves as it goes), since only one can show at a time.
     private func showAuthLink() {
         guard router.authPreview == nil else { return }
-        let otherOpen = router.flow != nil || router.showMetricsEditor || router.capture != nil || router.showCart || router.showShopLook
+        let otherOpen = router.flow != nil || router.showMetricsEditor || router.capture != nil || router.showCart || router.showShopLook || router.showOutfit
         router.flow = nil
         router.showMetricsEditor = false
         router.capture = nil
+        router.showOutfit = false
         router.showCart = false
         router.showShopLook = false
         router.setupAfterAuth = false
@@ -200,7 +204,7 @@ struct AppShell: View {
 
 // MARK: - Tab bar
 
-/// Home · Studio · Camera · Closet · Saved. Camera is a raised cobalt button that opens the capture
+/// Home · Studio · Camera · Wardrobe · Saved. Camera is a raised cobalt button that opens the capture
 /// flow over the current tab; the others switch tabs.
 struct FMTabBar: View {
     @Binding var selection: AppRouter.Tab
@@ -212,7 +216,7 @@ struct FMTabBar: View {
             item(.studio, title: "Studio", icon: "tshirt", selectedIcon: "tshirt.fill")
             // Center slot, so the raised button sits in the middle of the bar.
             cameraButton
-            item(.closet, title: "Closet", icon: "square.grid.2x2", selectedIcon: "square.grid.2x2.fill")
+            item(.closet, title: "Wardrobe", icon: "square.grid.2x2", selectedIcon: "square.grid.2x2.fill")
             item(.saved, title: "Saved", icon: "bookmark", selectedIcon: "bookmark.fill")
         }
         .padding(.horizontal, 8)
@@ -275,17 +279,7 @@ struct FMTabBar: View {
     }
 }
 
-// MARK: - Closet and Saved
-
-/// Closet: the user's own clothes. Not built yet, so it says so and points to what works today.
-struct ClosetView: View {
-    var body: some View {
-        TabPlaceholder(title: "Closet", caption: "Your wardrobe", icon: "square.grid.2x2",
-                       heading: "Your closet is coming soon",
-                       message: "Soon you'll keep the pieces you own here and mix them into looks in Studio. For now, scan an outfit you like with the Camera.",
-                       actionTitle: "Scan an Outfit", actionIcon: "camera") { $0.openCamera() }
-    }
-}
+// MARK: - Saved
 
 /// Saved: looks the user keeps. Saving isn't built yet, so it says so.
 struct SavedView: View {

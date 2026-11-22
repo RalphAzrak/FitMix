@@ -137,8 +137,6 @@ nonisolated struct SizingPreferences: Codable, Equatable, Sendable {
     var bottom: BottomSize?
     var shoe: ShoeSize?
 
-    var isEmpty: Bool { top == nil && bottom == nil && shoe == nil }
-
     /// One line for the Profile row, e.g. "Top M · Bottom W32 L30 · Shoe US Men's 10".
     var summary: String {
         var parts: [String] = []
@@ -256,7 +254,7 @@ nonisolated struct ShippingAddress: Codable, Equatable, Identifiable, Sendable {
         return result
     }
 
-    enum Field: Hashable { case recipient, street, unit, city, region, postalCode, country }
+    enum Field: Hashable { case recipient, street, unit, city, region, postalCode }
 }
 
 /// Labels and validation rules for one country's addresses.

@@ -96,7 +96,7 @@ struct MetricsForm: View {
     }
 
     private func errorText(_ message: String) -> some View {
-        Text(message).font(.system(size: 13)).foregroundStyle(Color(red: 0.72, green: 0.15, blue: 0.12))
+        Text(message).font(.system(size: 13)).foregroundStyle(Color.fmError)
     }
 
     /// Only the user's own typing goes through here, so redisplaying a value in other units never alters it.

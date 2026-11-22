@@ -9,11 +9,12 @@ import Vision
 // MARK: - Retailer match for one selected garment
 //
 // After a tap, the iPhone sends the FitMix backend only the selected garment's crop, its category, and the
-// clues read on-device (`GarmentClues`: printed text and codes, colour, pattern, style). The backend asks
-// every enabled visual search provider, reads the listing pages, and returns ranked listings labeled
-// exact / brand / similar. The phone then compares the top listing photos with the crop on-device
-// (`VisualReranker`) to order listings within each label. The full outfit frame, profile photos and avatar
-// images never leave the iPhone for search. See Docs/LiveGarmentMatch.md and Backend/README.md.
+// clues read on-device (`GarmentClues`: printed text and codes, colour, pattern, style). Studio's search is
+// Google Lens through the backend (`LensSearch.swift`), which answers with one listing or none. Lists of
+// listings labeled exact / brand / similar, and the on-device photo comparison that orders them
+// (`VisualReranker`), now come only from the Debug fixtures at the end of this file. The full outfit frame,
+// profile photos and avatar images never leave the iPhone for search. See Docs/LiveGarmentMatch.md and
+// Backend/README.md.
 
 /// Exactly what leaves the phone for one search.
 nonisolated struct GarmentSearchRequest: Sendable {
@@ -25,7 +26,7 @@ nonisolated struct GarmentSearchRequest: Sendable {
 }
 
 /// How sure FitMix is that a listing is the garment the user tapped.
-nonisolated enum MatchTier: String, Sendable, Equatable, Comparable {
+nonisolated enum MatchTier: Sendable, Equatable, Comparable {
     /// Corroborated: a product code, the same image, or brand + model + colour.
     case exact
     /// Only the brand is supported.
@@ -72,16 +73,8 @@ nonisolated enum RetailerSearchOutcome: Sendable, Equatable {
 }
 
 nonisolated enum RetailerSearchError: LocalizedError, Equatable {
-    /// No backend in this build, or the backend has no provider credentials.
-    case notConfigured(String)
-    case offline
-    case unreachable
-    case timedOut
-    /// The provider failed in a way that may pass (busy, rate limited, outage).
+    /// The search failed in a way that may pass (busy, rate limited, outage). Only the Debug fixtures throw this.
     case providerBusy(String)
-    /// The provider refused (bad credentials, account not approved). Retrying won't help.
-    case providerRejected(String)
-    case invalidResponse
     /// The Google Lens search failed (provider error, timeout, not configured, unreachable). The detail is for
     /// Debug builds; people see "Couldn't search. Try again."
     case lensFailed(String)
@@ -90,12 +83,7 @@ nonisolated enum RetailerSearchError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .notConfigured(let message): message
-        case .offline: "You're offline. Connect to the internet and try again."
-        case .unreachable: "FitMix couldn't reach its product search. Check your connection and try again."
-        case .timedOut: "The product search took too long. Try again."
-        case .providerBusy(let message), .providerRejected(let message): message
-        case .invalidResponse: "The product search sent back something FitMix couldn't read. Try again."
+        case .providerBusy(let message): message
         case .lensFailed: "Couldn't search. Try again."
         case .searchLimitReached: "FitMix has used this month's product searches."
         }
@@ -103,8 +91,8 @@ nonisolated enum RetailerSearchError: LocalizedError, Equatable {
 
     var isRetryable: Bool {
         switch self {
-        case .offline, .unreachable, .timedOut, .providerBusy, .invalidResponse, .lensFailed: true
-        case .notConfigured, .providerRejected, .searchLimitReached: false
+        case .providerBusy, .lensFailed: true
+        case .searchLimitReached: false
         }
     }
 }
@@ -115,7 +103,7 @@ nonisolated protocol RetailerSearching: Sendable {
 
 enum RetailerSearchers {
     /// The search Studio uses: Google Lens through the FitMix backend (`/v1/lens-search`), in Debug and Release.
-    /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|nomatch|error|slow.
+    /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|branded|nomatch|error|slow|shopify.
     static var current: RetailerSearching {
         #if DEBUG
         if let mode = ProcessInfo.processInfo.environment["FM_DEBUG_MATCH_FIXTURE"], let fixture = FixtureRetailerSearch(mode: mode) {
@@ -123,108 +111,6 @@ enum RetailerSearchers {
         }
         #endif
         return LensRetailerSearch(config: .current)
-    }
-}
-
-// MARK: - Backend
-
-/// `POST /v1/garment-match` on the FitMix backend.
-nonisolated struct BackendRetailerSearch: RetailerSearching {
-    var config: BackendConfig?
-    var session: URLSession = BackendRetailerSearch.makeSession()
-
-    static func makeSession() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral  // nothing cached on disk
-        // Visual search providers can take tens of seconds (Scrappa advises a 45 s client timeout).
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 70
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }
-
-    private struct Response: Decodable {
-        struct Listing: Decodable {
-            struct Amount: Decodable { var value: String; var currency: String }
-            var id: String
-            var title: String
-            var retailer: String
-            var seller: String?
-            var image_url: String?
-            var url: String?
-            var price: Amount?
-            var match: String
-            var brand: String?
-            var evidence: [String]?
-            var provider: String?
-            var fixture: Bool?
-            var score: Double?
-        }
-        var status: String
-        var fixture: Bool?
-        var results: [Listing]
-    }
-
-    private struct Failure: Decodable {
-        struct Detail: Decodable { var code: String; var message: String }
-        var error: Detail
-    }
-
-    func search(_ request: GarmentSearchRequest) async throws -> RetailerSearchOutcome {
-        guard let config else {
-            throw RetailerSearchError.notConfigured("Retailer search isn't set up in this build. Start the FitMix backend (Backend/run.sh) and rebuild.")
-        }
-        var form = MultipartForm()
-        form.add(file: request.crop, name: "crop", fileName: "garment.jpg", type: "image/jpeg")
-        form.add(value: request.category.rawValue, name: "category")
-        let clues = request.clues
-        if let color = clues.color { form.add(value: color, name: "color") }
-        if !clues.brandHints.isEmpty { form.add(value: clues.brandHints.joined(separator: ","), name: "brand_hints") }
-        if !clues.text.isEmpty { form.add(value: clues.text.joined(separator: ","), name: "text") }
-        if let pattern = clues.pattern { form.add(value: pattern, name: "pattern") }
-        if let style = clues.style { form.add(value: style, name: "style") }
-
-        var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent("v1/garment-match"))
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
-        if let token = config.token, !token.isEmpty { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-
-        let data: Data, response: URLResponse
-        do {
-            (data, response) = try await session.upload(for: urlRequest, from: form.finished())
-        } catch let error as URLError {
-            switch error.code {
-            case .cancelled: throw CancellationError()
-            case .notConnectedToInternet, .dataNotAllowed: throw RetailerSearchError.offline
-            case .timedOut: throw RetailerSearchError.timedOut
-            default: throw RetailerSearchError.unreachable
-            }
-        }
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse else { throw RetailerSearchError.invalidResponse }
-        guard http.statusCode == 200 else {
-            guard let failure = try? JSONDecoder().decode(Failure.self, from: data) else {
-                throw http.statusCode == 404 ? RetailerSearchError.notConfigured("The FitMix backend on this network doesn't have retailer search yet. Update and restart it.")
-                    : RetailerSearchError.invalidResponse
-            }
-            switch failure.error.code {
-            case "not_configured": throw RetailerSearchError.notConfigured(failure.error.message)
-            case "provider_auth", "unauthorized": throw RetailerSearchError.providerRejected(failure.error.message)
-            default: throw RetailerSearchError.providerBusy(failure.error.message)
-            }
-        }
-        guard let body = try? JSONDecoder().decode(Response.self, from: data) else { throw RetailerSearchError.invalidResponse }
-        let listings = body.results.map { item in
-            RetailerListing(id: item.id, title: item.title, retailer: item.retailer, seller: item.seller,
-                            imageURL: item.image_url.flatMap(URL.init(string:)),
-                            listingURL: item.url.flatMap(URL.init(string:)),
-                            price: item.price.flatMap { Decimal(string: $0.value, locale: Locale(identifier: "en_US_POSIX")) },
-                            currency: item.price?.currency,
-                            tier: MatchTier(rawValue: item.match) ?? .similar,
-                            brand: item.brand, evidence: item.evidence ?? [], provider: item.provider ?? "",
-                            score: item.score ?? 0,
-                            isFixture: item.fixture ?? body.fixture ?? false)
-        }
-        return listings.isEmpty || body.status == "no_match" ? .noMatch : .matches(listings)
     }
 }
 

@@ -1,10 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// FitMix's Home tab: the user's avatar on the left, the features they can open on the right.
-/// Managing the avatar, the original photo and the measurements happens in Profile (`AvatarProfileView`).
-/// Both screens read the same `AvatarStore`, so an accepted avatar shows up here straight away.
-/// Flows that cover the whole app (Camera, the avatar flow, Account) are opened through `AppRouter`.
+/// Home shows the accepted portrait and opens the fitting, scanning, and shopping flows.
 struct HomeView: View {
     @Environment(AvatarStore.self) private var store
     @Environment(AuthSession.self) private var auth
@@ -13,26 +10,41 @@ struct HomeView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var showProfile = false
-    /// Width available to the hub, measured so the two columns can be sized from it.
-    @State private var contentWidth: CGFloat = 361
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 header
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        FMTitleLine(title: "Fitting Room", caption: "Home")
-                        statusBanner
-                        hub
+                GeometryReader { viewport in
+                    let width = max(0, min(viewport.size.width - 28, 580))
+                    let portraitHeight = min(width * 1.44, max(322, viewport.size.height - 192))
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("Fitting Room")
+                                .font(.fmDisplay(37, relativeTo: .largeTitle))
+                                .foregroundStyle(Color.fmInk)
+                                .accessibilityAddTraits(.isHeader)
+                            statusBanner
+                            HomePortrait(
+                                portrait: store.avatarImage,
+                                hasAvatar: store.profile.avatar != nil,
+                                setupStarted: store.profile.setupStarted,
+                                openProfile: { showProfile = true },
+                                createAvatar: { router.flow = store.resumeStep }
+                            )
+                            .frame(height: portraitHeight)
+                            outfitButton
+                            shortcuts
+                        }
+                        .frame(width: width)
+                        .padding(.top, 16)
+                        .padding(.bottom, 26)
+                        .frame(maxWidth: .infinity)
                     }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { contentWidth = $0 }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 14)
-                    .padding(.bottom, 28)
                 }
             }
-            .background(Color.fmBackground.ignoresSafeArea())
+            .background(Color(hex: 0xF8F6F1).ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(isPresented: $showProfile) {
                 AvatarProfileView(changeAvatar: { router.flow = $0 }, editMetrics: { router.showMetricsEditor = true },
@@ -78,7 +90,6 @@ struct HomeView: View {
         }
     }
 
-    /// Shown only while something about the avatar needs attention. Everything else stays reachable meanwhile.
     @ViewBuilder
     private var statusBanner: some View {
         switch store.homeState {
@@ -93,54 +104,145 @@ struct HomeView: View {
         }
     }
 
-    // MARK: Hub
-
-    /// Side by side by default. With very large text or on a very narrow screen the two parts stack,
-    /// so every label stays readable and every action reachable.
-    private var stacked: Bool { typeSize.isAccessibilitySize || contentWidth < 330 }
-
-    @ViewBuilder
-    private var hub: some View {
-        let features = features
-        if stacked {
-            VStack(spacing: 14) {
-                HomeAvatarPanel(imageWidth: min(contentWidth, 300), openProfile: { showProfile = true }, create: { router.flow = store.resumeStep })
-                    .frame(maxWidth: .infinity)
-                VStack(spacing: 10) {
-                    ForEach(features) { HomeFeatureCard(feature: $0, compact: false) }
+    private var outfitButton: some View {
+        Button { router.showOutfit = true } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "hanger")
+                    .font(.title3.weight(.medium))
+                    .frame(width: 42, height: 42)
+                    .background(.white.opacity(0.15), in: Circle())
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Outfit").font(.headline)
+                    Text("Style your avatar").font(.subheadline).foregroundStyle(.white.opacity(0.88))
                 }
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.right").font(.body.weight(.semibold)).accessibilityHidden(true)
             }
-        } else {
-            let spacing: CGFloat = 12
-            let avatarWidth = ((contentWidth - spacing) * 0.62).rounded(.down)
-            HStack(alignment: .top, spacing: spacing) {
-                HomeAvatarPanel(imageWidth: avatarWidth, openProfile: { showProfile = true }, create: { router.flow = store.resumeStep })
-                VStack(spacing: 10) {
-                    ForEach(features) { HomeFeatureCard(feature: $0, compact: true).frame(maxHeight: .infinity) }
-                }
-                .frame(height: HomeAvatarPanel.height(imageWidth: avatarWidth))
-            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 11)
+            .background(.fmPrimaryGradient, in: RoundedRectangle(cornerRadius: 20))
+        }
+        .buttonStyle(PressableCardStyle())
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("feature-outfit")
+    }
+
+    private var shortcuts: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10),
+                                 count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 10) {
+            shortcut("Wardrobe", icon: "square.grid.2x2", id: "closet") { router.tab = .closet }
+            shortcut("Studio", icon: "tshirt", id: "studio") { router.tab = .studio }
+            shortcut("Scan Fits", icon: "camera.viewfinder", id: "scan", action: router.openCamera)
+            shortcut("Shop This Look", icon: "bag", id: "shop") { router.showShopLook = true }
         }
     }
 
-    /// What can be opened from Home, in order. Each one leads to a screen that exists today, under the name
-    /// that screen already uses. Closet is not built yet, so it is shown last and cannot be opened.
-    private var features: [HomeFeature] {
-        var list = [
-            HomeFeature(id: "studio", title: "Studio", detail: "Swap pieces and style a look", icon: "tshirt") { router.tab = .studio },
-            HomeFeature(id: "scan", title: "Scan Fits", detail: "Capture an outfit with the camera", icon: "camera.viewfinder") { router.openCamera() },
-            HomeFeature(id: "shop", title: "Shop This Look", detail: "Review the pieces in your look", icon: "bag") { router.showShopLook = true },
-            HomeFeature(id: "closet", title: "Closet", detail: "Coming soon", icon: "square.grid.2x2", isAvailable: false) {},
-        ]
-        // Try-on is offered only once something can actually render it.
-        if TryOnRenderers.current?.producesTryOn == true {
-            list.insert(HomeFeature(id: "tryon", title: "Try-On", detail: "See the look on you", icon: "tshirt") { router.tab = .studio }, at: 1)
+    private func shortcut(_ title: String, icon: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color.fmCobaltDeep)
+                    .frame(width: 30, height: 34)
+                    .accessibilityHidden(true)
+                Text(title).font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.fmInk)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            .background(.white, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.fmHairline))
         }
-        return list
+        .buttonStyle(PressableCardStyle())
+        .accessibilityIdentifier("feature-\(id)")
     }
 }
 
-// MARK: Status banner
+private struct HomePortrait: View {
+    let portrait: UIImage?
+    let hasAvatar: Bool
+    let setupStarted: Bool
+    let openProfile: () -> Void
+    let createAvatar: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if hasAvatar {
+                Button(action: openProfile) { portraitPanel }
+                    .buttonStyle(PressableCardStyle())
+                    .accessibilityLabel("My Avatar")
+                    .accessibilityHint("Opens your avatar profile")
+            } else {
+                emptyPanel
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 26))
+        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(Color.fmInk.opacity(0.08)).allowsHitTesting(false))
+        .accessibilityIdentifier("home-avatar")
+    }
+
+    private var backdrop: some View {
+        RadialGradient(colors: [Color(hex: 0xF1ECE4), Color(hex: 0xE4DBD0)],
+                       center: .topLeading, startRadius: 5, endRadius: 560)
+    }
+
+    private var portraitPanel: some View {
+        ZStack {
+            backdrop
+            if let portrait {
+                Image(uiImage: portrait)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityHidden(true)
+                    .transition(.opacity)
+            } else {
+                ProgressView()
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: portrait == nil)
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 7) {
+                Text("My Avatar").font(.caption.weight(.semibold))
+                Image(systemName: "arrow.up.right").font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(Color.fmInk)
+            .padding(.horizontal, 13)
+            .frame(minHeight: 44)
+            .background(.white.opacity(0.94), in: Capsule())
+            .padding(12)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var emptyPanel: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "person.crop.rectangle")
+                .font(.system(size: 43, weight: .light))
+                .foregroundStyle(Color.fmCobaltDeep)
+                .accessibilityHidden(true)
+            Text(setupStarted ? "Your avatar is in progress" : "Create your avatar")
+                .font(.fmDisplay(26, relativeTo: .title2))
+                .foregroundStyle(Color.fmInk)
+            Text(setupStarted ? "Pick up where you left off." : "Start with a full-body photo.")
+                .font(.subheadline)
+                .foregroundStyle(Color.fmSecondary)
+            Button(setupStarted ? "Continue Setup" : "Create My Avatar", action: createAvatar)
+                .buttonStyle(FMFilledButtonStyle())
+                .frame(maxWidth: 242)
+        }
+        .multilineTextAlignment(.center)
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { backdrop }
+    }
+}
 
 private struct HomeStatusBanner: View {
     var text: String
@@ -171,189 +273,6 @@ private struct HomeStatusBanner: View {
         .background(Color.fmCard, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.fmHairline))
         .accessibilityElement(children: .combine)
-    }
-}
-
-// MARK: Avatar panel
-
-/// The left side of Home: the whole avatar, head to shoes, never cropped or stretched. Tapping it opens
-/// Profile. Before there is an avatar, the same space offers to create one.
-struct HomeAvatarPanel: View {
-    var imageWidth: CGFloat
-    var openProfile: () -> Void
-    var create: () -> Void
-    @Environment(AvatarStore.self) private var store
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Portraits are 2:3, so the panel is too; the figure fills it without cropping.
-    static func height(imageWidth: CGFloat) -> CGFloat { (imageWidth * 1.5).rounded() }
-
-    var body: some View {
-        Group {
-            if store.profile.avatar != nil {
-                Button(action: openProfile) { portrait }
-                    .buttonStyle(PressableCardStyle())
-                    .accessibilityLabel("Your avatar")
-                    .accessibilityHint("Opens Profile")
-            } else {
-                empty
-            }
-        }
-        .frame(width: imageWidth, height: Self.height(imageWidth: imageWidth))
-        .fmHeroFrame()
-    }
-
-    private var portrait: some View {
-        ZStack {
-            Color.fmStudio
-            if let image = store.avatarImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .id(store.profile.avatar?.createdAt)    // a replacement fades in over the old one
-                    .transition(.opacity)
-            } else {
-                ProgressView()
-            }
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: store.profile.avatar?.createdAt)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: store.avatarImage == nil)
-        .overlay(alignment: .topLeading) {
-            FMChip(text: "My Avatar", dot: .fmLime).padding(10)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            Image(systemName: "arrow.up.right")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.fmInk)
-                .frame(width: 40, height: 40)
-                .background(.white, in: Circle())
-                .fmFloatingShadow()
-                .padding(10)
-        }
-    }
-
-    private var empty: some View {
-        VStack(spacing: 12) {
-            Spacer(minLength: 0)
-            Image(systemName: "figure.stand").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(Color.fmSecondary.opacity(0.6))
-                .accessibilityHidden(true)
-            Text(store.profile.setupStarted ? "Your avatar isn't finished yet" : "No avatar yet")
-                .font(.system(size: 14))
-                .foregroundStyle(Color.fmSecondary)
-                .multilineTextAlignment(.center)
-            Spacer(minLength: 0)
-            Button(action: create) {
-                Text(store.profile.setupStarted ? "Continue Setup" : "Create My Avatar")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(.fmPrimaryGradient, in: Capsule())
-                    .shadow(color: Color.fmCobalt.opacity(0.3), radius: 10, y: 5)
-            }
-            .buttonStyle(PressableCardStyle())
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.fmStudio)
-    }
-}
-
-// MARK: Feature cards
-
-/// One thing that can be opened from Home.
-struct HomeFeature: Identifiable {
-    var id: String
-    var title: String
-    var detail: String
-    var icon: String
-    /// False for a feature that is planned but cannot be opened yet.
-    var isAvailable = true
-    var open: () -> Void
-}
-
-/// A feature shortcut. `compact` is the tile used beside the avatar; otherwise a full-width row.
-struct HomeFeatureCard: View {
-    var feature: HomeFeature
-    var compact: Bool
-
-    var body: some View {
-        Group {
-            if feature.isAvailable {
-                Button(action: feature.open) { label }
-                    .buttonStyle(PressableCardStyle())
-                    .accessibilityLabel(feature.title)
-                    .accessibilityHint(feature.detail)
-            } else {
-                label
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(feature.title), \(feature.detail.lowercased())")
-            }
-        }
-        .accessibilityIdentifier("feature-\(feature.id)")
-    }
-
-    private var label: some View {
-        Group {
-            if compact {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .top) {
-                        icon
-                        Spacer(minLength: 0)
-                        if !feature.isAvailable { soon }
-                    }
-                    Spacer(minLength: 0)
-                    Text(feature.title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.fmInk)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.85)
-                        .multilineTextAlignment(.leading)
-                }
-                .padding(11)
-            } else {
-                HStack(spacing: 12) {
-                    icon
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(feature.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.fmInk)
-                        Text(feature.detail).font(.system(size: 13)).foregroundStyle(Color.fmSecondary)
-                    }
-                    Spacer(minLength: 0)
-                    if feature.isAvailable {
-                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fmSecondary)
-                    }
-                }
-                .padding(14)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .frame(minHeight: 56)
-        .background(Color.fmCard, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.fmHairline))
-        .opacity(feature.isAvailable ? 1 : 0.62)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private var icon: some View {
-        Image(systemName: feature.icon)
-            .font(.system(size: 17, weight: .medium))
-            .foregroundStyle(feature.isAvailable ? Color.fmCobalt : Color.fmSecondary)
-            .frame(width: 34, height: 34)
-            .background(Color.fmTile, in: Circle())
-            .overlay(Circle().strokeBorder(Color.fmHairline))
-            .accessibilityHidden(true)
-    }
-
-    private var soon: some View {
-        Text("Soon")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(Color.fmSecondary)
-            .padding(.horizontal, 6)
-            .frame(minHeight: 18)
-            .background(Color.fmTile, in: Capsule())
     }
 }
 

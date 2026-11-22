@@ -25,6 +25,9 @@ struct AvatarProfileView: View {
     @State private var newSelfie: AvatarStore.CheckedSelfie?
     @State private var showFullPhoto = false
     @State private var confirmDelete = false
+    /// Which picture of the avatar is showing, once a 3D model exists.
+    @State private var show3D = false
+    @State private var ask3DBuild = false
 
     var body: some View {
         ScrollView {
@@ -45,8 +48,9 @@ struct AvatarProfileView: View {
             .padding(.bottom, 28)
         }
         #if DEBUG
-        // FM_DEBUG_SCROLL=bottom opens the page scrolled to its end, for checking the lower sections.
-        .defaultScrollAnchor(ProcessInfo.processInfo.environment["FM_DEBUG_SCROLL"] == "bottom" ? .bottom : .top)
+        // FM_DEBUG_SCROLL=bottom opens the page scrolled to its end, for checking the lower sections;
+        // a number from 0 to 1 opens it that far down.
+        .defaultScrollAnchor(Self.debugScrollAnchor)
         #endif
         .background(Color.fmBackground.ignoresSafeArea())
         .navigationTitle("Profile")
@@ -55,10 +59,14 @@ struct AvatarProfileView: View {
         .toolbar { ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1).accessibilityHidden(true) } }
         .toolbarBackground(Color.fmBackground, for: .navigationBar)
         #if DEBUG
-        // FM_DEBUG_PROFILE=change-reuse | change-update | review | ask | photo | replace takes the matching action
-        // straight away ("replace" treats the saved photo as one just picked).
+        // FM_DEBUG_PROFILE=change-reuse | change-update | review | ask | photo | replace | 3d | build3d takes the
+        // matching action straight away ("replace" treats the saved photo as one just picked).
         .task {
             switch ProcessInfo.processInfo.environment["FM_DEBUG_PROFILE"] {
+            case "3d": show3D = store.model3DURL != nil
+            case "build3d":
+                show3D = store.model3DURL != nil      // with a model already on screen, this checks that the rebuilt one replaces it
+                store.build3DAvatar()
             case "change-reuse": changeAvatar(.generate)
             case "change-update": changeAvatar(.bodyPhoto)
             case "review": changeAvatar(.review)
@@ -78,6 +86,15 @@ struct AvatarProfileView: View {
         } message: {
             Text("You'll see the new avatar before anything changes. Your current one stays until you choose Use This Avatar.")
         }
+        .confirmationDialog(store.model3DURL == nil ? "Build a 3D avatar?" : "Rebuild your 3D avatar?", isPresented: $ask3DBuild, titleVisibility: .visible) {
+            Button(store.model3DURL == nil ? "Build 3D Avatar" : "Rebuild 3D Avatar") { store.build3DAvatar() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("FitMix sends your avatar portrait to your FitMix server, which builds the 3D model there and doesn't share it with any other service. It takes about 6 minutes, and you can keep using FitMix meanwhile."
+                 + (store.model3DURL == nil ? "" : " Your current 3D avatar stays until the new one is ready."))
+        }
+        // A finished model is shown straight away; when the avatar is replaced its model goes, and so does the tab.
+        .onChange(of: store.profile.model3D) { _, model in show3D = model != nil }
         .sheet(item: $newPhoto) { checked in
             PhotoConfirmSheet(title: "New full-body photo", image: checked.image, label: "Your new full-body photo",
                               notice: checked.analysis.notice, useLabel: "Use This Photo") {
@@ -99,17 +116,38 @@ struct AvatarProfileView: View {
             Button("Delete Avatar and Photos", role: .destructive) { store.deleteEverything() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes your avatar, full-body photo, selfie, and measurements from this iPhone. It can't be undone.")
+            Text("This removes your avatar and its 3D model, your full-body photo, selfie, and measurements from this iPhone. It can't be undone.")
         }
     }
+
+    #if DEBUG
+    private static var debugScrollAnchor: UnitPoint {
+        let value = ProcessInfo.processInfo.environment["FM_DEBUG_SCROLL"]
+        if value == "bottom" { return .bottom }
+        return value.flatMap(Double.init).map { UnitPoint(x: 0.5, y: $0) } ?? .top
+    }
+    #endif
 
     // MARK: My Avatar
 
     private var avatarSection: some View {
         let record = store.profile.avatar
         return AvatarProfileSection(title: "My Avatar") {
+            if store.model3DURL != nil {
+                Picker("Show", selection: $show3D) {
+                    Text("Portrait").tag(false)
+                    Text("3D").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("avatarViewPicker")
+            }
             Group {
-                if let portrait = store.avatarImage {
+                if show3D, let model = store.model3DURL {
+                    Avatar3DView(modelURL: model, placeholder: store.avatarImage)
+                        .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .frame(maxHeight: 420)
+                } else if let portrait = store.avatarImage {
                     // The whole figure in the portrait's own shape: no backdrop bars, nothing cropped.
                     Image(uiImage: portrait)
                         .resizable()
@@ -118,7 +156,7 @@ struct AvatarProfileView: View {
                         .frame(maxHeight: 420)
                         .id(record?.createdAt)
                         .transition(.opacity)
-                        .accessibilityLabel("Your avatar: a full-body animated-style portrait")
+                        .accessibilityLabel("Your full-body avatar portrait")
                 } else {
                     ZStack {
                         Color.fmStudio
@@ -140,12 +178,53 @@ struct AvatarProfileView: View {
             .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: record?.createdAt)
 
             if let record {
-                Text("AI-generated illustration and an approximate likeness. \(record.madeFromText(units: store.profile.units))")
+                Text(show3D && store.profile.model3D != nil ? model3DCaption
+                                                             : "AI-generated portrait. \(record.madeFromText(units: store.profile.units))")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.fmSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             avatarActions
+            avatar3DActions
+        }
+    }
+
+    /// Says what the 3D model is and isn't: one picture went in, so everything not facing the camera is a guess.
+    private var model3DCaption: String {
+        let face = store.profile.model3D?.faceSharpened == false ? " The face is at lower detail." : ""
+        return "3D model built from your portrait. The sides and back are estimated.\(face) Drag to turn it."
+    }
+
+    /// Building, following and retrying the 3D model of the current avatar.
+    @ViewBuilder
+    private var avatar3DActions: some View {
+        if store.profile.avatar != nil {
+            switch store.build3D {
+            case .building(let stage, let ahead, let percent):
+                Build3DProgress(percent: percent, text: Self.build3DText(stage: stage, ahead: ahead))
+                Button("Cancel 3D Build") { store.cancel3DBuild() }.buttonStyle(FMOutlineButtonStyle())
+            case .failed(let message):
+                NoticeRow(tone: .caution, text: message)
+                Button("Try 3D Build Again") { store.build3DAvatar() }.buttonStyle(FMOutlineButtonStyle())
+            case .idle:
+                if store.generationAvailable, store.homeState == .ready {
+                    // With a model already built, this makes a fresh one; the current one stays until it is ready.
+                    Button(store.model3DURL == nil ? "Build 3D Avatar" : "Rebuild 3D Avatar") { ask3DBuild = true }
+                        .buttonStyle(FMOutlineButtonStyle())
+                        .accessibilityIdentifier("build3DAvatar")
+                }
+            }
+        }
+    }
+
+    static func build3DText(stage: String?, ahead: Int) -> String {
+        if ahead > 0 { return "Waiting for the 3D builder (\(ahead) ahead of you)…" }
+        switch stage {
+        case "cutout": return "Preparing the portrait…"
+        case "shape": return "Shaping the model. This is the long part, about 5 minutes."
+        case "face": return "Adding your face…"
+        case "package": return "Finishing…"
+        default: return "Starting…"
         }
     }
 
@@ -311,7 +390,7 @@ struct AvatarProfileView: View {
 
     private var privacy: some View {
         VStack(spacing: 6) {
-            Text("Your photos, measurements, and avatar are stored only on this iPhone. Photos are sent to OpenAI only when you choose to generate an avatar.")
+            Text("Your photos, measurements, and avatar are stored only on this iPhone. Photos are sent to OpenAI only when you choose to generate an avatar. Your avatar portrait is sent to the FitMix server only when you choose to build its 3D model.")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.fmSecondary)
                 .multilineTextAlignment(.center)
@@ -323,6 +402,34 @@ struct AvatarProfileView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 4)
+    }
+}
+
+/// How far a 3D avatar build is: a bar, the percentage, and what the builder is doing right now.
+struct Build3DProgress: View {
+    var percent: Int
+    var text: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Building your 3D avatar").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.fmInk)
+                Spacer(minLength: 8)
+                Text("\(percent)%")
+                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.fmInk)
+                    .contentTransition(.numericText())
+            }
+            ProgressView(value: Double(min(max(percent, 0), 100)), total: 100)
+                .tint(Color.fmCobalt)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.6), value: percent)
+            Text(text).font(.system(size: 13)).foregroundStyle(Color.fmSecondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Building your 3D avatar")
+        .accessibilityValue("\(percent) percent. \(text)")
+        .accessibilityIdentifier("build3DProgress")
     }
 }
 

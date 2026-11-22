@@ -2,28 +2,14 @@ import CoreGraphics
 import CoreML
 import CoreVideo
 import OSLog
+import QuartzCore
 import Vision
 
 // MARK: - Live garment detection (on-device, per frame)
 //
-// Finds Jacket, T-shirt, Pants and Shoes on the main person in one upright camera frame. Nothing
-// leaves the iPhone. Two engines, same output:
-//
-// 1. **Garment model** (preferred). If the app bundle contains `GarmentDetector.mlmodelc`, a Core ML
-//    object detector (for example a YOLO model trained on a clothing dataset, exported with NMS),
-//    its boxes are used directly. Labels are mapped to the four categories by `modelCategory(for:)`.
-//    No such model ships with FitMix today; see Docs/LiveGarmentMatch.md.
-// 2. **Vision fallback** (what runs today). Vision has no clothing detector, so this places regions
-//    from body pose and person segmentation, then only reports a garment when there is evidence for
-//    its category:
-//    - Shoes: a box below the ankles, confirmed by Vision's image classifier (shoes / sneaker / boot…).
-//    - Pants: hips to ankles, where the shin matches the thigh and isn't bare skin.
-//    - Jacket over T-shirt: an open front, i.e. a centre strip that differs from both side panels
-//      from chest to hem, with the side panels matching each other (and the sleeves, or the
-//      classifier's "jacket" label). The T-shirt is the inner strip, so the two never share a box.
-//    - Jacket alone: the classifier says jacket / hoodie / suit and the sleeves aren't short.
-//    - T-shirt alone: short sleeves (bare forearm that matches the face's skin tone).
-//    Anything else gets no target, rather than a guess.
+// Vision pose anchors one subject. Instance masks refine regions when they agree with that
+// pose. Colour and Vision classification provide category evidence, with optional Core ML
+// detections refining regions on the same subject.
 
 nonisolated struct LiveDetection: Sendable, Equatable {
     var category: GarmentCategory
@@ -35,8 +21,6 @@ nonisolated struct LiveDetection: Sendable, Equatable {
 }
 
 nonisolated final class LiveGarmentDetector: @unchecked Sendable {
-    enum Engine: Sendable, Equatable { case model, vision }
-
     /// What to tell the user when a frame has nothing (or not everything) selectable.
     enum Hint: Sendable, Equatable {
         case noPerson
@@ -44,84 +28,101 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         case includeFeet
         /// Shoulders and hips weren't both visible.
         case includeUpperBody
+        case holdSteady
+        case clearerView
     }
 
     /// Where one frame's analysis time went, in milliseconds.
     struct Timings: Sendable, Equatable {
-        /// Body pose + person segmentation (or the garment model).
-        var vision = 0.0
-        /// Vision's image classifier on body areas (cached, so often 0).
+        var pose = 0.0
+        var mask = 0.0
+        var model = 0.0
         var classify = 0.0
         var total = 0.0
+        /// Pose, mask and garment model together, for the performance overlay.
+        var vision: Double { pose + mask + model }
     }
 
     struct Result: Sendable {
         var detections: [LiveDetection] = []
         var hint: Hint?
-        /// Vision couldn't run at all (the iOS simulator can't run body pose).
+        var acquiredSubject = false
+        /// Vision couldn't run at all.
         var failed = false
         var timings = Timings()
     }
 
-    let engine: Engine
     #if DEBUG
     /// Debug builds: receives the measurements behind each decision (tests and the frame harness).
     nonisolated(unsafe) static var trace: ((String) -> Void)?
     #endif
     private let model: VNCoreMLModel?
+    private let pose = VNDetectHumanBodyPoseRequest()
+    private let segmentation = VNGeneratePersonInstanceMaskRequest()
+    private let subject = LiveSubjectTracker()
+    private var cachedMask: (joints: PoseJoints, mask: ByteMask)?
+    private var lastMaskAttempt = -Double.infinity
     /// Classifier scores per body area, reused for a short time so each frame runs at most a few
     /// classifications.
     private var classified: [String: (time: Double, box: CGRect, scores: [String: Float])] = [:]
-    /// Classifier time spent on the frame being analyzed.
-    private var classifyTime = 0.0
+    private var timings = Timings()
     private let log = Logger(subsystem: "app.fitmix", category: "LiveGarmentDetector")
 
     init(bundle: Bundle = .main) {
         if let url = bundle.url(forResource: "GarmentDetector", withExtension: "mlmodelc"),
            let ml = try? MLModel(contentsOf: url), let vn = try? VNCoreMLModel(for: ml) {
             model = vn
-            engine = .model
         } else {
             model = nil
-            engine = .vision
         }
     }
 
-    /// `time` is seconds on any monotonic clock; it only paces the classifier cache. When the
-    /// camera's own `pixelBuffer` (upright, same pixels as `image`) is given, Vision reads it
-    /// directly, which is faster than going through `image`.
-    func detect(_ image: CGImage, pixelBuffer: CVPixelBuffer? = nil, time: Double) -> Result {
-        let start = DispatchTime.now().uptimeNanoseconds
-        classifyTime = 0
-        let handler = pixelBuffer.map { VNImageRequestHandler(cvPixelBuffer: $0, orientation: .up) }
-            ?? VNImageRequestHandler(cgImage: image, orientation: .up)
-        var result = model.map { detectWithModel($0, handler) } ?? detectWithVision(image, handler: handler, time: time)
-        result.timings.total = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
-        result.timings.classify = classifyTime
-        result.timings.vision = max(0, result.timings.total - classifyTime)  // pose, segmentation, sampling
+    func reset() {
+        subject.reset()
+        resetRefinements()
+    }
+
+    private func resetRefinements() {
+        classified.removeAll()
+        cachedMask = nil
+        lastMaskAttempt = -.infinity
+    }
+
+    /// The handler reads the original camera buffer with its orientation. The upright analysis
+    /// image is only rendered if pose finds the subject.
+    func detect(_ handler: VNImageRequestHandler, time: Double, analysisImage: () -> CGImage?) -> Result {
+        let start = CACurrentMediaTime()
+        timings = Timings()
+        var result = detectSubject(handler, time: time, analysisImage: analysisImage)
+        timings.total = (CACurrentMediaTime() - start) * 1000
+        result.timings = timings
         return result
     }
 
     // MARK: Core ML model
 
-    private func detectWithModel(_ model: VNCoreMLModel, _ handler: VNImageRequestHandler) -> Result {
+    private func detectWithModel(_ model: VNCoreMLModel, _ handler: VNImageRequestHandler,
+                                 joints: PoseJoints, others: [PoseJoints]) -> [LiveDetection] {
+        let start = CACurrentMediaTime()
+        defer { timings.model = (CACurrentMediaTime() - start) * 1000 }
         let request = VNCoreMLRequest(model: model)
-        request.imageCropAndScaleOption = .scaleFit
+        request.imageCropAndScaleOption = .scaleFill
         do { try handler.perform([request]) } catch {
             log.error("Garment model failed: \(error.localizedDescription, privacy: .public)")
-            return Result(failed: true)
+            return []
         }
         var best: [GarmentCategory: LiveDetection] = [:]
         for observation in request.results as? [VNRecognizedObjectObservation] ?? [] {
             guard let label = observation.labels.first, label.confidence >= 0.5,
                   let category = Self.modelCategory(for: label.identifier) else { continue }
             let box = observation.boundingBox
-            let detection = LiveDetection(category: category,
-                                          bounds: CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height),
-                                          confidence: Double(label.confidence))
+            let bounds = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+            let support = joints.support(for: category, in: bounds)
+            guard support > 0, others.allSatisfy({ $0.support(for: category, in: bounds) < support }) else { continue }
+            let detection = LiveDetection(category: category, bounds: bounds, confidence: Double(label.confidence))
             if (best[category]?.confidence ?? 0) < detection.confidence { best[category] = detection }
         }
-        return Result(detections: Array(best.values), hint: best.isEmpty ? .noPerson : nil)
+        return Array(best.values)
     }
 
     /// Maps common clothing-dataset labels onto the four live categories.
@@ -136,38 +137,69 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
 
     // MARK: Vision fallback
 
-    private func detectWithVision(_ image: CGImage, handler: VNImageRequestHandler, time: Double) -> Result {
-        let pose = VNDetectHumanBodyPoseRequest()
-        let segmentation = VNGeneratePersonSegmentationRequest()
-        // .fast is ~3× cheaper than .balanced; the mask only trims boxes and picks person pixels
-        // for colour, and gave the same detections on the test frames.
-        segmentation.qualityLevel = .fast
-        segmentation.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        do { try handler.perform([pose, segmentation]) } catch {
-            log.error("Vision failed: \(error.localizedDescription, privacy: .public)")
+    private func detectSubject(_ handler: VNImageRequestHandler, time: Double, analysisImage: () -> CGImage?) -> Result {
+        let start = CACurrentMediaTime()
+        do { try handler.perform([pose]) } catch {
+            timings.pose = (CACurrentMediaTime() - start) * 1000
+            log.error("Body pose failed: \(error.localizedDescription, privacy: .public)")
             return Result(failed: true)
         }
-        // The largest pose is the person the user is pointing at.
-        guard let joints = (pose.results ?? []).map(PoseJoints.init).filter({ $0.points.count >= 4 }).max(by: { $0.area < $1.area }),
-              let grid = ColorGrid(image) else {
-            return Result(hint: .noPerson)
+        timings.pose = (CACurrentMediaTime() - start) * 1000
+        let candidates = (pose.results ?? []).map(PoseJoints.init)
+        guard let match = subject.update(candidates, time: time) else {
+            return Result(hint: subject.isLocked ? .holdSteady : candidates.isEmpty ? .noPerson : .includeUpperBody)
         }
+        if match.acquired { resetRefinements() }
+        var result = Result(acquiredSubject: match.acquired)
+        guard let image = analysisImage(), let grid = ColorGrid(image, maxWidth: 240) else { return result }
+        let joints = candidates[match.index]
+        let others = candidates.enumerated().filter { $0.offset != match.index }.map(\.element)
         let scene = Scene(image: image, joints: joints, grid: grid,
-                          mask: segmentation.results?.first.map { ByteMask($0.pixelBuffer) },
+                          mask: subjectMask(handler, joints: joints, others: others, time: time),
                           aspect: Double(image.height) / Double(image.width))
         let skin = faceSkin(scene)
 
-        var result = Result()
-        let upper = upperBody(scene, skin: skin, time: time)
-        result.detections += upper
+        result.detections = upperBody(scene, skin: skin, time: time)
         if let pants = pants(scene, skin: skin, time: time) { result.detections.append(pants) }
         switch shoes(scene, time: time) {
         case .found(let shoes): result.detections.append(shoes)
         case .feetOutOfFrame: result.hint = .includeFeet
         case .notFound: break
         }
-        if result.hint == nil, joints[.leftShoulder] == nil || joints[.rightShoulder] == nil { result.hint = .includeUpperBody }
+        if let model {
+            for var detection in detectWithModel(model, handler, joints: joints, others: others) {
+                // Preserve the inner panel when both engines see the tee under an open jacket.
+                if detection.category == .tshirt, result.detections.contains(where: { $0.category == .jacket }),
+                   result.detections.contains(where: { $0.category == .tshirt }) { continue }
+                detection.color = scene.mean(detection.bounds)
+                result.detections.removeAll { $0.category == detection.category }
+                result.detections.append(detection)
+            }
+        }
+        if joints[.leftShoulder] == nil || joints[.rightShoulder] == nil || joints.mid(.leftHip, .rightHip) == nil {
+            if result.detections.isEmpty || result.hint == nil { result.hint = .includeUpperBody }
+        }
+        if result.detections.isEmpty, result.hint == nil { result.hint = .clearerView }
         return result
+    }
+
+    private func subjectMask(_ handler: VNImageRequestHandler, joints: PoseJoints, others: [PoseJoints],
+                             time: Double) -> ByteMask? {
+        if !others.isEmpty { cachedMask = nil }
+        if time - lastMaskAttempt < 0.32 {
+            guard let cachedMask, joints.isAligned(with: cachedMask.joints) else { return nil }
+            return cachedMask.mask
+        }
+        lastMaskAttempt = time
+        cachedMask = nil
+        let start = CACurrentMediaTime()
+        defer { timings.mask = (CACurrentMediaTime() - start) * 1000 }
+        guard (try? handler.perform([segmentation])) != nil, let observation = segmentation.results?.first else { return nil }
+        let labels = LabelMask(observation.instanceMask)
+        guard let instance = labels.instance(for: joints, excluding: others) else { return nil }
+        let mask = ByteMask(labels, instance: instance)
+        if others.isEmpty, observation.allInstances.count == 1 { cachedMask = (joints, mask) }
+        return mask
     }
 
     private struct Scene {
@@ -191,7 +223,7 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
             let clamped = band.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
             guard !clamped.isNull, clamped.width > 0.01, clamped.height > 0.01 else { return nil }
             guard let mask else { return clamped }
-            return mask.box(in: clamped)
+            return mask.box(in: clamped) ?? clamped
         }
     }
 
@@ -206,7 +238,7 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
 
     /// Centre-vs-panel colour differences that mean an open outer layer over another garment.
     static func isOpenFront(_ differences: [Float], jacketSeen: Bool) -> Bool {
-        guard let low = differences.min(), !differences.isEmpty else { return false }
+        guard let low = differences.min() else { return false }
         if !jacketSeen { return low > 20 }
         let mean = differences.reduce(0, +) / Float(differences.count)
         return mean >= 6.5 && low >= 4
@@ -254,7 +286,9 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
 
         // Jackets often hang below the hips, so the classifier sees down to mid-thigh.
         let context = CGRect(x: outer.minX, y: outer.minY, width: outer.width, height: hip.y + torso * 0.5 - outer.minY)
-        let jacketScore = score(["jacket", "hoodie", "suit", "lab_coat"], key: "upper", box: context, s, time: time)
+        let upperScores = scores(key: "upper", box: context, s, time: time)
+        let jacketScore = score(["jacket", "hoodie", "suit", "lab_coat"], in: upperScores)
+        let teeScore = score(["t-shirt", "t_shirt", "tshirt", "tee_shirt"], in: upperScores)
         /// Follows a side panel's colour down from the hip to find where that garment ends.
         func hemY(matching colour: SIMD3<Float>?) -> Double {
             guard let colour else { return hem }
@@ -298,7 +332,7 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
             let jacket = s.tighten(CGRect(x: outer.minX, y: outer.minY, width: outer.width, height: hemY(matching: panelA) - outer.minY)) ?? outer
             return [LiveDetection(category: .jacket, bounds: jacket, confidence: Double(jacketScore), color: panelA ?? centreHigh)]
         }
-        if shortSleeves, jacketScore < 0.2 {
+        if shortSleeves || teeScore >= 0.2 {
             // Without long sleeves the garment is the torso plus upper arms, not out to the wrists.
             let elbowXs = [j[.leftElbow], j[.rightElbow]].compactMap { $0?.x } + [minS, maxS]
             let teeTop = shoulderY - torso * 0.2  // the collar sits well above the shoulder joints
@@ -335,18 +369,19 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
         #if DEBUG
         Self.trace?("pants: covered \(covered), bare shin \(bareShin), face skin \(skin != nil)")
         #endif
-        guard covered, !bareShin else { return nil }
+        guard !bareShin, thighColor != nil else { return nil }
 
         let xs = j.xs([.leftHip, .rightHip, .leftKnee, .rightKnee, .leftAnkle, .rightAnkle])
         let pad = span * 0.12 * s.aspect
         guard let box = s.tighten(CGRect(x: (xs.min() ?? hip.x) - pad, y: hip.y - span * 0.04,
                                          width: (xs.max() ?? hip.x) - (xs.min() ?? hip.x) + pad * 2, height: span * 1.03)) else { return nil }
-        let jeans = score(["jeans"], key: "legs", box: box, s, time: time)
+        let needsClassifier = !covered || skin == nil
+        let jeans = needsClassifier ? score(["jeans", "trousers", "pants"], in: scores(key: "legs", box: box, s, time: time)) : 0
         #if DEBUG
         Self.trace?(String(format: "pants: jeans %.2f", jeans))
         #endif
         // Without a face to compare skin against, bare legs look "covered", so ask the classifier too.
-        guard skin != nil || jeans >= 0.15 else { return nil }
+        guard !needsClassifier || jeans >= (covered ? 0.15 : 0.25) else { return nil }
         return LiveDetection(category: .pants, bounds: box, confidence: min(1, 0.55 + Double(jeans)), color: thighColor)
     }
 
@@ -361,19 +396,21 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
             // Hips or knees but no ankles: the feet are below the frame.
             return j.mid(.leftHip, .rightHip) != nil || j.y([.leftKnee, .rightKnee]) != nil ? .feetOutOfFrame : .notFound
         }
-        guard let kneeY = j.y([.leftKnee, .rightKnee]), let hip = j.mid(.leftHip, .rightHip) else { return .notFound }
         let ys = ankles.map { Double($0.y) }, xs = ankles.map { Double($0.x) }
-        let highest = ys.min() ?? 0, lowest = ys.max() ?? 0
-        // Scale from the whole leg, which foreshortens less than the shin when filmed from above.
-        let leg = max(lowest - hip.y, (lowest - kneeY) * 2)
+        guard let highest = ys.min(), let lowest = ys.max() else { return .notFound }
+        let hipSpan = j.y([.leftHip, .rightHip]).map { lowest - $0 } ?? 0
+        let kneeSpan = j.y([.leftKnee, .rightKnee]).map { (lowest - $0) * 2 } ?? 0
+        let leg = max(hipSpan, kneeSpan)
         guard leg > 0.04 else { return .notFound }
         let pad = leg * 0.16 * s.aspect
+        let depth = leg * (s.mask == nil ? 0.25 : 0.4)
         let band = CGRect(x: (xs.min() ?? 0.5) - pad, y: highest - leg * 0.06,
-                          width: (xs.max() ?? 0.5) - (xs.min() ?? 0.5) + pad * 2, height: lowest - highest + leg * 0.5)
+                          width: (xs.max() ?? 0.5) - (xs.min() ?? 0.5) + pad * 2, height: lowest - highest + depth)
         // The person mask ends at the soles, so the box stops there rather than on the floor.
         guard let box = s.tighten(band) else { return .notFound }
-        guard box.maxY < 0.985, band.maxY < 1.02 else { return .feetOutOfFrame }
-        let shoeScore = score(["shoes", "footwear", "sneaker", "boot", "high_heel", "sandal"], key: "feet", box: box, s, time: time)
+        guard box.maxY < 0.985 else { return .feetOutOfFrame }
+        let shoeScore = score(["shoes", "footwear", "sneaker", "boot", "high_heel", "sandal"],
+                              in: scores(key: "feet", box: box, s, time: time))
         #if DEBUG
         Self.trace?(String(format: "shoes: leg %.3f, box y %.3f–%.3f, score %.2f", leg, box.minY, box.maxY, shoeScore))
         #endif
@@ -385,25 +422,28 @@ nonisolated final class LiveGarmentDetector: @unchecked Sendable {
 
     // MARK: Classifier
 
-    /// The highest of `labels`' confidences from Vision's image classifier, run on the box's crop.
-    /// Cached per body area while the box hasn't moved much.
-    private func score(_ labels: [String], key: String, box: CGRect, _ s: Scene, time: Double) -> Float {
-        if let cached = classified[key], time - cached.time < 0.5, iou(cached.box, box) > 0.5 {
-            return labels.compactMap { cached.scores[$0] }.max() ?? 0
+    /// The highest of `labels`' confidences in `scores`.
+    private func score(_ labels: [String], in scores: [String: Float]) -> Float {
+        labels.compactMap { scores[$0] }.max() ?? 0
+    }
+
+    /// Vision's image classifier, run on the box's crop. Cached per body area while the box hasn't moved much.
+    private func scores(key: String, box: CGRect, _ s: Scene, time: Double) -> [String: Float] {
+        if let cached = classified[key], time - cached.time < 0.5, iou(cached.box, box) > 0.65 {
+            return cached.scores
         }
-        let w = Double(s.image.width), h = Double(s.image.height)
-        let pixels = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h).integral
-        guard pixels.width >= 16, pixels.height >= 16, let crop = s.image.cropping(to: pixels) else { return 0 }
+        guard let crop = LiveGarmentSelection.crop(s.image, to: box),
+              crop.width >= 16, crop.height >= 16 else { return [:] }
         let request = VNClassifyImageRequest()
-        let start = DispatchTime.now().uptimeNanoseconds
-        defer { classifyTime += Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6 }
-        guard (try? VNImageRequestHandler(cgImage: crop, orientation: .up).perform([request])) != nil else { return 0 }
+        let start = CACurrentMediaTime()
+        defer { timings.classify += (CACurrentMediaTime() - start) * 1000 }
+        guard (try? VNImageRequestHandler(cgImage: crop, orientation: .up).perform([request])) != nil else { return [:] }
         var scores: [String: Float] = [:]
         for observation in request.results ?? [] where observation.confidence > 0.01 {
             scores[observation.identifier] = observation.confidence
         }
         classified[key] = (time, box, scores)
-        return labels.compactMap { scores[$0] }.max() ?? 0
+        return scores
     }
 }
 
@@ -449,20 +489,68 @@ nonisolated private func lab(_ c: SIMD3<Float>) -> SIMD3<Float> {
 /// Confident body-pose joints, normalized with a top-left origin.
 nonisolated struct PoseJoints {
     typealias Name = VNHumanBodyPoseObservation.JointName
+    static let anchors: [Name] = [.leftShoulder, .rightShoulder, .leftHip, .rightHip, .root, .leftKnee, .rightKnee]
     let points: [Name: CGPoint]
+
+    init(points: [Name: CGPoint]) { self.points = points }
 
     init(_ observation: VNHumanBodyPoseObservation) {
         let recognized = (try? observation.recognizedPoints(.all)) ?? [:]
-        points = recognized.compactMapValues { $0.confidence > 0.3 ? CGPoint(x: $0.location.x, y: 1 - $0.location.y) : nil }
+        points = recognized.compactMapValues {
+            guard $0.confidence >= 0.3, (0...1).contains($0.location.x), (0...1).contains($0.location.y) else { return nil }
+            return CGPoint(x: $0.location.x, y: 1 - $0.location.y)
+        }
     }
 
     subscript(_ name: Name) -> CGPoint? { points[name] }
 
-    /// Area of the joints' bounding box, to pick the most prominent person.
-    var area: Double {
+    var bounds: CGRect {
         let xs = points.values.map(\.x), ys = points.values.map(\.y)
-        guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return 0 }
-        return (x1 - x0) * (y1 - y0)
+        guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return .zero }
+        return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+
+    func anchorDistance(to other: PoseJoints) -> Double? {
+        let distances = Self.anchors.compactMap { name -> Double? in
+            guard let a = self[name], let b = other[name] else { return nil }
+            return hypot(a.x - b.x, a.y - b.y)
+        }
+        guard distances.count >= 2 else { return nil }
+        return distances.reduce(0, +) / Double(distances.count)
+    }
+
+    func isAligned(with other: PoseJoints) -> Bool {
+        guard Set(points.keys) == Set(other.points.keys) else { return false }
+        return points.allSatisfy { name, a in
+            guard let b = other[name] else { return false }
+            return hypot(a.x - b.x, a.y - b.y) < 0.018
+        }
+    }
+
+    private var torsoProbes: [CGPoint?] {
+        let shoulders = mid(.leftShoulder, .rightShoulder)
+        let hips = mid(.leftHip, .rightHip)
+        let torso = shoulders.flatMap { start in hips.map { lerp(start, $0, 0.5) } }
+        return [torso, shoulders, hips]
+    }
+
+    /// Interior pose samples are less likely to hit the edge of a low-resolution mask.
+    var maskProbes: [CGPoint] {
+        (torsoProbes + [self[.leftKnee], self[.rightKnee], self[.nose]]).compactMap { $0 }
+    }
+
+    func support(for category: GarmentCategory, in box: CGRect) -> Int {
+        let probes: [CGPoint?] = switch category {
+        case .jacket, .tshirt:
+            torsoProbes
+        case .pants:
+            [mid(.leftHip, .leftKnee), mid(.rightHip, .rightKnee), self[.leftKnee], self[.rightKnee]]
+        case .shoes:
+            [self[.leftAnkle], self[.rightAnkle]].map { $0.map { CGPoint(x: $0.x, y: $0.y + 0.015) } }
+        default: []
+        }
+        let expanded = box.insetBy(dx: -box.width * 0.08, dy: -box.height * 0.08)
+        return probes.compactMap { $0 }.filter { expanded.contains($0) }.count
     }
 
     func mid(_ a: Name, _ b: Name) -> CGPoint? {
@@ -479,7 +567,43 @@ nonisolated struct PoseJoints {
     func xs(_ names: [Name]) -> [Double] { names.compactMap { points[$0].map { Double($0.x) } } }
 }
 
-/// The frame downscaled to a small RGB grid, for colour sampling and a sharpness estimate.
+/// Starts on the prominent pose, then prefers proximity to the last confident landmarks.
+/// A missing or ambiguous match holds the lock until it expires.
+nonisolated final class LiveSubjectTracker {
+    static let grace = 0.6
+    private var last: (joints: PoseJoints, time: Double)?
+    var isLocked: Bool { last != nil }
+
+    func reset() { last = nil }
+
+    func update(_ candidates: [PoseJoints], time: Double) -> (index: Int, acquired: Bool)? {
+        let usable = candidates.indices.filter { index in
+            candidates[index].points.count >= 3 && PoseJoints.anchors.filter { candidates[index][$0] != nil }.count >= 2
+        }
+        if let last, time - last.time < Self.grace {
+            let limit = min(0.14, max(0.05, last.joints.bounds.height * 0.20))
+            let ranked = usable.compactMap { index -> (index: Int, distance: Double)? in
+                guard let distance = last.joints.anchorDistance(to: candidates[index]), distance < limit else { return nil }
+                return (index, distance)
+            }.sorted { $0.distance < $1.distance }
+            guard let best = ranked.first,
+                  ranked.count == 1 || ranked[1].distance - best.distance >= 0.025 else { return nil }
+            self.last = (candidates[best.index], time)
+            return (best.index, false)
+        }
+        last = nil
+        guard let best = usable.max(by: { prominence(candidates[$0]) < prominence(candidates[$1]) }) else { return nil }
+        last = (candidates[best], time)
+        return (best, true)
+    }
+
+    private func prominence(_ joints: PoseJoints) -> Double {
+        let bounds = joints.bounds
+        return bounds.width * bounds.height / (1 + 2 * abs(bounds.midX - 0.5))
+    }
+}
+
+/// The frame downscaled to a small RGB grid for colour sampling.
 nonisolated struct ColorGrid {
     let width: Int
     let height: Int
@@ -526,46 +650,38 @@ nonisolated struct ColorGrid {
         return n >= 3 ? sum / Float(n) : nil
     }
 
-    /// Mean absolute Laplacian of brightness. Higher is sharper; only meaningful relative to
-    /// other frames of the same scene.
-    var sharpness: Double {
-        guard width > 2, height > 2 else { return 0 }
-        func luma(_ x: Int, _ y: Int) -> Float {
-            let i = (y * width + x) * 3
-            return 0.299 * rgb[i] + 0.587 * rgb[i + 1] + 0.114 * rgb[i + 2]
-        }
-        var total: Float = 0
-        for y in 1..<(height - 1) {
-            for x in 1..<(width - 1) {
-                total += abs(4 * luma(x, y) - luma(x - 1, y) - luma(x + 1, y) - luma(x, y - 1) - luma(x, y + 1))
-            }
-        }
-        return Double(total) / Double((width - 2) * (height - 2))
+}
+
+extension LabelMask {
+    /// Select the label covering most of the locked subject's probes. Reject merged silhouettes
+    /// when another pose also places several probes on that label.
+    nonisolated func instance(for subject: PoseJoints, excluding others: [PoseJoints]) -> UInt8? {
+        let probes = subject.maskProbes
+        let labels = probes.map { label(atNormalized: $0.x, $0.y) }.filter { $0 != 0 }
+        let counts = Dictionary(grouping: labels, by: { $0 }).mapValues(\.count)
+        guard let best = counts.max(by: { $0.value < $1.value }), best.value >= 2,
+              best.value * 2 > probes.count else { return nil }
+        guard others.allSatisfy({ pose in
+            pose.maskProbes.filter { label(atNormalized: $0.x, $0.y) == best.key }.count < 2
+        }) else { return nil }
+        return best.key
     }
 }
 
-/// Vision's person segmentation (one byte per pixel, row 0 = top).
+/// The tracked person's instance in Vision's mask, row 0 at the top.
 nonisolated struct ByteMask {
-    let width: Int
-    let height: Int
-    private let bytes: [UInt8]
+    let labels: LabelMask
+    let instance: UInt8
+    var width: Int { labels.width }
+    var height: Int { labels.height }
 
-    init(_ buffer: CVPixelBuffer) {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer), stride = CVPixelBufferGetBytesPerRow(buffer)
-        var bytes = [UInt8](repeating: 0, count: w * h)
-        if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
-            for y in 0..<h { for x in 0..<w { bytes[y * w + x] = base[y * stride + x] } }
-        }
-        width = w
-        height = h
-        self.bytes = bytes
+    init(_ labels: LabelMask, instance: UInt8) {
+        self.labels = labels
+        self.instance = instance
     }
 
     func isOn(x: Double, y: Double) -> Bool {
-        let px = min(width - 1, max(0, Int(x * Double(width)))), py = min(height - 1, max(0, Int(y * Double(height))))
-        return bytes[py * width + px] > 127
+        labels.label(atNormalized: x, y) == instance
     }
 
     /// Bounding box of the person's pixels inside `rect` (normalized), or nil if there are too few.
@@ -575,7 +691,7 @@ nonisolated struct ByteMask {
         guard x0 <= x1, y0 <= y1 else { return nil }
         var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1, count = 0
         for y in y0...y1 {
-            for x in x0...x1 where bytes[y * width + x] > 127 {
+            for x in x0...x1 where labels.labels[y * width + x] == instance {
                 count += 1
                 minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
             }
@@ -583,6 +699,6 @@ nonisolated struct ByteMask {
         let area = (x1 - x0 + 1) * (y1 - y0 + 1)
         guard count >= max(12, area / 20) else { return nil }
         return CGRect(x: Double(minX) / Double(width), y: Double(minY) / Double(height),
-                      width: Double(maxX - minX + 1) / Double(width), height: Double(maxY - minY + 1) / Double(height))
+                      width: Double(maxX - minX + 1) / Double(width), height: Double(maxY - minY + 1) / Double(height)).intersection(rect)
     }
 }

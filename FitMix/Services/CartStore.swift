@@ -130,9 +130,8 @@ final class CartStore {
     }
 
     /// A store's checkout finished. Removes what that order contains (by variant and quantity) from
-    /// that store's lines only; other stores' lines are never touched. Returns the receipt.
-    @discardableResult
-    func completeCheckout(store: String, purchased: [Int64: Int], order: CheckoutReceipt) throws -> CheckoutReceipt {
+    /// that store's lines only; other stores' lines are never touched.
+    func completeCheckout(store: String, purchased: [Int64: Int], order: CheckoutReceipt) throws {
         receipts.insert(order, at: 0)
         try update { items in
             var remaining = purchased
@@ -145,7 +144,6 @@ final class CartStore {
                 return item.quantity > 0 ? item : nil
             }
         }
-        return order
     }
 
     func setQuantity(_ quantity: Int, for id: UUID) throws {
