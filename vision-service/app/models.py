@@ -54,6 +54,9 @@ class CatalogMatch(BaseModel):
     price: Price | None
     image: str
     retailer_url: str | None = None
+    retailer: str | None = None
+    # True for fictional demo products (labelled as samples wherever they're shown).
+    sample: bool = False
     score: float
 
 

@@ -1,0 +1,418 @@
+[
+  {
+    "id": "demo-jacket-01",
+    "title": "Olive Nylon Bomber Jacket",
+    "category": "jacket",
+    "price": {
+      "value": "89.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-01.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-jacket-02",
+    "title": "Black Faux-Leather Moto Jacket",
+    "category": "jacket",
+    "price": {
+      "value": "120.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-02.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-jacket-03",
+    "title": "Classic Denim Trucker Jacket",
+    "category": "jacket",
+    "price": {
+      "value": "74.50",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-03.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-jacket-04",
+    "title": "Beige Double-Breasted Trench Coat",
+    "category": "jacket",
+    "price": {
+      "value": "149.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-04.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-jacket-05",
+    "title": "Navy Quilted Puffer Jacket",
+    "category": "jacket",
+    "price": {
+      "value": "110.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-05.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-jacket-06",
+    "title": "Grey Wool-Blend Overcoat",
+    "category": "jacket",
+    "price": {
+      "value": "189.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-jacket-06.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-07",
+    "title": "White Organic Cotton Crew Tee",
+    "category": "top",
+    "price": {
+      "value": "24.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-07.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-08",
+    "title": "Black Heavyweight Pocket Tee",
+    "category": "top",
+    "price": {
+      "value": "29.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-08.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-09",
+    "title": "Navy Breton Stripe Long-Sleeve Top",
+    "category": "top",
+    "price": {
+      "value": "39.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-09.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-10",
+    "title": "Heather Grey Pullover Hoodie",
+    "category": "top",
+    "price": {
+      "value": "55.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-10.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-11",
+    "title": "Red Check Flannel Shirt",
+    "category": "top",
+    "price": {
+      "value": "48.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-11.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-top-12",
+    "title": "Cream Cable-Knit Sweater",
+    "category": "top",
+    "price": {
+      "value": "68.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-top-12.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-13",
+    "title": "Dark Wash Straight-Leg Jeans",
+    "category": "pants",
+    "price": {
+      "value": "79.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-13.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-14",
+    "title": "Light Wash Relaxed Jeans",
+    "category": "pants",
+    "price": {
+      "value": "69.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-14.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-15",
+    "title": "Khaki Slim Chinos",
+    "category": "pants",
+    "price": {
+      "value": "58.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-15.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-16",
+    "title": "Black Utility Cargo Pants",
+    "category": "pants",
+    "price": {
+      "value": "72.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-16.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-17",
+    "title": "Grey Fleece Joggers",
+    "category": "pants",
+    "price": {
+      "value": "45.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-17.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-pants-18",
+    "title": "Olive Ripstop Cargo Pants",
+    "category": "pants",
+    "price": {
+      "value": "66.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-pants-18.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-19",
+    "title": "White Leather Low-Top Sneakers",
+    "category": "shoes",
+    "price": {
+      "value": "95.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-19.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-20",
+    "title": "Black Leather Chelsea Boots",
+    "category": "shoes",
+    "price": {
+      "value": "160.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-20.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-21",
+    "title": "Brown Suede Penny Loafers",
+    "category": "shoes",
+    "price": {
+      "value": "130.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-21.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-22",
+    "title": "Grey Mesh Running Shoes",
+    "category": "shoes",
+    "price": {
+      "value": "110.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-22.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-23",
+    "title": "Cream Canvas High-Tops",
+    "category": "shoes",
+    "price": {
+      "value": "60.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-23.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-shoes-24",
+    "title": "Tan Suede Desert Boots",
+    "category": "shoes",
+    "price": {
+      "value": "125.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-shoes-24.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-dress-25",
+    "title": "Black Satin Slip Dress",
+    "category": "dress",
+    "price": {
+      "value": "85.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-dress-25.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-dress-26",
+    "title": "Pink Floral Midi Dress",
+    "category": "dress",
+    "price": {
+      "value": "92.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-dress-26.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-dress-27",
+    "title": "Red Wrap Midi Dress",
+    "category": "dress",
+    "price": {
+      "value": "88.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-dress-27.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-dress-28",
+    "title": "Navy Cotton Shirt Dress",
+    "category": "dress",
+    "price": {
+      "value": "76.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-dress-28.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-skirt-29",
+    "title": "Denim A-Line Mini Skirt",
+    "category": "skirt",
+    "price": {
+      "value": "42.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-skirt-29.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-skirt-30",
+    "title": "Black Pleated Midi Skirt",
+    "category": "skirt",
+    "price": {
+      "value": "58.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-skirt-30.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-skirt-31",
+    "title": "Beige Satin Midi Skirt",
+    "category": "skirt",
+    "price": {
+      "value": "64.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-skirt-31.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  },
+  {
+    "id": "demo-skirt-32",
+    "title": "Green Ribbed Knit Skirt",
+    "category": "skirt",
+    "price": {
+      "value": "49.00",
+      "currency": "USD"
+    },
+    "image": "images/demo-skirt-32.png",
+    "retailer": "FitMix demo",
+    "retailer_url": null,
+    "sample": true
+  }
+]

@@ -2,6 +2,9 @@
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+SERVICE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _flag(value: str | None) -> bool:
@@ -16,6 +19,15 @@ def _float(env: dict, name: str, default: float) -> float:
 def _int(env: dict, name: str, default: int) -> int:
     raw = env.get(name, "").strip()
     return int(raw) if raw else default
+
+
+def _path(value: str) -> str:
+    """A path from .env, relative to vision-service/ unless absolute."""
+    value = value.strip()
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    return str(path if path.is_absolute() else SERVICE_ROOT / path)
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,10 @@ class Settings:
     # Garment segmentation for photos. Off: photos are described as a whole instead.
     segmentation: bool = True
     segmentation_model: str = "mattmdjaga/segformer_b2_clothes"
+    # FashionCLIP image embeddings (catalog matching, and re-ranking from stage 5). Off: no catalog matches.
+    embeddings: bool = True
+    embedding_model: str = "patrickjohncyh/fashion-clip"
+    catalog_path: str = str(SERVICE_ROOT / "catalog" / "catalog.json")
     # Garments covering less than this fraction of the photo are dropped (e.g. shoes cut off at the edge).
     min_garment_area: float = 0.01
     catalog_top_k: int = 5
@@ -82,6 +98,9 @@ class Settings:
             rerank_attr_weight=_float(env, "RERANK_ATTR_WEIGHT", d.rerank_attr_weight),
             segmentation=_flag(env.get("SEGMENTATION", "1")),
             segmentation_model=env.get("SEGMENTATION_MODEL", "").strip() or d.segmentation_model,
+            embeddings=_flag(env.get("EMBEDDINGS", "1")),
+            embedding_model=env.get("EMBEDDING_MODEL", "").strip() or d.embedding_model,
+            catalog_path=_path(env.get("CATALOG_PATH", "")) or d.catalog_path,
             min_garment_area=_float(env, "MIN_GARMENT_AREA", d.min_garment_area),
             catalog_top_k=_int(env, "CATALOG_TOP_K", d.catalog_top_k),
             online_top_k=_int(env, "ONLINE_TOP_K", d.online_top_k),

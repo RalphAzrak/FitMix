@@ -22,7 +22,7 @@ garment-and-brand pair is searched once and then cached, so credits are only spe
 | 1 | Skeleton, `MOCK_MODE`, `/health`, all endpoints with mock data | ✅ done |
 | 2 | Real OpenAI description + Google Shopping links | ✅ done |
 | 3 | SegFormer segmentation (per-garment crops) | ✅ done |
-| 4 | FashionCLIP catalog matching + demo catalog | planned |
+| 4 | FashionCLIP catalog matching + demo catalog | ✅ done |
 | 5 | Google Lens (via Supabase signed links) + re-ranking | planned |
 | 6 | `/refine` on real search + image-hash cache | planned |
 
@@ -30,7 +30,7 @@ Without `MOCK_MODE=1`, each step runs when its key is present, and steps that ar
 are skipped (they're `null` in `/health` → `components`). With neither `OPENAI_API_KEY` nor `SERPAPI_KEY`,
 `/analyze` answers `503 not_configured`.
 
-**What runs today (after stage 3):**
+**What runs today (after stage 4):**
 - **A photo** (`image`) is segmented by SegFormer into upper clothes, dress, skirt, pants and shoes. Each
   garment is cut out onto white, and pieces under `MIN_GARMENT_AREA` of the photo are dropped (shoes need half
   that). All the crops are then described in one OpenAI call. The model merges a jacket and the top under it
@@ -40,7 +40,9 @@ are skipped (they're `null` in `/health` → `components`). With neither `OPENAI
   lists the garments, and each `crop_url` shows the whole photo (`source_label: "whole_photo"`). The log says why.
 - **`/search`** returns Google Shopping links for the garment's `search_query`. Their `score` follows Google's
   order (1.0 for the first, then falling) until image re-ranking arrives in stage 5.
-- `catalog_matches` stays empty until stage 4.
+- **Catalog matches:** each garment is embedded with FashionCLIP and compared with the demo catalog's products
+  of the same category. The 5 most similar come back as `catalog_matches`, best first. If FashionCLIP can't
+  load or `EMBEDDINGS=0`, `catalog_matches` stays empty and the log says why.
 
 ## Setup on Mac
 
@@ -128,7 +130,8 @@ curl -F crops=@jacket.png -F crops=@shoes.png -F categories=jacket,shoes localho
                    "search_query": "olive cotton crew neck t-shirt", "layered_over_top": false},
     "catalog_matches": [{"id": "demo-top-08", "title": "Black Heavyweight Pocket Tee",
                          "price": {"value": "29.00", "currency": "USD"}, "image": "…",
-                         "retailer_url": "https://example.com/products/demo-top-08", "score": 0.7671}],
+                         "retailer_url": "https://example.com/products/demo-top-08",
+                         "retailer": null, "sample": false, "score": 0.7671}],
     "online_matches": [],
     "errors": []
   }],
@@ -171,6 +174,38 @@ This is the same as `/search`, with the brand put in front of the garment's sear
 
 Reports whether a pipeline is ready, mock mode, which component runs each step, which keys are present
 (true/false only, never the keys) and how many analyses are cached.
+
+## Demo catalog
+
+`catalog/catalog.json` lists the products `/analyze` can match against. These are the ones the user can try
+on the avatar. Each entry looks like this:
+
+```json
+{"id": "demo-jacket-01", "title": "Olive Nylon Bomber Jacket", "category": "jacket",
+ "price": {"value": "89.00", "currency": "USD"}, "image": "images/demo-jacket-01.png",
+ "retailer": "FitMix demo", "retailer_url": null, "sample": true}
+```
+
+- `category` is one of `top`, `jacket`, `pants`, `shoes`, `dress`, `skirt`.
+- `image` is a file in `catalog/images/` or an `https://` link.
+- `price` can be `null`.
+- Entries that don't fit are skipped, with a warning in the log.
+
+Two scripts fill it:
+- **`scripts/make_sample_catalog.py`** writes 32 fictional products with drawn pictures (`"sample": true`).
+  They're in the repo already. Run it again only to restore them.
+- **`scripts/seed_catalog_ebay.py`** adds real eBay listings (10 per category by default) through eBay's
+  official Browse API. It reads `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` from `vision-service/.env` or
+  `Backend/.env`, and each run replaces the previous eBay entries. Listings end over time, so re-run it before
+  a demo.
+  ```bash
+  .venv/bin/python scripts/seed_catalog_ebay.py
+  ```
+
+Each run keeps the other script's entries and any you added by hand. FashionCLIP embeddings are computed at
+startup only for new or changed products and cached in `catalog/embeddings.npz`, which Git ignores. Restart the
+service after changing the catalog. Matches from local images point at `/catalog-images/<file>`, served by
+this service.
 
 ## Re-ranking (stage 5)
 

@@ -12,10 +12,11 @@ reported in that garment's `errors` and the rest of the result is still returned
 
 import hmac
 import logging
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .config import Settings
 from .images import decode, media_type
@@ -57,11 +58,42 @@ def build_pipeline(settings: Settings) -> Pipeline | None:
 
         client = SerpApiClient(settings.serpapi_key, settings.serpapi_country, settings.serpapi_language)
         online = ShoppingSearch(client, top_k=settings.online_top_k)
-    if describer is None and online is None:
+    embedder = load_embedder(settings)
+    catalog = load_catalog(settings, embedder) if embedder is not None else None
+    if describer is None and online is None and embedder is None:
         return None
-    segmenter = load_segmenter(settings) if describer is not None else None
-    # Embeddings and the catalog (stage 4) aren't built yet.
-    return Pipeline(segmenter, describer, None, None, online, catalog_top_k=settings.catalog_top_k)
+    segmenter = load_segmenter(settings)
+    return Pipeline(segmenter, describer, embedder, catalog, online, catalog_top_k=settings.catalog_top_k)
+
+
+def load_embedder(settings: Settings):
+    """FashionCLIP, loaded once at startup. If it can't load, there are no catalog matches."""
+    if not settings.embeddings:
+        return None
+    try:
+        from .embed import FashionCLIPEmbedder
+
+        return FashionCLIPEmbedder(settings.embedding_model)
+    except Exception as error:
+        log.error("embeddings are off: the model %s couldn't load (%s: %s). Catalog matching is skipped.",
+                  settings.embedding_model, type(error).__name__, error)
+        return None
+
+
+def load_catalog(settings: Settings, embedder):
+    """The demo catalog with its embeddings (cached on disk), or None if there's no usable catalog file."""
+    path = Path(settings.catalog_path)
+    if not path.exists():
+        log.warning("no catalog at %s: catalog matching is skipped", path)
+        return None
+    try:
+        from .catalog import Catalog
+
+        catalog = Catalog(path, embedder, settings.embedding_model)
+        return catalog if len(catalog) else None
+    except Exception as error:
+        log.error("catalog %s couldn't load (%s: %s). Catalog matching is skipped.", path, type(error).__name__, error)
+        return None
 
 
 def load_segmenter(settings: Settings):
@@ -205,6 +237,16 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
         if analysis is None or not filename.endswith(".jpg") or not index.isdigit() or int(index) >= len(analysis.garments):
             raise ApiError(404, "crop_not_found", "This crop has expired or doesn't exist.")
         return Response(analysis.garments[int(index)].crop_jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+    catalog_images = Path(settings.catalog_path).parent / "images"
+
+    @app.get("/catalog-images/{name}")
+    async def catalog_image(name: str):
+        # Only plain file names inside catalog/images: no folders, no "..".
+        file = catalog_images / name
+        if "/" in name or "\\" in name or name.startswith(".") or not file.is_file():
+            raise ApiError(404, "not_found", "No such catalog image.")
+        return FileResponse(file, headers={"Cache-Control": "public, max-age=86400"})
 
     if settings.mock:
         from .mock import product_image_jpeg
