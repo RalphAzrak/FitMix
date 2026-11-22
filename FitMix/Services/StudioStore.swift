@@ -50,6 +50,7 @@ final class StudioStore {
     @ObservationIgnored private var loggedFirst = false
     @ObservationIgnored private var loggedSettled = false
     private static let log = Logger(subsystem: "app.fitmix", category: "OutfitMatching")
+    private static let tryOnLog = Logger(subsystem: "app.fitmix", category: "TryOn")
 
     /// Listing photos downloaded for the on-device comparison, by listing id. Reused for try-on.
     @ObservationIgnored private var listingPhotos: [String: CGImage] = [:]
@@ -72,6 +73,8 @@ final class StudioStore {
     private(set) var tryOnSource: UIImage?
     private(set) var preview: TryOnPreview = .needsPhoto
     @ObservationIgnored private var renderTask: Task<Void, Never>?
+    /// Your Try-On is on screen. A scanned look renders only then: each render is an OpenAI request.
+    @ObservationIgnored private var tryOnVisible = false
 
     // MARK: Camera → Outfit Review → Studio
 
@@ -457,6 +460,13 @@ final class StudioStore {
 
     func retryPreview() { refreshPreview() }
 
+    /// Studio switched to or away from Your Try-On. Showing it starts the render if one is needed.
+    func setTryOnVisible(_ visible: Bool) {
+        guard visible != tryOnVisible else { return }
+        tryOnVisible = visible
+        if visible, case .waiting = preview { refreshPreview() }
+    }
+
     /// The request for the current look, or nil when there's nothing to render.
     var currentRequest: TryOnRequest? {
         if let item = wardrobeItem, let garment = wardrobeGarment {
@@ -472,13 +482,31 @@ final class StudioStore {
             return TryOnRequest(person: tryOnSource, garments: [garment],
                                 signature: "avatar:\(avatarTryOn.listingID):\(avatarTryOn.productImage == nil ? "pending" : "photo")")
         }
+        // Every selected piece, as one outfit. By default each piece is the garment as scanned (its
+        // cutout or crop); a retailer match is never needed. Only a piece the user explicitly swapped in
+        // Studio uses that product's photo.
         let garments = look.pieces.map { piece in
             TryOnGarment(pieceID: piece.id, category: piece.detected.category,
                          productID: piece.replacement?.id,
-                         image: piece.tryOnImage,
-                         sourceBounds: piece.detected.bounds)
+                         image: tryOnImage(for: piece),
+                         sourceBounds: piece.detected.bounds,
+                         productImageURL: piece.replacement.flatMap { if case .remote(let url) = $0.image { url } else { nil } })
         }
-        return TryOnRequest(person: tryOnSource, garments: garments, signature: Self.signature(of: look))
+        return TryOnRequest(person: tryOnSource, garments: garments,
+                            signature: "photo:\(ObjectIdentifier(tryOnSource).hashValue)|" + Self.signature(of: look))
+    }
+
+    /// The garment image a renderer should apply for `piece`.
+    private func tryOnImage(for piece: WorkingLook.Piece) -> UIImage? {
+        if let replacement = piece.replacement {
+            if case .local(let image) = replacement.image { return image }
+            return listingPhotos[replacement.id].map { UIImage(cgImage: $0) }  // else the renderer fetches its URL
+        }
+        if let image = piece.tryOnImage { return image }
+        // Live scans keep their crops apart from the garment (cards show the retailer's photo): the
+        // clearest search crop, else the exact crop from the frame.
+        if let crop = searchCrops[piece.id] { return UIImage(cgImage: crop) }
+        return cropPreviews[piece.id]
     }
 
     private static func signature(of look: WorkingLook) -> String {
@@ -490,19 +518,37 @@ final class StudioStore {
         renderTask = nil
         guard (wardrobeItem == nil ? tryOnSource : wardrobePerson) != nil else { preview = .needsPhoto; return }
         guard let request = currentRequest else { preview = .nothingSelected; return }
-        guard let renderer = TryOnRenderers.current else { preview = .unavailable; return }
+        guard let renderer = TryOnRenderers.current, renderer.supports(request) else { preview = .unavailable; return }
+        // Wardrobe Try-On always shows its preview; a scanned look waits until Your Try-On is shown.
+        guard wardrobeItem != nil || avatarTryOn != nil || tryOnVisible else { preview = .waiting; return }
 
         let signature = request.signature
         preview = .rendering(signature: signature)
+        let person = request.person.size
+        Self.tryOnLog.info("Try-on render: \(String(describing: type(of: renderer)), privacy: .public), person \(Int(person.width), privacy: .public)×\(Int(person.height), privacy: .public), garments \(request.garments.map { "\($0.category.rawValue)=\($0.productID ?? "scanned"):\($0.image.map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? ($0.productImageURL == nil ? "no-image" : "url"))" }.joined(separator: ","), privacy: .public)")
+        #if DEBUG
+        print("[tryon] render \(type(of: renderer)) person=\(Int(person.width))x\(Int(person.height)) garments=\(request.garments.map { "\($0.category.rawValue)=\($0.productID ?? "scanned"):\($0.image.map { "\(Int($0.size.width))x\(Int($0.size.height))" } ?? ($0.productImageURL == nil ? "no-image" : "url"))" })")
+        #endif
         renderTask = Task { [weak self] in
             do {
                 let image = try await renderer.render(request)
-                guard !Task.isCancelled, let self, self.isCurrent(signature) else { return }
+                guard !Task.isCancelled, let self, self.isCurrent(signature) else {
+                    #if DEBUG
+                    print("[tryon] stale result ignored")
+                    #endif
+                    return
+                }
                 self.preview = .ready(image, isTryOn: renderer.producesTryOn, signature: signature)
+                #if DEBUG
+                print("[tryon] ready \(Int(image.size.width))x\(Int(image.size.height)) isTryOn=\(renderer.producesTryOn)")
+                #endif
             } catch is CancellationError {
             } catch {
                 guard !Task.isCancelled, let self, self.isCurrent(signature) else { return }
                 self.preview = .failed(error.localizedDescription, signature: signature)
+                #if DEBUG
+                print("[tryon] failed \(error.localizedDescription)")
+                #endif
             }
         }
     }

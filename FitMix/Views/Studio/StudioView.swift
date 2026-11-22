@@ -88,9 +88,15 @@ struct StudioView: View {
         .sheet(isPresented: $addPhoto) {
             TryOnPhotoSheet { studio.setTryOnSource($0) }
         }
-        .onAppear { mode = defaultMode }
+        .onAppear {
+            mode = defaultMode
+            studio.setTryOnVisible(mode == .tryOn)
+        }
+        .onDisappear { studio.setTryOnVisible(false) }
         // A new look opens on the try-on view when there's something to try on.
         .onChange(of: studio.lookNumber) { mode = defaultMode }
+        // Your Try-On renders the look when it's shown (each render is a request to OpenAI).
+        .onChange(of: mode) { studio.setTryOnVisible(mode == .tryOn) }
         .alert("Live Twin isn't available yet", isPresented: $showLiveTwinInfo) {
             Button("OK", role: .cancel) {}
         } message: {

@@ -88,7 +88,8 @@ struct AppShell: View {
                     // Back to the tab Camera was opened from; Studio keeps its previous look.
                     router.capture = nil
                 }, select: { selection in
-                    studio.openLive(selection, tryOnSource: nil)
+                    // The saved try-on photo (Profile → My Try-On Photo), the same one Outfit Review uses.
+                    studio.openLive(selection, tryOnSource: store.bodyPhoto)
                     router.tab = .studio
                     router.capture = nil
                 }, confirm: { scan in
@@ -168,6 +169,23 @@ struct AppShell: View {
             case "shop": router.showShopLook = true
             case "studio": router.tab = .studio
             #if DEBUG
+            case "wardrobe-tryon":
+                // Studio's Wardrobe Try-On (what Wardrobe opens for an accessory) on a local garment image:
+                // FM_DEBUG_WARDROBE_GARMENT=/path.png, FM_DEBUG_WARDROBE_CATEGORY=accessory|tshirt|… (default accessory).
+                // Wardrobe belongs to an account, so this needs FM_DEBUG_ACCOUNT_ID too.
+                let env = ProcessInfo.processInfo.environment
+                if let path = env["FM_DEBUG_WARDROBE_GARMENT"], let garment = UIImage(contentsOfFile: path), let owner = auth.user?.id {
+                    let category = env["FM_DEBUG_WARDROBE_CATEGORY"].flatMap(WardrobeCategory.init(rawValue:)) ?? .accessory
+                    let item = WardrobeItem(id: UUID(), ownerID: owner, name: "Test fixture \(category.garment.title.lowercased())",
+                                            category: category, photoRevision: UUID(), originalPath: path, cleanedPath: nil,
+                                            thumbnailPath: path, prefersCleaned: false, rowVersion: UUID(), createdAt: .now, updatedAt: .now)
+                    router.tab = .studio
+                    Task {
+                        // Saved photos load just after launch; Wardrobe itself is only opened later.
+                        for _ in 0..<30 where store.avatarImage == nil && store.bodyPhoto == nil { try? await Task.sleep(for: .milliseconds(100)) }
+                        studio.openWardrobeItem(item, garment: garment, person: store.avatarImage ?? store.bodyPhoto)
+                    }
+                }
             case "studio-sample":
                 // Studio on the code-drawn sample look, without going through Camera.
                 studio.open(SampleScans.scanA(), tryOnSource: store.bodyPhoto)
@@ -175,7 +193,7 @@ struct AppShell: View {
             case let screen? where screen.hasPrefix("live-sample-"):
                 if let category = GarmentCategory(rawValue: String(screen.dropFirst("live-sample-".count))),
                    let selection = SampleScans.liveSelection(category) {
-                    studio.openLive(selection, tryOnSource: nil)
+                    studio.openLive(selection, tryOnSource: store.bodyPhoto)
                     router.tab = .studio
                     if let next = ProcessInfo.processInfo.environment["FM_DEBUG_THEN_SELECT"].flatMap(GarmentCategory.init(rawValue:)) {
                         Task {

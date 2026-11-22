@@ -106,5 +106,6 @@ struct SwapPickerSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("swapOption-\(id ?? "original")")
     }
 }
