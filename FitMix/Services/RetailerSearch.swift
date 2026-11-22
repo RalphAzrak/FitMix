@@ -12,6 +12,7 @@ nonisolated struct GarmentSearchRequest: Sendable {
     var crop: Data
     /// Text read on-device for structured product-code verification.
     var detectedText: [String]
+    var brand: String = ""
 }
 
 /// How sure FitMix is that a listing is the garment the user tapped.
@@ -48,13 +49,16 @@ nonisolated struct RetailerListing: Sendable, Equatable {
     /// Development data, not a real listing.
     var isFixture: Bool
     var visualScore: Int? = nil
+    var bestMatch = false
+    /// The product photo the backend compared with the garment, as JPEG. Shown without asking the store again.
+    var thumbnail: Data? = nil
 }
 
 nonisolated enum RetailerSearchOutcome: Sendable, Equatable {
     case matches([RetailerListing])
     /// The provider answered, but nothing credible in this category.
     case noMatch
-    case outfit(searchID: String, listings: [RetailerListing])
+    case outfit(searchID: String, listings: [RetailerListing], description: String? = nil, garmentLabel: String? = nil)
 }
 
 nonisolated enum RetailerSearchError: LocalizedError, Equatable {
@@ -97,7 +101,7 @@ extension RetailerSearching {
 }
 
 enum RetailerSearchers {
-    /// The search Studio uses: OpenAI and live storefronts through the FitMix backend, in Debug and Release.
+    /// The search Studio uses: OpenAI web search through the FitMix backend, in Debug and Release.
     /// Debug builds can opt in to clearly labeled fixtures instead with FM_DEBUG_MATCH_FIXTURE=match|nomatch|error|slow.
     static var current: RetailerSearching {
         #if DEBUG
@@ -113,6 +117,8 @@ enum RetailerSearchers {
 
 /// `POST /v1/outfit-match` on the FitMix backend.
 nonisolated struct BackendRetailerSearch: RetailerSearching {
+    /// Matches the backend cutoff, including when connected to an older FitMix server.
+    private static let minimumVisualScore = 65
     var config: BackendConfig?
     var session: URLSession = BackendRetailerSearch.makeSession()
 
@@ -140,12 +146,17 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
             var provider: String?
             var fixture: Bool?
             var visual_score: Int?
+            var best_match: Bool?
+            var variant_color: String?
+            var thumbnail: String?
         }
         var status: String
         var fixture: Bool?
         var search_id: String
         var currency: String
         var results: [Listing]
+        var description: String?
+        var garment_label: String?
     }
 
     private struct Failure: Decodable {
@@ -158,8 +169,10 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
         form.add(file: request.crop, name: "crop", fileName: "garment.jpg", type: "image/jpeg")
         form.add(value: request.category.rawValue, name: "category")
         if !request.detectedText.isEmpty { form.add(value: request.detectedText.joined(separator: ","), name: "text") }
+        if !request.brand.isEmpty { form.add(value: request.brand, name: "brand") }
         let response = try await submit(form)
-        return .outfit(searchID: response.search_id, listings: Self.listings(response))
+        return .outfit(searchID: response.search_id, listings: Self.listings(response), description: response.description,
+                       garmentLabel: response.garment_label)
     }
 
     func cheaperListings(category: GarmentCategory, searchID: String, cap: Decimal) async throws -> [RetailerListing] {
@@ -211,18 +224,33 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
     }
 
     private static func listings(_ body: Response) -> [RetailerListing] {
-        body.results.compactMap { item in
+        guard body.status == "matched" else { return [] }
+        return body.results.compactMap { item in
             guard !item.id.isEmpty, !item.title.isEmpty, !item.retailer.isEmpty,
-                  let score = item.visual_score, (0...100).contains(score),
+                  let score = item.visual_score, (minimumVisualScore...100).contains(score),
+                  // Every result is shown with its product photo: one without a photo is not a result.
                   let image = item.image_url.flatMap(URL.init(string:)), image.scheme == "https", image.host() != nil,
-                  let link = item.url.flatMap(URL.init(string:)), link.scheme == "https", link.host() != nil,
-                  let cost = item.price, cost.currency.range(of: "^[A-Z]{3}$", options: .regularExpression) != nil,
-                  let amount = Decimal(string: cost.value, locale: Locale(identifier: "en_US_POSIX")), amount > 0 else { return nil }
-            return RetailerListing(id: item.id, title: item.title, retailer: item.retailer, seller: item.seller,
-                                   imageURL: image, listingURL: link, price: amount, currency: cost.currency,
+                  let link = item.url.flatMap(URL.init(string:)), link.scheme == "https", link.host() != nil else { return nil }
+            // A page found on the web may not state a price. One that does must state a usable one.
+            var amount: Decimal?
+            if let cost = item.price {
+                guard cost.currency.range(of: "^[A-Z]{3}$", options: .regularExpression) != nil,
+                      let value = Decimal(string: cost.value, locale: Locale(identifier: "en_US_POSIX")), value > 0 else { return nil }
+                amount = value
+            }
+            let color = item.variant_color?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = if let color, !color.isEmpty, !item.title.localizedCaseInsensitiveContains(color) {
+                "\(item.title) · \(color)"
+            } else {
+                item.title
+            }
+            return RetailerListing(id: item.id, title: title, retailer: item.retailer, seller: item.seller,
+                                   imageURL: image, listingURL: link, price: amount, currency: item.price?.currency,
                                    tier: MatchTier(rawValue: item.match) ?? .similar,
                                    brand: item.brand, evidence: item.evidence ?? [], provider: item.provider ?? "",
-                                   isFixture: item.fixture ?? body.fixture ?? false, visualScore: score)
+                                   isFixture: item.fixture ?? body.fixture ?? false, visualScore: score,
+                                   bestMatch: item.best_match ?? false,
+                                   thumbnail: item.thumbnail.flatMap { Data(base64Encoded: $0) })
         }
     }
 }
@@ -232,10 +260,10 @@ nonisolated struct BackendRetailerSearch: RetailerSearching {
 nonisolated enum GarmentSearchInput {
     /// Downscales the crop to JPEG (no metadata) and reads its clues, on-device.
     @concurrent
-    static func make(category: GarmentCategory, crop: CGImage) async -> GarmentSearchRequest? {
+    static func make(category: GarmentCategory, crop: CGImage, brand: String = "") async -> GarmentSearchRequest? {
         guard let jpeg = jpegData(crop, maxDimension: 640) else { return nil }
         return GarmentSearchRequest(category: category, crop: jpeg,
-                                    detectedText: GarmentClues.words(in: crop))
+                                    detectedText: GarmentClues.words(in: crop), brand: brand)
     }
 
     static func jpegData(_ image: CGImage, maxDimension: Int) -> Data? {
@@ -251,6 +279,21 @@ nonisolated enum GarmentSearchInput {
         // No metadata is written: no location, no device details.
         CGImageDestinationAddImage(destination, scaled, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+}
+
+/// Product photos that arrived with the search results, by the address the store serves them from. A card
+/// shows the photo from here first, so a store that is slow or refuses the phone can't leave a card blank.
+@MainActor
+enum ListingThumbnails {
+    private static var images: [URL: UIImage] = [:]
+
+    static func image(for url: URL) -> UIImage? { images[url] }
+
+    static func store(_ data: Data?, for url: URL?) {
+        guard let data, let url, let image = UIImage(data: data) else { return }
+        if images.count >= 120 { images.removeAll() }  // A few searches' worth. Older ones reload from the store.
+        images[url] = image
     }
 }
 

@@ -20,6 +20,7 @@ struct WardrobeDetailView: View {
     @State private var activity: Action?
     @State private var failure: Failure?
     @State private var fieldsInitialized = false
+    @State private var editDetails = false
 
     private enum Action: Equatable {
         case save, delete, tryOn
@@ -47,46 +48,62 @@ struct WardrobeDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                WardrobeRemotePhoto(path: (showCleaned ? item.cleanedPath : nil) ?? item.originalPath,
-                                    repository: store.repository, height: 260)
+                FMPageHeading(title: item.title, detail: item.category.title)
+                GeometryReader { box in
+                    WardrobeRemotePhoto(path: (showCleaned ? item.cleanedPath : nil) ?? item.originalPath,
+                                        repository: store.repository, height: box.size.height)
+                        .accessibilityLabel(showCleaned ? "Polished garment photo" : "Original garment photo")
+                }
+                .containerRelativeFrame(.vertical) { height, _ in min(420, max(260, height * 0.64)) }
                 if item.cleanedPath != nil {
                     Picker("Photo version", selection: $showCleaned) {
                         Text("Original").tag(false)
-                        Text("Cleaned").tag(true)
+                        Text("Polished").tag(true)
                     }
                     .pickerStyle(.segmented)
                 }
-                WardrobeFields(name: $name, category: $category)
                 if let activity { ProgressView(activity.progress).frame(maxWidth: .infinity) }
                 if let failure {
                     WardrobeRetry(message: failure.message) { await perform(failure.action) }
                 }
-                if edited {
-                    Button("Save Changes") { Task { await perform(.save) } }.buttonStyle(FMFilledButtonStyle())
+                DisclosureGroup("Edit Name and Category", isExpanded: $editDetails) {
+                    WardrobeFields(name: $name, category: $category)
+                        .padding(.top, 10)
+                    if edited {
+                        Button("Save Changes") { Task { await perform(.save) } }
+                            .buttonStyle(FMOutlineButtonStyle()).padding(.top, 8)
+                    }
                 }
-                Button(item.category == .accessory ? "Try On in Studio" : "Add to Outfit", systemImage: "tshirt") {
-                    Task { await perform(.tryOn) }
-                }
-                    .buttonStyle(FMFilledButtonStyle())
-                    .disabled(edited)
+                .font(.subheadline.weight(.semibold))
+                .padding(14)
+                .background(.white, in: RoundedRectangle(cornerRadius: 14))
                 Button("Replace Photo", systemImage: "camera") { replace = true }
-                    .buttonStyle(FMOutlineButtonStyle())
-                    .disabled(edited)
-                Button("Delete Item", systemImage: "trash", role: .destructive) { confirmDelete = true }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .buttonStyle(FMOutlineButtonStyle()).disabled(edited)
             }
             .padding(20)
             .disabled(activity != nil)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            FMActionShelf {
+                Button("Try On", systemImage: "person.crop.rectangle") { Task { await perform(.tryOn) } }
+                    .buttonStyle(FMFilledButtonStyle()).disabled(edited || activity != nil)
+            }
+        }
         .background(Color.wardrobeBackground)
-        .navigationTitle(item.title)
+        .navigationTitle("Garment")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { if !fieldsInitialized { resetFields() } }
         .interactiveDismissDisabled(activity != nil)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { dismiss() }.disabled(activity != nil)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu("Garment Options", systemImage: "ellipsis") {
+                    Button("Replace Photo", systemImage: "camera") { replace = true }.disabled(edited)
+                    Button("Delete Item", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                }
+                .disabled(activity != nil)
             }
         }
         .sheet(isPresented: $replace) {

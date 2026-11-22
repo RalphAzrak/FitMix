@@ -12,6 +12,7 @@ extension Color {
     // Surfaces
     /// Page background.
     static let fmBackground = Color(hex: 0xFFFFFF)
+    static let fmCanvas = Color(hex: 0xFAF8F4)
     /// Cards and tiles that sit on the page.
     static let fmCard = Color(hex: 0xF5F6F8)
     /// A tile inside a card.
@@ -47,6 +48,41 @@ extension Color {
                   green: Double((hex >> 8) & 0xFF) / 255,
                   blue: Double(hex & 0xFF) / 255,
                   opacity: opacity)
+    }
+}
+
+struct FMPageHeading: View {
+    let title: String
+    var detail: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.fmDisplay(34, relativeTo: .largeTitle))
+                .foregroundStyle(Color.fmInk)
+                .accessibilityAddTraits(.isHeader)
+            if let detail {
+                Text(detail).font(.subheadline).foregroundStyle(Color.fmSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct FMActionShelf<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background {
+                Color.fmCanvas.overlay(alignment: .top) {
+                    Rectangle().fill(Color.fmHairline).frame(height: 1)
+                }
+                .ignoresSafeArea(edges: .bottom)
+            }
     }
 }
 
@@ -199,9 +235,11 @@ struct FMFilledButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .semibold))
+            .font(.headline)
             .foregroundStyle(.white)
             .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, minHeight: 54)
             .background(.fmPrimaryGradient, in: Capsule())
             .shadow(color: Color.fmCobalt.opacity(isEnabled ? 0.3 : 0), radius: 12, y: 6)
@@ -217,9 +255,11 @@ struct FMOutlineButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .semibold))
+            .font(.headline)
             .foregroundStyle(Color.fmInk)
             .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, minHeight: 54)
             .background(Color.fmFill.opacity(configuration.isPressed ? 0.6 : 1), in: Capsule())
             .overlay(Capsule().strokeBorder(Color.fmHairline))

@@ -1,7 +1,8 @@
 import Foundation
 import Observation
+import UIKit
 
-nonisolated enum AvatarOutfitSlot: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum AvatarOutfitSlot: String, CaseIterable, Identifiable, Codable, Sendable {
     case tshirt, pants, shoes, outerwear
 
     var id: String { rawValue }
@@ -29,11 +30,13 @@ nonisolated enum AvatarOutfitSlot: String, CaseIterable, Identifiable, Sendable 
 final class AvatarOutfitSelection {
     private(set) var ownerID: UUID?
     private(set) var itemIDs: [AvatarOutfitSlot: UUID] = [:]
+    @ObservationIgnored private var previews: [(key: String, image: UIImage)] = []
 
     func activate(ownerID: UUID?) {
         guard self.ownerID != ownerID else { return }
         self.ownerID = ownerID
         itemIDs = [:]
+        previews.removeAll()
         guard let key = storageKey,
               let saved = UserDefaults.standard.dictionary(forKey: key) as? [String: String] else { return }
         for (slot, itemID) in saved {
@@ -57,9 +60,28 @@ final class AvatarOutfitSelection {
         persist()
     }
 
+    func restore(_ pieces: [SavedLook.Piece]) {
+        guard ownerID != nil else { return }
+        itemIDs = [:]
+        for piece in pieces {
+            if let slot = piece.slot, let id = piece.itemID { itemIDs[slot] = id }
+        }
+        persist()
+    }
+
     func item(in slot: AvatarOutfitSlot, from wardrobe: [WardrobeItem]) -> WardrobeItem? {
         guard let id = itemIDs[slot] else { return nil }
         return wardrobe.first { $0.id == id && $0.ownerID == ownerID && $0.category == slot.category }
+    }
+
+    func preview(for key: String) -> UIImage? {
+        previews.first { $0.key == key }?.image
+    }
+
+    func rememberPreview(_ image: UIImage, key: String) {
+        previews.removeAll { $0.key == key }
+        previews.append((key, image))
+        if previews.count > 3 { previews.removeFirst() }
     }
 
     private var storageKey: String? { ownerID.map { "avatar-outfit.\($0.uuidString)" } }

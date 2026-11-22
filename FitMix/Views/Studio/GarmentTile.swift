@@ -27,11 +27,18 @@ struct GarmentTile: View {
                     .scaledToFit()
                     .padding(8)
             case .remote(let url):
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image): image.resizable().scaledToFit().padding(8)
-                    case .failure: fallback(text: "Image unavailable")
-                    default: ProgressView()
+                if let photo = ListingThumbnails.image(for: url) {
+                    Image(uiImage: photo)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(8)
+                } else {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image): image.resizable().scaledToFit().padding(8)
+                        case .failure: fallback(text: "Image unavailable")
+                        default: ProgressView()
+                        }
                     }
                 }
             case .none:

@@ -1,4 +1,5 @@
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import UIKit
 import Vision
 
@@ -10,11 +11,34 @@ nonisolated enum WardrobePhotoProcessor {
 
     private static let context = CIContext()
     private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    private static let canvas = CGRect(x: 0, y: 0, width: 1280, height: 1600)
+
+    static let fullPhoto = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     @concurrent
-    static func prepare(_ image: UIImage, category: WardrobeCategory) async -> Preview {
+    static func prepare(_ image: UIImage, category: WardrobeCategory, crop: CGRect = fullPhoto) async -> Preview {
         let original = image.normalized(maxDimension: 2048)
-        return Preview(original: original, cleaned: clean(original, category: category))
+        return Preview(original: original, cleaned: cropped(original, to: crop).flatMap { clean($0, category: category) })
+    }
+
+    @concurrent
+    static func catalogJPEG(_ image: UIImage, crop: CGRect) async -> Data? {
+        if crop == fullPhoto {
+            return image.normalized(maxDimension: 1024).jpegData(compressionQuality: 0.82)
+        }
+        return cropped(image.normalized(maxDimension: 2048), to: crop)?
+            .normalized(maxDimension: 1024).jpegData(compressionQuality: 0.82)
+    }
+
+    private static func cropped(_ image: UIImage, to crop: CGRect) -> UIImage? {
+        guard crop != fullPhoto else { return image }
+        guard let source = image.cgImage else { return nil }
+        let width = CGFloat(source.width), height = CGFloat(source.height)
+        let pixels = CGRect(x: crop.minX * width, y: crop.minY * height, width: crop.width * width,
+                            height: crop.height * height).integral
+            .intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        guard pixels.width >= 1, pixels.height >= 1, let selection = source.cropping(to: pixels) else { return nil }
+        return UIImage(cgImage: selection)
     }
 
     @concurrent
@@ -95,24 +119,55 @@ nonisolated enum WardrobePhotoProcessor {
         let extent = input.extent
         let subject = CGRect(x: normalizedBounds.minX * extent.width, y: normalizedBounds.minY * extent.height,
                              width: normalizedBounds.width * extent.width, height: normalizedBounds.height * extent.height)
-        let padding = max(subject.width, subject.height) * 0.12
-        let frame = subject.insetBy(dx: -padding, dy: -padding).integral
-        let offset = CGAffineTransform(translationX: -frame.minX, y: -frame.minY)
-        let output = CGRect(origin: .zero, size: frame.size)
+        guard subject.width > 0, subject.height > 0, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
 
-        // Keep garment highlights a little below the white canvas so white fabrics still have edges.
-        let corrected = input
+        // Fit the full silhouette onto a consistent product-photo canvas, with a little more space above it.
+        let scale = min(canvas.width * 0.82 / subject.width, canvas.height * 0.76 / subject.height)
+        let placement = CGAffineTransform(a: scale, b: 0, c: 0, d: scale,
+                                         tx: canvas.midX - subject.midX * scale,
+                                         ty: canvas.height * 0.47 - subject.midY * scale)
+        let matte = mask.transformed(by: CGAffineTransform(scaleX: extent.width / mask.extent.width,
+                                                           y: extent.height / mask.extent.height))
+            .transformed(by: placement)
+            .cropped(to: canvas)
+
+        let garment = input
             .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 0.08])
-            .applyingFilter("CIHighlightShadowAdjust", parameters: ["inputHighlightAmount": 0.86])
-            .applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.22])
-        let alignedMask = mask.transformed(by: CGAffineTransform(scaleX: extent.width / mask.extent.width,
-                                                                 y: extent.height / mask.extent.height))
-            .transformed(by: offset)
-        let white = CIImage(color: .white).cropped(to: output)
-        let result = corrected.transformed(by: offset).applyingFilter("CIBlendWithMask", parameters: [
-            kCIInputBackgroundImageKey: white, kCIInputMaskImageKey: alignedMask
-        ])
-        guard let rendered = context.createCGImage(result, from: output, format: .RGBA8, colorSpace: colorSpace) else { return nil }
-        return UIImage(cgImage: rendered).normalized(maxDimension: 1600)
+            .applyingFilter("CIHighlightShadowAdjust", parameters: ["inputHighlightAmount": 0.92,
+                                                                  "inputShadowAmount": 0.06])
+            .applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.24])
+            .transformed(by: placement)
+
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = garment
+        blend.backgroundImage = studioBackdrop(shapedBy: matte)
+        blend.maskImage = matte
+        guard let result = blend.outputImage,
+              let rendered = context.createCGImage(result, from: canvas, format: .RGBA8, colorSpace: colorSpace) else {
+            return nil
+        }
+        return UIImage(cgImage: rendered)
+    }
+
+    private static func studioBackdrop(shapedBy matte: CIImage) -> CIImage {
+        let light = CIColor(red: 0.91, green: 0.91, blue: 0.90)
+        let gradient = CIFilter.radialGradient()
+        gradient.center = CGPoint(x: canvas.width * 0.72, y: canvas.height * 0.86)
+        gradient.radius0 = 60
+        gradient.radius1 = 1660
+        gradient.color0 = light
+        gradient.color1 = CIColor(red: 0.84, green: 0.84, blue: 0.83)
+        let background = (gradient.outputImage ?? CIImage(color: light)).cropped(to: canvas)
+
+        // Cast a diffuse shadow down and to the left, using the actual garment silhouette.
+        let blur = CIFilter.gaussianBlur()
+        blur.inputImage = matte.transformed(by: CGAffineTransform(translationX: -30, y: -36))
+        blur.radius = 23
+
+        let shadow = CIFilter.blendWithMask()
+        shadow.inputImage = CIImage(color: CIColor(red: 0.22, green: 0.21, blue: 0.20, alpha: 0.26)).cropped(to: canvas)
+        shadow.backgroundImage = background
+        shadow.maskImage = blur.outputImage?.cropped(to: canvas)
+        return shadow.outputImage ?? background
     }
 }

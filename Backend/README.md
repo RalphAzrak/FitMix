@@ -9,8 +9,9 @@ variables. They are never in the app or in Git.
   The server returns one styled image. See [Avatar outfit previews](#avatar-outfit-previews).
 - **3D avatars:** the app sends the accepted portrait. The server builds a rotatable model on this computer.
   See [3D avatars](#3d-avatars).
-- **Outfit match:** the app sends one crop per garment. OpenAI invokes image-based discovery and compares
-  the crop with verified retailer photos. See [Studio outfit matching](#studio-outfit-matching).
+- **Outfit match:** the app sends one crop per garment. OpenAI searches the web for it from the photo and a
+  description, and compares the crop with the product photos on the pages found.
+  See [Studio outfit matching](#studio-outfit-matching).
 
 ## Run it on your Mac
 
@@ -34,7 +35,7 @@ calling OpenAI.
 |---|---|
 | `body_photo` | Required. JPEG, PNG or WebP, up to 8 MB. Sent to OpenAI first, as the main reference. |
 | `selfie` | Optional. Same formats. Sent second, for facial detail. |
-| `height_cm`, `weight_kg` | Required. Written into the instruction as supporting cues for build. |
+| `height_cm`, `weight_kg` | Required. Guide the portrait's apparent stature and build, alongside the person's proportions in the full-body photo. |
 
 Header: `Authorization: Bearer <FITMIX_APP_TOKEN>` when a token is set.
 
@@ -121,34 +122,54 @@ codes are. When one provider fails, the others' results are still returned.
 
 ## Studio outfit matching
 
-Add `OPENAI_API_KEY` and `TRENDTRACK_API_KEY` to this worktree's ignored `Backend/.env`.
-`OPENAI_MATCH_MODEL` defaults to `gpt-4.1-mini`. Start the server with `./run.sh`.
-Check `/health` for `outfit_match.ready` and `outfit_match.discovery`. Readiness indicates that
-both keys are configured. Trendtrack requires API access to its image search endpoint.
+Only `OPENAI_API_KEY` is needed, in this worktree's ignored `Backend/.env`. `OPENAI_MATCH_MODEL` defaults to
+`gpt-4.1-mini`. Start the server with `./run.sh` and check `/health`: `outfit_match.ready` is true once the key
+is set, and `outfit_match.discovery` is `openai_web_search`.
 
-FitMix sends one garment JPEG per garment to `POST /v1/outfit-match`. OpenAI invokes the
-backend's `discover_products_by_image` function. That function sends the unchanged crop as
-the multipart image to [Trendtrack product image search](https://docs.trendtrack.io/en/docs/guides/image-search).
-Discovery covers Trendtrack's indexed stores. FitMix has no store allowlist. It resolves each
-hit to its retailer page, requires a structured in-stock offer with a price and currency,
-and downloads the retailer's product photo. The OpenAI ranking call sees only the crop,
-product photos and category. It compares color (35), cut (30), pattern (20) and details (15).
-A visible product code must match a retailer SKU, MPN or GTIN for an **Exact match**.
-Otherwise Studio shows a credible **Similar match**, or no result if verification fails.
+FitMix sends the selected crop and on-device OCR hints to `POST /v1/outfit-match`. The backend then:
 
-The app shows the merchant's currency. The existing outfit budget uses CAD listings only
-and compares item prices before tax and shipping. Budget follow-ups page the same image
-search without re-uploading to Trendtrack. The backend retains the original crop in memory
-for up to 10 minutes when more pages are available, with a 16 MiB server-wide cap. Crops
-are never written to disk. Each initial result or budget fetch can examine at most two
-pages of 12 hits. Trendtrack charges API credits per returned row and for detail lookups
-when needed.
+1. **Searches the web from the crop and its description**, with OpenAI's
+   [web search tool](https://developers.openai.com/api/docs/guides/tools-web-search). The text query
+   keeps the specific garment type, closure, color and pattern together. A shorter query is used when
+   no result qualifies. FitMix checks proposed product links against the search
+   tool's returned sources when available.
+2. **Reads each page it found**, as `FitMixListingReader/1.0`, at most two pages per store and each page once.
+   A page gives a listing when it has a structured in-stock offer, or failing that its own title and photo
+   (a product record or `og:` tags). The price is optional: it is shown when the page states one. Pages that
+   say sold out, that aren't about one product, or that refuse the reader are dropped.
+3. **Ranks by photo.** OpenAI compares each page's product photo with the crop: distinctive details first,
+   then cut, pattern and color. A result needs a score of at least 65 and no clear conflict. A visible
+   partial zipper needs matching cut evidence, and a clear color needs support in the product photo.
+   An explicit `brand` filter requires
+   that brand on the page.
+4. **Sends the photos along.** Every result is a page whose product photo was read and compared, and the
+   first ten carry that photo in the answer (`thumbnail`, base64 JPEG). The app shows it without asking the
+   store again, so a card is never blank. A page that couldn't be read has no photo and is not a result.
+
+The multipart form accepts `crop`, `category`, optional `text` (OCR) and optional `brand`.
+`mode` defaults to `combined`. Use `photo` for the photo search only or `description` for
+the description search and scoring only. Description mode derives its text from the same crop, then
+ranks product photos against the text. The response returns `description` and an optional
+`garment_label` from the crop alongside ranked
+results and marks the top result `best_match` when the evidence supports it. A result's `price` is `null`
+when its page doesn't state one.
+
+What to expect:
+
+- Many large retailers refuse automated readers. Their pages are found and then dropped, because a result
+  without a photo isn't shown. Common garments can end with few results, or none.
+- The same garment can give somewhat different results from one search to the next.
+- A search takes about 10 to 15 seconds and makes five OpenAI calls: three web searches, a description and
+  a ranking.
+- The app shows the merchant's currency. The outfit budget uses CAD prices only, so a listing with no stated
+  price can't be part of a budget. A budget follow-up finds nothing more: a web search has no second page.
+- Crops are held in memory for the length of the request and never written to disk.
 
 For an iPhone test, run the backend on the same Wi-Fi, then build this worktree in Xcode.
 Disable `FM_DEBUG_MATCH_FIXTURE` and camera replay settings. Open **Scan Fits** and tap a
-garment target. In **Layers & Garments**, check the shop link, photo, currency and visual
-score. Try an alternative, open **Shop This Look**, and set a CAD budget. The Xcode console
-category `OutfitMatching` shows first-card and settled timings.
+garment target. In **Layers & Garments**, check the shop link, photo and match label. Try **Refine Search**,
+adjust the crop or set and clear a brand. Try an alternative. The Xcode console category `OutfitMatching`
+shows first-card and settled timings.
 
 ## Legacy product search: `POST /v1/lens-search`
 
@@ -209,7 +230,9 @@ still works when `FITMIX_VISUAL_PROVIDERS` isn't set.
 
 The server keeps each photo in memory only while its request runs. It writes nothing to disk and logs only the
 number and size of the pictures, how long the request took, and whether it worked. OpenAI receives the avatar
-photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For retailer
+photos and the instruction; how long OpenAI keeps them is governed by OpenAI's own API data policy. For Studio
+outfit matching, OpenAI receives the garment crop, and its web search runs queries OpenAI writes from it. The
+stores whose pages are then read get an ordinary page request and never the photo. For the older retailer
 search, each enabled provider receives only the garment crop; that provider's terms govern what it does with it.
 Crops published for Scrappa live only in this server's memory, under an unguessable token, for at most 90 seconds.
 

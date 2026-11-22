@@ -20,6 +20,7 @@ import SwiftUI
     var flow: SetupStep?
     var authPreview: AuthView.Mode?
     var showOutfit = false
+    var addClothing = false
     /// The checkout flow (Cart → Order Review → Demo Payment → Order Summary in demo mode), full screen. Open it with `openCart`.
     var showCart = false
     /// What the checkout flow opens on, below the cart (e.g. a saved order's summary).
@@ -32,6 +33,10 @@ import SwiftUI
     var setupAfterAuth = false
 
     func openCamera() { capture = .camera }
+    func openAddClothing() {
+        tab = .closet
+        addClothing = true
+    }
 
     /// Opens the checkout flow, full screen. From Shop This Look (a sheet), that sheet closes first, so
     /// the cart and the rest of checkout take the whole screen rather than stacking on the sheet.
@@ -62,6 +67,7 @@ struct AppShell: View {
     @Environment(CartStore.self) private var cart
     @Environment(DemoOrderStore.self) private var orders
     @State private var router = AppRouter()
+    @State private var wardrobeVisited = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -69,8 +75,8 @@ struct AppShell: View {
                 // Home and Studio stay alive in the background so switching tabs keeps their place.
                 layer(.home) { HomeView() }
                 layer(.studio) { StudioView(openCamera: router.openCamera) }
-                if router.tab == .closet { WardrobeView() }
-                if router.tab == .saved { SavedView() }
+                if router.tab == .closet || wardrobeVisited { layer(.closet) { WardrobeView() } }
+                layer(.saved) { SavedLooksView() }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             FMTabBar(selection: $router.tab, openCamera: router.openCamera)
@@ -79,6 +85,9 @@ struct AppShell: View {
         .ignoresSafeArea(.keyboard)
         .environment(router)
         .tint(Color.fmCobalt)
+        .onChange(of: router.tab) { _, tab in
+            if tab == .closet { wardrobeVisited = true }
+        }
         .fullScreenCover(isPresented: $router.showOutfit) { OutfitBuilderView() }
         .fullScreenCover(item: $router.flow) { SetupFlowView(startAt: $0) }
         .fullScreenCover(item: $router.capture) { route in
@@ -122,7 +131,7 @@ struct AppShell: View {
             }
         }) { mode in
             AccountFlowView(mode: mode) { _ in
-                router.setupAfterAuth = store.profile.avatar == nil && store.profile.candidate == nil
+                router.setupAfterAuth = store.profile.avatar == nil && !store.profile.hasCurrentCandidate
                 router.authPreview = nil
             }
         }
@@ -203,8 +212,7 @@ struct AppShell: View {
                             }
                         }
                     }
-                    // Checkout proof of concept: select each scripted garment in turn (a new selection cancels
-                    // a search still running), wait for its match, then open Shop This Look.
+                    // Open Shop This Look after the scripted garments have settled.
                     if let script = DebugCheckoutScript.current {
                         Task {
                             for category in script.order {
@@ -267,7 +275,7 @@ struct AppShell: View {
 
 // MARK: - Tab bar
 
-/// Home · Studio · Camera · Wardrobe · Saved. Camera is a raised cobalt button that opens the capture
+/// Home · Wardrobe · Scan · Studio · Looks. Scan opens the capture
 /// flow over the current tab; the others switch tabs.
 struct FMTabBar: View {
     @Binding var selection: AppRouter.Tab
@@ -276,11 +284,10 @@ struct FMTabBar: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 0) {
             item(.home, title: "Home", icon: "house", selectedIcon: "house.fill")
-            item(.studio, title: "Studio", icon: "tshirt", selectedIcon: "tshirt.fill")
-            // Center slot, so the raised button sits in the middle of the bar.
-            cameraButton
             item(.closet, title: "Wardrobe", icon: "square.grid.2x2", selectedIcon: "square.grid.2x2.fill")
-            item(.saved, title: "Saved", icon: "bookmark", selectedIcon: "bookmark.fill")
+            cameraButton
+            item(.studio, title: "Studio", icon: "person.crop.rectangle", selectedIcon: "person.crop.rectangle.fill")
+            item(.saved, title: "Looks", icon: "bookmark", selectedIcon: "bookmark.fill")
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
@@ -299,10 +306,11 @@ struct FMTabBar: View {
         } label: {
             VStack(spacing: 4) {
                 Image(systemName: selected ? selectedIcon : icon)
-                    .font(.system(size: 21, weight: .medium))
-                    .frame(height: 26)
+                    .font(.system(size: 19, weight: .medium))
+                    .frame(width: 47, height: 27)
+                    .background(selected ? Color.fmCobalt.opacity(0.11) : .clear, in: Capsule())
                 Text(title)
-                    .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                    .font(.system(size: 12, weight: selected ? .bold : .medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
@@ -311,7 +319,7 @@ struct FMTabBar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(title)
+        .accessibilityLabel(tab == .saved ? "Saved Looks" : title)
         .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
         .accessibilityIdentifier("tab-\(tab.rawValue)")
     }
@@ -319,91 +327,21 @@ struct FMTabBar: View {
     private var cameraButton: some View {
         Button(action: openCamera) {
             VStack(spacing: 4) {
-                Image(systemName: "camera.fill")
-                    .font(.system(size: 22, weight: .semibold))
+                Image(systemName: "camera.viewfinder")
+                    .font(.system(size: 19, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 60, height: 60)
-                    .background(.fmPrimaryGradient, in: Circle())
-                    .overlay(Circle().strokeBorder(.white, lineWidth: 4))
-                    .shadow(color: Color.fmCobalt.opacity(0.35), radius: 10, y: 4)
-                    .padding(.top, -30)
-                    .frame(height: 26, alignment: .bottom)
-                Text("Camera")
-                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 47, height: 27)
+                    .background(.fmPrimaryGradient, in: Capsule())
+                Text("Scan")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.fmSecondary)
             }
             .frame(maxWidth: .infinity, minHeight: 50)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Camera")
+        .accessibilityLabel("Scan Outfit")
         .accessibilityHint("Scan an outfit")
         .accessibilityIdentifier("tab-camera")
-    }
-}
-
-// MARK: - Saved
-
-/// Saved: looks the user keeps. Saving isn't built yet, so it says so.
-struct SavedView: View {
-    var body: some View {
-        TabPlaceholder(title: "Saved", caption: "Looks", icon: "bookmark",
-                       heading: "Saved looks are coming soon",
-                       message: "You'll be able to save looks from Studio and come back to them here. Your current look stays in Studio until you scan a new one.",
-                       actionTitle: "Open Studio", actionIcon: "tshirt") { $0.tab = .studio }
-    }
-}
-
-private struct TabPlaceholder: View {
-    var title: String
-    var caption: String
-    var icon: String
-    var heading: String
-    var message: String
-    var actionTitle: String
-    var actionIcon: String
-    var action: (AppRouter) -> Void
-
-    @Environment(AppRouter.self) private var router
-    @Environment(CartStore.self) private var cart
-
-    var body: some View {
-        VStack(spacing: 0) {
-            FMTopBar { FMBagButton(count: cart.count) { router.openCart() } }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    FMTitleLine(title: title, caption: caption)
-                    VStack(spacing: 14) {
-                        Image(systemName: icon)
-                            .font(.system(size: 30, weight: .medium))
-                            .foregroundStyle(Color.fmCobalt)
-                            .frame(width: 72, height: 72)
-                            .background(.white, in: Circle())
-                            .fmFloatingShadow()
-                            .accessibilityHidden(true)
-                        Text(heading)
-                            .font(.fmDisplay(24, relativeTo: .title2))
-                            .foregroundStyle(Color.fmInk)
-                            .multilineTextAlignment(.center)
-                        Text(message)
-                            .font(.system(size: 15))
-                            .foregroundStyle(Color.fmSecondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button { action(router) } label: { Label(actionTitle, systemImage: actionIcon) }
-                            .buttonStyle(FMFilledButtonStyle())
-                            .padding(.top, 6)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 32)
-                    .frame(maxWidth: .infinity)
-                    .fmHeroFrame()
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 28)
-            }
-        }
-        .background(Color.fmBackground)
     }
 }

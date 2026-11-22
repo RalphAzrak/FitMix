@@ -52,6 +52,10 @@ struct AccountUser: Equatable {
         return email.map { String($0.prefix { $0 != "@" }) } ?? "FitMix member"
     }
 
+    var firstName: String? {
+        fullName?.split(whereSeparator: \.isWhitespace).first.map(String.init)
+    }
+
     /// Up to two initials for the account badge, e.g. "AM" for "Alex Morgan".
     var initials: String {
         if let name = fullName?.trimmingCharacters(in: .whitespaces), !name.isEmpty {

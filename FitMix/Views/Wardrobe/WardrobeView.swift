@@ -1,17 +1,15 @@
 import SwiftUI
 
 extension Color {
-    static let wardrobeBackground = Color(hex: 0xFAF8F4)
+    static let wardrobeBackground = Color.fmCanvas
 }
 
 struct WardrobeView: View {
     @Environment(AuthSession.self) private var auth
     @Environment(AppRouter.self) private var router
-    @Environment(CartStore.self) private var cart
 
     var body: some View {
         VStack(spacing: 0) {
-            FMTopBar { FMBagButton(count: cart.count) { router.showCart = true } }
             if let user = auth.user {
                 WardrobeCollection(store: WardrobeStore(client: auth.client, ownerID: user.id))
                     .id(user.id)
@@ -20,7 +18,7 @@ struct WardrobeView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
-                        FMTitleLine(title: "Wardrobe", caption: "Your clothes")
+                        FMPageHeading(title: "Wardrobe")
                         WardrobeMessage(icon: "tshirt", title: "Sign in to your wardrobe",
                                         message: "Save your clothes and find them again when you return.")
                         Button("Sign In") { router.openAccount() }.buttonStyle(FMFilledButtonStyle())
@@ -30,40 +28,97 @@ struct WardrobeView: View {
             }
         }
         .background(Color.wardrobeBackground)
+        .onChange(of: router.addClothing, initial: true) { openSignInForAdd() }
+        .onChange(of: auth.state) { openSignInForAdd() }
+    }
+
+    private func openSignInForAdd() {
+        if router.addClothing, case .signedOut = auth.state {
+            router.addClothing = false
+            router.openAccount()
+        }
     }
 }
 
 private struct WardrobeCollection: View {
     @Environment(AppRouter.self) private var router
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State var store: WardrobeStore
     @State private var filter: WardrobeCategory?
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
     @State private var add = false
     @State private var selected: WardrobeItem?
     @State private var openOutfitAfterDetails = false
 
-    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-
     private var visibleItems: [WardrobeItem] {
-        guard let filter else { return store.items }
-        return store.items.filter { $0.category == filter }
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return store.items.filter { item in
+            (filter == nil || item.category == filter)
+                && (search.isEmpty || item.title.localizedStandardContains(search)
+                    || item.category.title.localizedStandardContains(search))
+        }
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            FMPageHeading(title: "Wardrobe")
+                .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 10)
+            collection
+            FMActionShelf {
+                Button("Add Clothing", systemImage: "plus") { add = true }
+                    .buttonStyle(FMFilledButtonStyle())
+                    .accessibilityIdentifier("wardrobe-add")
+            }
+        }
+        .onChange(of: router.addClothing, initial: true) {
+            guard router.addClothing else { return }
+            router.addClothing = false
+            add = true
+        }
+        .task { await store.load() }
+        .sheet(isPresented: $add, onDismiss: refresh) {
+            NavigationStack {
+                WardrobePhotoReview(store: store) { item in
+                    query = ""
+                    if filter != nil { filter = item.category }
+                }
+            }
+        }
+        .sheet(item: $selected, onDismiss: detailClosed) { item in
+            NavigationStack {
+                WardrobeDetailView(item: item, store: store) { openOutfitAfterDetails = true }
+            }
+        }
+    }
+
+    private var collection: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                FMTitleLine(title: "Wardrobe", caption: "Your clothes")
-                Button { add = true } label: {
-                    Label("Add Clothing", systemImage: "plus")
-                }
-                .buttonStyle(FMFilledButtonStyle())
-                .accessibilityIdentifier("wardrobe-add")
-                ScrollView(.horizontal) {
-                    HStack(spacing: 6) {
-                        filterChip(nil, title: "All")
-                        ForEach(WardrobeCategory.allCases) { filterChip($0, title: $0.title) }
+                if !store.items.isEmpty {
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass").accessibilityHidden(true)
+                        TextField("Find clothing", text: $query)
+                            .foregroundStyle(Color.fmInk)
+                            .focused($searchFocused)
+                            .submitLabel(.search)
+                            .onSubmit { searchFocused = false }
+                        if !query.isEmpty {
+                            Button("Clear search", systemImage: "xmark.circle.fill") { query = "" }
+                                .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                        }
                     }
+                    .padding(.leading, 13).frame(minHeight: 46)
+                    .foregroundStyle(Color.fmSecondary)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 14))
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 7) {
+                            filterChip(nil, title: "All")
+                            ForEach(WardrobeCategory.allCases) { filterChip($0, title: $0.title) }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
                 }
-                .scrollIndicators(.hidden)
                 if let loadError = store.loadError {
                     WardrobeRetry(message: loadError) { await store.load() }
                 }
@@ -73,20 +128,31 @@ private struct WardrobeCollection: View {
                 if store.loading && store.items.isEmpty {
                     ProgressView("Loading clothes…").frame(maxWidth: .infinity, minHeight: 140)
                 } else if visibleItems.isEmpty {
-                    if store.loadError == nil {
+                    if !store.items.isEmpty {
+                        WardrobeMessage(icon: "magnifyingglass", title: "No matching clothes",
+                                        message: "Try a different search or category.")
+                        Button("Clear Filters") {
+                            query = ""
+                            filter = nil
+                        }
+                        .buttonStyle(FMOutlineButtonStyle())
+                    } else if store.loadError == nil {
                         WardrobeMessage(icon: filter?.garment.symbol ?? "tshirt",
                                         title: filter == nil ? "Your wardrobe is empty" : "Nothing in this category",
                                         message: filter == nil ? "Take a photo of something you own or pick one from your library." : nil)
                     }
                 } else {
-                    LazyVGrid(columns: columns, spacing: 12) {
+                    Text(visibleItems.count == 1 ? "1 item" : "\(visibleItems.count) items")
+                        .font(.caption.weight(.medium)).foregroundStyle(Color.fmSecondary)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12),
+                                             count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 12) {
                         ForEach(visibleItems) { item in
                             Button { selected = item } label: {
                                 VStack(alignment: .leading, spacing: 6) {
                                     WardrobeRemotePhoto(path: item.thumbnailPath, repository: store.repository,
-                                                        height: 145)
+                                                        height: 160)
                                         .accessibilityHidden(true)
-                                    Text(item.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                    Text(item.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                                     Text(item.category.title).font(.caption).foregroundStyle(Color.fmSecondary)
                                 }
                                 .padding(9)
@@ -96,6 +162,7 @@ private struct WardrobeCollection: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("wardrobe-item-\(item.id.uuidString)")
                         }
                     }
                 }
@@ -104,16 +171,8 @@ private struct WardrobeCollection: View {
             .padding(.top, 8)
             .padding(.bottom, 24)
         }
-        .task { await store.load() }
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { await store.load() }
-        .sheet(isPresented: $add, onDismiss: refresh) {
-            NavigationStack { WardrobePhotoReview(store: store) }
-        }
-        .sheet(item: $selected, onDismiss: detailClosed) { item in
-            NavigationStack {
-                WardrobeDetailView(item: item, store: store) { openOutfitAfterDetails = true }
-            }
-        }
     }
 
     private func detailClosed() {

@@ -26,6 +26,12 @@ nonisolated enum WardrobeCategory: String, CaseIterable, Identifiable, Codable, 
     }
 }
 
+nonisolated struct WardrobeCatalogPhoto: Decodable, Sendable {
+    let category: WardrobeCategory?
+    let image: Data?
+    let message: String?
+}
+
 nonisolated struct WardrobeItem: Identifiable, Codable, Sendable {
     let id: UUID
     let ownerID: UUID
