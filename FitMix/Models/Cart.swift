@@ -4,8 +4,8 @@ import UIKit
 /// One line in the cart: a snapshot of a product as it was when the user added it.
 ///
 /// Only plain values are stored (no `UIImage`, no `CatalogProduct`), so the cart can be saved to
-/// disk and read back. The price is the listed price at the time it was added. A future checkout
-/// must ask the server for the current price and never charge this stored value.
+/// disk and read back. The price is the listed price at the time it was added. FitMix's checkout is a
+/// demo: it records an order on the device and never charges anything.
 nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var productID: String
@@ -26,9 +26,8 @@ nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
     /// Development/test data, not a real listing. Always labeled as such.
     var isFixture: Bool
     var addedAt: Date
-    /// The exact store variant, when the listing is a Shopify product FitMix could resolve. Lines with
-    /// one can be checked out inside FitMix; others still open at the retailer. Optional so carts saved
-    /// before checkout existed still load.
+    /// The exact store variant (size, colour, variant ID), when the listing is a Shopify product FitMix
+    /// could resolve in the size picker. Optional so carts saved before it existed still load.
     var shopify: ShopifyLine?
 
     init(id: UUID = UUID(), productID: String, name: String, brand: String? = nil, retailer: String? = nil,
@@ -62,7 +61,7 @@ nonisolated struct CartItem: Codable, Identifiable, Equatable, Sendable {
         isSameLine(productID: other.productID, size: other.size, variantID: other.shopify?.variantID)
     }
 
-    /// Which checkout this line belongs to: one per store.
+    /// Which store this line is from, for grouping the cart.
     var retailerKey: String { shopify?.storeDomain ?? retailer ?? "Other retailers" }
 }
 

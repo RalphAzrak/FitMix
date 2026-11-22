@@ -34,6 +34,7 @@ struct AppShell: View {
     @Environment(AvatarStore.self) private var store
     @Environment(StudioStore.self) private var studio
     @Environment(AuthSession.self) private var auth
+    @Environment(CartStore.self) private var cart
     @State private var router = AppRouter()
 
     var body: some View {
@@ -111,6 +112,9 @@ struct AppShell: View {
         }
         .onAppear {
             if auth.hasOpenAuthLink { showAuthLink() }
+            #if DEBUG
+            if let seed = DebugCheckoutScript.current?.seed { DemoCheckoutFixtures.seed(seed, into: cart) }
+            #endif
             switch Self.debugScreen {
             case "setup": router.flow = store.resumeStep
             case "generate": router.flow = .generate
