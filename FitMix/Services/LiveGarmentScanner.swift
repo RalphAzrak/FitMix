@@ -9,7 +9,7 @@ import QuartzCore
 // runs `LiveGarmentDetector` on at most ~8 frames a second (late frames are dropped by AVFoundation,
 // so the preview never waits), and keeps targets steady with `GarmentTracker`. Each target remembers
 // the exact frame it was last detected in. Tapping a target builds a `LiveGarmentSelection` from that
-// same frame, so the crop matches what the user tapped. Frames stay in memory on the iPhone.
+// tracked garment, looking across consecutive frames for a sharp crop. Frames stay in memory on the iPhone.
 
 /// One selectable garment in the live preview.
 nonisolated struct LiveTarget: Identifiable, Sendable, Equatable {
@@ -47,7 +47,7 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
         let category: GarmentCategory
         /// Normalized to `frame`, top-left origin.
         let bounds: CGRect
-        /// Cut from `frame` itself. The only image that may be sent for retailer search.
+        /// Cut from the clearest recent frame of this track. Only this crop goes to product search.
         let crop: CGImage
         /// Measured on the person's pixels in `frame` when it was detected. Nil if unknown.
         var color: SIMD3<Float>? = nil
@@ -80,6 +80,13 @@ nonisolated struct LiveGarmentSelection: @unchecked Sendable {
 /// Keeps one track per category so targets don't flicker. A detection must appear in two analyzed
 /// frames before it can be tapped, and disappears once it hasn't been seen for `staleAfter` seconds.
 nonisolated final class GarmentTracker {
+    struct Observation {
+        let bounds: CGRect
+        let color: SIMD3<Float>?
+        let frameID: Int
+        let time: Double
+    }
+
     struct Track {
         var smoothed: CGRect
         /// Bounds exactly as detected in `frameID`.
@@ -89,6 +96,7 @@ nonisolated final class GarmentTracker {
         var frameID: Int
         var hits: Int
         var lastSeen: Double
+        var observations: [Observation]
     }
 
     static let minHits = 2
@@ -99,6 +107,7 @@ nonisolated final class GarmentTracker {
 
     func update(_ detections: [LiveDetection], frameID: Int, time: Double) {
         for detection in detections {
+            let sample = Observation(bounds: detection.bounds, color: detection.color, frameID: frameID, time: time)
             if var track = tracks[detection.category], iou(track.smoothed, detection.bounds) > 0.15 {
                 track.smoothed = Self.blend(track.smoothed, detection.bounds, Self.smoothing)
                 track.raw = detection.bounds
@@ -106,11 +115,14 @@ nonisolated final class GarmentTracker {
                 track.frameID = frameID
                 track.hits += 1
                 track.lastSeen = time
+                track.observations = Array((track.observations + [sample]).filter {
+                    time - $0.time <= Self.staleAfter
+                }.suffix(4))
                 tracks[detection.category] = track
             } else {
                 // New, or jumped somewhere else (another person): start over without smoothing.
                 tracks[detection.category] = Track(smoothed: detection.bounds, raw: detection.bounds, color: detection.color,
-                                                   frameID: frameID, hits: 1, lastSeen: time)
+                                                   frameID: frameID, hits: 1, lastSeen: time, observations: [sample])
             }
         }
     }
@@ -236,7 +248,7 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
             }
         }
         if !holdingStill { tracker.expire(now: time) }
-        let referenced = Set(tracker.tracks.values.map(\.frameID))
+        let referenced = Set(tracker.tracks.values.flatMap { $0.observations.map(\.frameID) })
         frames = frames.filter { referenced.contains($0.key) }
         state.targets = tracker.targets
         measureTappable(result, targets: state.targets, time: time)
@@ -278,7 +290,7 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
         publish(lastState)
     }
 
-    /// The tapped garment and the others detected in the same frame, cut from that frame.
+    /// The tapped garment and other stable tracks, with the clearest recent crop for each.
     /// `completion` runs on the main queue, with nil if the target has just gone away.
     func selection(of category: GarmentCategory, completion: @escaping @MainActor @Sendable (LiveGarmentSelection?) -> Void) {
         queue.async { [self] in
@@ -288,11 +300,18 @@ nonisolated final class LiveGarmentAnalyzer: NSObject, AVCaptureVideoDataOutputS
                 return
             }
             let garments = ready
-                .filter { $0.value.frameID == track.frameID }
-                .compactMap { category, track -> LiveGarmentSelection.Garment? in
-                    LiveGarmentSelection.crop(frame.image, to: track.raw).map {
-                        LiveGarmentSelection.Garment(category: category, bounds: track.raw, crop: $0, color: track.color)
+                .compactMap { garment, current -> LiveGarmentSelection.Garment? in
+                    guard abs(current.lastSeen - track.lastSeen) <= GarmentTracker.staleAfter else { return nil }
+                    let candidates = current.observations.reversed().compactMap { sample -> (CGImage, SIMD3<Float>?, Float)? in
+                        guard abs(sample.time - track.lastSeen) <= GarmentTracker.staleAfter,
+                              let source = frames[sample.frameID],
+                              let crop = LiveGarmentSelection.crop(source.image, to: sample.bounds) else { return nil }
+                        let sharpness = ColorGrid(crop, maxWidth: 80)?.sharpness ?? 0
+                        let coverage = min(1, Float(min(crop.width, crop.height)) / 96)
+                        return (crop, sample.color, Float(sharpness) * coverage)
                     }
+                    guard let best = candidates.max(by: { $0.2 < $1.2 }) else { return nil }
+                    return LiveGarmentSelection.Garment(category: garment, bounds: current.raw, crop: best.0, color: best.1)
                 }
                 .sorted { GarmentCategory.liveScannable.firstIndex(of: $0.category) ?? 0 < GarmentCategory.liveScannable.firstIndex(of: $1.category) ?? 0 }
             let selection = garments.contains { $0.category == category }

@@ -5,14 +5,12 @@ variables. They are never in the app or in Git.
 
 - **Avatars:** the app sends the user's full-body photo, optional selfie, height and weight. The server adds the
   drawing instruction, calls OpenAI's Image Edits API, and returns the finished portrait.
-- **Retailer match:** the app sends the crop of one garment the user tapped in the live camera, with its
-  category and the clues read on the phone. The server asks each enabled visual search provider, reads the
-  listing pages, and returns ranked real listings labeled exact / brand / similar. See
-  [Retailer search setup](#retailer-search-setup).
+- **Outfit match:** the app sends one crop per garment. OpenAI describes each crop and scores real
+  Canadian storefront listings. See [Studio outfit matching](#studio-outfit-matching).
 
 ## Run it on your Mac
 
-1. `cp .env.example .env` and put your key after `OPENAI_API_KEY=`.
+1. If `.env` is missing, copy `.env.example` to `.env`. Put your key after `OPENAI_API_KEY=`.
 2. `./run.sh`
 3. Build and run FitMix from Xcode. Your iPhone must be on the same Wi-Fi as this Mac, and the first time it
    will ask to connect to devices on your local network: allow it.
@@ -71,7 +69,33 @@ are ordered by label, then provider rank and shared clues; the app reorders with
 Errors use `{"error": {"code", "message"}}`. `not_configured` and `provider_auth` aren't worth retrying; the other
 codes are. When one provider fails, the others' results are still returned.
 
-## Product search: `POST /v1/lens-search` (what the app uses)
+## Studio outfit matching
+
+Set `OPENAI_API_KEY` in this worktree's ignored `Backend/.env` and run `./run.sh`.
+`OPENAI_MATCH_MODEL` defaults to `gpt-4.1-mini` and is separate from the avatar image model.
+`/health` reports `outfit_match.ready` and the market currency. Readiness checks for a configured key.
+Use the same network for the iPhone and Mac, then build and run this worktree's Xcode project.
+Remove any `FM_DEBUG_MATCH_FIXTURE` or camera replay settings from the Xcode scheme for a live scan.
+
+Studio sends one crop per garment concurrently to `POST /v1/outfit-match`. Only that garment's image goes
+to OpenAI for analysis. OpenAI ranks a batch of real Canadian storefront candidates using color (35),
+cut (30), pattern (20), and distinctive details (15). Shopify predictive search supplies products for
+Frank And Oak, tentree, and Vessi Canada. Storefront cart context must report CAD, and the product
+must be available with a positive price, a product-page link and a photo. Exact matches additionally
+require a code visible in the crop that equals a retailer variant SKU or barcode. The score is separate
+from the identity label.
+
+The Budget button compares CAD subtotals before tax and shipping. It picks a complete outfit when
+possible, maximizing total visual score, and otherwise maximizes the number of pieces before score.
+If the initial candidates cannot fill the outfit, the app searches for lower-priced candidates using
+short-lived search IDs. These reuse in-memory garment descriptions and never reupload the crops.
+Pick an alternative in Layers & Garments to update the outfit or see a warning if it exceeds the cap.
+
+Test by scanning a jacket with at least one other garment and tapping its target. Product cards should
+arrive independently. Use the Xcode console category `OutfitMatching` for first card and outfit-settled
+timings. The backend emits per-garment timings. Scrappa and a public crop URL are unnecessary for Studio.
+
+## Legacy product search: `POST /v1/lens-search`
 
 When Studio Fit opens after a scan, the app sends each garment's crop (one request per garment, side by side) as
 multipart `crop` (JPEG, PNG or WebP, at most 2 MB) plus `category` (`jacket`, `tshirt`, `pants`, `shoes`) and the
